@@ -382,8 +382,24 @@ fn detect_rounds_for_replay(
     // Strategy: KO moment detection → fallback to average HP in last 25% if ambiguous
     let find_winner_ko = |s: usize, e: usize| -> Option<(String, f64, f64)> {
         let span = e - s;
-        // Search last 60% of the round for the frame where min(p1, p2) is lowest
         let search_start = s + (span as f64 * 0.4) as usize;
+
+        // Early check: count raw frames with HP < 0.10 in last 60%.
+        // 3+ frames near zero = unambiguous KO, overrides smoothed analysis.
+        let p1_ko_count = (search_start..e)
+            .filter(|&j| !p1_norm[j].is_nan() && p1_norm[j] < 0.10)
+            .count();
+        let p2_ko_count = (search_start..e)
+            .filter(|&j| !p2_norm[j].is_nan() && p2_norm[j] < 0.10)
+            .count();
+        if p1_ko_count >= 3 && p2_ko_count == 0 {
+            return Some(("P2".to_string(), 0.0, 1.0));
+        }
+        if p2_ko_count >= 3 && p1_ko_count == 0 {
+            return Some(("P1".to_string(), 1.0, 0.0));
+        }
+
+        // Search last 60% of the round for the frame where min(p1, p2) is lowest
         let mut best_min_hp: f64 = 2.0;
         let mut best_p1: f64 = 0.5;
         let mut best_p2: f64 = 0.5;
@@ -462,14 +478,12 @@ fn detect_rounds_for_replay(
             }
         }
 
-        // Find minimum HP each player reaches in the last 40% using RAW values.
-        // Raw p1_norm/p2_norm captures brief near-zero frames right before KO
-        // that smoothed values miss. Even 1 frame near zero is a strong KO signal.
+        // Find minimum HP each player reaches in the last 40% (smoothed)
         let mut p1_min_last = 2.0f64;
         let mut p2_min_last = 2.0f64;
         for j in search_start..e {
-            if !p1_norm[j].is_nan() { p1_min_last = p1_min_last.min(p1_norm[j]); }
-            if !p2_norm[j].is_nan() { p2_min_last = p2_min_last.min(p2_norm[j]); }
+            if !p1_smooth[j].is_nan() { p1_min_last = p1_min_last.min(p1_smooth[j]); }
+            if !p2_smooth[j].is_nan() { p2_min_last = p2_min_last.min(p2_smooth[j]); }
         }
 
         // Combine signals: whoever reached lower minimum HP is the loser

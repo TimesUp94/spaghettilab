@@ -35,7 +35,7 @@ def forward_fill(vals):
     return result
 
 
-def find_winner(p1_smooth, p2_smooth, s_idx, e_idx):
+def find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm=None, p2_norm=None):
     """Determine round winner using KO moment + fallback strategies.
 
     Handles GGS edge cases:
@@ -44,6 +44,18 @@ def find_winner(p1_smooth, p2_smooth, s_idx, e_idx):
     """
     span = e_idx - s_idx
     search_start = s_idx + int(span * 0.4)
+
+    # Early check: count raw frames with HP < 0.10 in last 60%.
+    # 3+ frames near zero = unambiguous KO.
+    if p1_norm is not None and p2_norm is not None:
+        p1_ko = sum(1 for j in range(search_start, e_idx)
+                    if not np.isnan(p1_norm[j]) and p1_norm[j] < 0.10)
+        p2_ko = sum(1 for j in range(search_start, e_idx)
+                    if not np.isnan(p2_norm[j]) and p2_norm[j] < 0.10)
+        if p1_ko >= 3 and p2_ko == 0:
+            return "P2", "[0.00, 1.00]"
+        if p2_ko >= 3 and p1_ko == 0:
+            return "P1", "[1.00, 0.00]"
 
     best_min_hp = 2.0
     best_p1 = None
@@ -78,15 +90,14 @@ def find_winner(p1_smooth, p2_smooth, s_idx, e_idx):
         # Ambiguous — use fallback strategies
         last_q_start = s_idx + int(span * 0.75)
 
-        # Min HP each player reaches in last 40% using RAW values.
-        # Raw p1_norm/p2_norm captures brief near-zero frames right before KO.
+            # Min HP each player reaches in last 40% (smoothed)
         p1_min_last = 2.0
         p2_min_last = 2.0
         for j in range(search_start, e_idx):
-            if not np.isnan(p1_norm[j]):
-                p1_min_last = min(p1_min_last, p1_norm[j])
-            if not np.isnan(p2_norm[j]):
-                p2_min_last = min(p2_min_last, p2_norm[j])
+            if not np.isnan(p1_smooth[j]):
+                p1_min_last = min(p1_min_last, p1_smooth[j])
+            if not np.isnan(p2_smooth[j]):
+                p2_min_last = min(p2_min_last, p2_smooth[j])
 
         min_signal = p2_min_last - p1_min_last  # positive = P1 went lower = P2 wins
 
@@ -227,7 +238,7 @@ def detect_rounds(rows):
             continue
 
         dur = (timestamps[e_idx] - timestamps[s_idx]) / 1000.0
-        winner, hp_info = find_winner(p1_smooth, p2_smooth, s_idx, e_idx)
+        winner, hp_info = find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm, p2_norm)
         rounds.append((dur, winner, hp_info, timestamps[s_idx] / 1000.0, s_idx, e_idx))
 
     # Post-process: recursively split rounds > 45s
@@ -243,7 +254,7 @@ def detect_rounds(rows):
         start_t = timestamps[s_idx] / 1000.0
 
         if dur <= 45 or depth > 3:
-            winner, hp_info = find_winner(p1_smooth, p2_smooth, s_idx, e_idx)
+            winner, hp_info = find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm, p2_norm)
             return [(dur, winner, hp_info, start_t)]
 
         # Strategy 1: Split at largest data gap > 1.5s (timer must confirm)
