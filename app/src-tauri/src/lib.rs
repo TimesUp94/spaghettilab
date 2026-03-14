@@ -498,38 +498,45 @@ fn detect_rounds_for_replay(
         Some((winner, report_p1, report_p2))
     };
 
-    // Helper: recursively split long rounds at gaps or HP resets
+    // Helper: recursively split long rounds at gaps or HP resets.
+    // All split candidates must be confirmed by timer ≥93 (real round start).
     fn split_long_round(
         s_idx: usize,
         e_idx: usize,
         ts: &[f64],
         p1_norm: &[f64],
         p2_norm: &[f64],
+        timer_smooth: &[Option<i32>],
         depth: usize,
     ) -> Vec<(usize, usize)> {
+        let n = timer_smooth.len();
         let dur = (ts[e_idx.min(ts.len() - 1)] - ts[s_idx]) / 1000.0;
         if dur <= 45.0 || depth > 3 {
             return vec![(s_idx, e_idx)];
         }
 
+        // Timer confirmation: smoothed timer must reach ≥93 within 90 frames
+        let timer_ok = |idx: usize| -> bool {
+            let check_end = (idx + 90).min(n);
+            (idx..check_end).any(|j| timer_smooth[j].map_or(false, |t| t >= 93))
+        };
+
         let mut best_split: Option<usize> = None;
         let mut best_score: f64 = 0.0;
 
-        // Strategy 1: largest data gap > 5s
-        // Must be long enough to exclude super flash animations (2-4s)
-        // Real between-round transitions are 8-15s+
+        // Strategy 1: largest data gap > 1.5s (timer must confirm)
         let mut last_v: Option<usize> = None;
         for i in s_idx..e_idx {
             if !p1_norm[i].is_nan() {
                 if let Some(lv) = last_v {
                     let g = (ts[i] - ts[lv]) / 1000.0;
-                    if g > 5.0 && g > best_score {
+                    if g > 1.5 && g > best_score {
                         let mid_t = ts[i] / 1000.0;
                         let start_t = ts[s_idx] / 1000.0;
                         let end_t = ts[e_idx.min(ts.len() - 1)] / 1000.0;
                         let dur1 = mid_t - start_t;
                         let dur2 = end_t - mid_t;
-                        if dur1 >= 12.0 && dur2 >= 12.0 {
+                        if dur1 >= 12.0 && dur2 >= 12.0 && timer_ok(i) {
                             best_split = Some(i);
                             best_score = g;
                         }
@@ -539,14 +546,13 @@ fn detect_rounds_for_replay(
             }
         }
 
-        // Strategy 2: HP reset within the long round (narrower window)
+        // Strategy 2: HP reset within the long round (timer must confirm)
         let local_len = e_idx - s_idx;
         if local_len > 60 {
             let half = 30usize;
             let mut min_hp_local: f64 = 1.0;
             for j in 0..local_len {
                 let gi = s_idx + j;
-                // Compute local rolling median
                 let lo = if j >= half { gi - half } else { s_idx };
                 let hi = (gi + half + 1).min(e_idx);
                 let mut p1_chunk: Vec<f64> = (lo..hi)
@@ -571,7 +577,7 @@ fn detect_rounds_for_replay(
                         let end_t = ts[e_idx.min(ts.len() - 1)] / 1000.0;
                         let dur1 = mid_t - start_t;
                         let dur2 = end_t - mid_t;
-                        if dur1 >= 12.0 && dur2 >= 12.0 {
+                        if dur1 >= 12.0 && dur2 >= 12.0 && timer_ok(gi) {
                             let balance = 1.0 - (dur1 - dur2).abs() / dur;
                             let hp_drop = 1.0 - min_hp_local;
                             let score = balance * 0.3 + hp_drop * 0.7;
@@ -587,8 +593,8 @@ fn detect_rounds_for_replay(
         }
 
         if let Some(split_idx) = best_split {
-            let mut result = split_long_round(s_idx, split_idx, ts, p1_norm, p2_norm, depth + 1);
-            result.extend(split_long_round(split_idx, e_idx, ts, p1_norm, p2_norm, depth + 1));
+            let mut result = split_long_round(s_idx, split_idx, ts, p1_norm, p2_norm, timer_smooth, depth + 1);
+            result.extend(split_long_round(split_idx, e_idx, ts, p1_norm, p2_norm, timer_smooth, depth + 1));
             return result;
         }
 
@@ -633,7 +639,7 @@ fn detect_rounds_for_replay(
     for span in &initial_spans {
         let dur_s = (ts[span.e_idx.min(n - 1)] - ts[span.s_idx]) / 1000.0;
         let sub_spans = if dur_s > 45.0 {
-            split_long_round(span.s_idx, span.e_idx, &ts, &p1_norm, &p2_norm, 0)
+            split_long_round(span.s_idx, span.e_idx, &ts, &p1_norm, &p2_norm, &timer_smooth, 0)
         } else {
             vec![(span.s_idx, span.e_idx)]
         };

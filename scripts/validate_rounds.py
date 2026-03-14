@@ -230,8 +230,14 @@ def detect_rounds(rows):
         rounds.append((dur, winner, hp_info, timestamps[s_idx] / 1000.0, s_idx, e_idx))
 
     # Post-process: recursively split rounds > 45s
+    # Timer confirmation for split candidates
+    def timer_ok(idx):
+        check_end = min(idx + 90, n)
+        return any(timer_smooth[j] is not None and timer_smooth[j] >= 93
+                   for j in range(idx, check_end))
+
     def split_long_round(s_idx, e_idx, depth=0):
-        """Try to split a long round at gaps or HP resets."""
+        """Try to split a long round at gaps or HP resets. Timer must confirm."""
         dur = (timestamps[e_idx] - timestamps[s_idx]) / 1000.0
         start_t = timestamps[s_idx] / 1000.0
 
@@ -239,8 +245,7 @@ def detect_rounds(rows):
             winner, hp_info = find_winner(p1_smooth, p2_smooth, s_idx, e_idx)
             return [(dur, winner, hp_info, start_t)]
 
-        # Strategy 1: Split at largest data gap > 5s
-        # Must be long enough to exclude super flash animations (2-4s)
+        # Strategy 1: Split at largest data gap > 1.5s (timer must confirm)
         best_split = None
         best_score = 0
         last_v = None
@@ -248,17 +253,16 @@ def detect_rounds(rows):
             if not np.isnan(p1_norm[i]):
                 if last_v is not None:
                     g = (timestamps[i] - timestamps[last_v]) / 1000.0
-                    if g > 5.0 and g > best_score:
+                    if g > 1.5 and g > best_score:
                         mid_t = timestamps[i] / 1000.0
                         dur1 = mid_t - start_t
                         dur2 = start_t + dur - mid_t
-                        if dur1 >= 12 and dur2 >= 12:
+                        if dur1 >= 12 and dur2 >= 12 and timer_ok(i):
                             best_split = i
                             best_score = g
                 last_v = i
 
-        # Strategy 2: Split at HP reset (both HP > 0.75 after one was < 0.55)
-        # Use narrower window for more precision
+        # Strategy 2: Split at HP reset (timer must confirm)
         p1_local = rolling_median(p1_norm[s_idx:e_idx], 60)
         p2_local = rolling_median(p2_norm[s_idx:e_idx], 60)
         min_hp_local = 1.0
@@ -271,10 +275,9 @@ def detect_rounds(rows):
                     mid_t = timestamps[real_idx] / 1000.0
                     dur1 = mid_t - start_t
                     dur2 = start_t + dur - mid_t
-                    if dur1 >= 12 and dur2 >= 12:
-                        # Score: prefer splits that create more balanced halves
+                    if dur1 >= 12 and dur2 >= 12 and timer_ok(real_idx):
                         balance = 1.0 - abs(dur1 - dur2) / dur
-                        hp_drop = 1.0 - min_hp_local  # deeper drop = stronger signal
+                        hp_drop = 1.0 - min_hp_local
                         score = balance * 0.3 + hp_drop * 0.7
                         if score > best_score:
                             best_split = real_idx
