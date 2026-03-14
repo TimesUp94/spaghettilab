@@ -261,6 +261,36 @@ def detect_rounds(rows):
         return any(timer_smooth[j] is not None and timer_smooth[j] >= 93
                    for j in range(idx, check_end))
 
+    # Alternative confirmation: KO evidence before gap + HP reset after.
+    # Handles wallbreak transitions where timer reads ~90 (OCR confusion with 99).
+    # Requires: 1) one player's HP was near zero before the gap (KO happened),
+    #           2) timer ≥ 90 nearby, 3) both HP reset to > 0.90 after gap.
+    def round_reset_ok(idx):
+        # Check for KO evidence before the gap (within preceding 150 frames)
+        ko_start = max(0, idx - 150)
+        p1_ko = sum(1 for j in range(ko_start, idx)
+                    if not np.isnan(p1_norm[j]) and p1_norm[j] < 0.10)
+        p2_ko = sum(1 for j in range(ko_start, idx)
+                    if not np.isnan(p2_norm[j]) and p2_norm[j] < 0.10)
+        if p1_ko < 3 and p2_ko < 3:
+            return False
+        # Timer must be ≥ 90 nearby
+        timer_near = min(idx + 120, n)
+        has_timer = any(timer_smooth[j] is not None and timer_smooth[j] >= 90
+                        for j in range(idx, timer_near))
+        if not has_timer:
+            return False
+        # Both HP must reset to > 0.90 after the gap
+        hp_check = min(idx + 300, n)
+        for j in range(idx, hp_check):
+            if not np.isnan(p1_smooth[j]) and not np.isnan(p2_smooth[j]):
+                if p1_smooth[j] > 0.90 and p2_smooth[j] > 0.90:
+                    return True
+        return False
+
+    def split_confirmed(idx):
+        return timer_ok(idx) or round_reset_ok(idx)
+
     def split_long_round(s_idx, e_idx, depth=0):
         """Try to split a long round at gaps or HP resets. Timer must confirm."""
         dur = (timestamps[e_idx] - timestamps[s_idx]) / 1000.0
@@ -282,7 +312,7 @@ def detect_rounds(rows):
                         mid_t = timestamps[i] / 1000.0
                         dur1 = mid_t - start_t
                         dur2 = start_t + dur - mid_t
-                        if dur1 >= 12 and dur2 >= 12 and timer_ok(i):
+                        if dur1 >= 12 and dur2 >= 12 and split_confirmed(i):
                             best_split = i
                             best_score = g
                 last_v = i
