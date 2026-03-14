@@ -403,11 +403,11 @@ fn detect_rounds_for_replay(
         let mut best_min_hp: f64 = 2.0;
         let mut best_p1: f64 = 0.5;
         let mut best_p2: f64 = 0.5;
-        let mut valid_frames: Vec<(f64, f64)> = Vec::new();
+        let mut valid_frames: Vec<(usize, f64, f64)> = Vec::new();  // (frame_idx, p1, p2)
 
         for j in search_start..e {
             if !p1_smooth[j].is_nan() && !p2_smooth[j].is_nan() {
-                valid_frames.push((p1_smooth[j], p2_smooth[j]));
+                valid_frames.push((j, p1_smooth[j], p2_smooth[j]));
                 let min_hp = p1_smooth[j].min(p2_smooth[j]);
                 if min_hp < best_min_hp {
                     best_min_hp = min_hp;
@@ -421,16 +421,33 @@ fn detect_rounds_for_replay(
             return None;
         }
 
-        // Use frames near the KO moment for robustness
-        let ko_frames: Vec<(f64, f64)> = valid_frames
+        // Collect frames near the KO threshold, then split into contiguous
+        // temporal clusters. Use the LAST cluster since KO happens at round end.
+        // This avoids mixing disconnected mid-round dips with the actual KO.
+        let ko_frames: Vec<(usize, f64, f64)> = valid_frames
             .iter()
             .copied()
-            .filter(|&(p1, p2)| p1.min(p2) < best_min_hp + 0.10)
+            .filter(|&(_, p1, p2)| p1.min(p2) < best_min_hp + 0.10)
             .collect();
+
         let (ep1, ep2) = if !ko_frames.is_empty() {
-            let last_ko: Vec<_> = ko_frames.iter().rev().take(30).collect();
-            let mut p1_vals: Vec<f64> = last_ko.iter().map(|f| f.0).collect();
-            let mut p2_vals: Vec<f64> = last_ko.iter().map(|f| f.1).collect();
+            // Split into clusters separated by > 60 frames (~2s)
+            let mut clusters: Vec<Vec<(usize, f64, f64)>> = vec![vec![ko_frames[0]]];
+            for &item in &ko_frames[1..] {
+                let last_cluster = clusters.last().unwrap();
+                if item.0 - last_cluster.last().unwrap().0 > 60 {
+                    clusters.push(vec![item]);
+                } else {
+                    clusters.last_mut().unwrap().push(item);
+                }
+            }
+
+            // Use the last cluster (closest to round end = actual KO)
+            let last_cluster = clusters.last().unwrap();
+            let take_count = last_cluster.len().min(30);
+            let ko_use = &last_cluster[last_cluster.len() - take_count..];
+            let mut p1_vals: Vec<f64> = ko_use.iter().map(|f| f.1).collect();
+            let mut p2_vals: Vec<f64> = ko_use.iter().map(|f| f.2).collect();
             p1_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
             p2_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
             (p1_vals[p1_vals.len() / 2], p2_vals[p2_vals.len() / 2])

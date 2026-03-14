@@ -61,10 +61,10 @@ def find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm=None, p2_norm=None):
     best_p1 = None
     best_p2 = None
 
-    valid_frames = []
+    valid_frames = []  # (frame_idx, p1_smooth, p2_smooth)
     for j in range(search_start, e_idx):
         if not np.isnan(p1_smooth[j]) and not np.isnan(p2_smooth[j]):
-            valid_frames.append((p1_smooth[j], p2_smooth[j]))
+            valid_frames.append((j, p1_smooth[j], p2_smooth[j]))
             min_hp = min(p1_smooth[j], p2_smooth[j])
             if min_hp < best_min_hp:
                 best_min_hp = min_hp
@@ -72,13 +72,27 @@ def find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm=None, p2_norm=None):
                 best_p2 = p2_smooth[j]
 
     if best_p1 is not None and best_p2 is not None:
-        ko_frames = [(p1, p2) for p1, p2 in valid_frames
+        # Collect frames near the KO threshold, then split into contiguous
+        # temporal clusters. Use the LAST cluster since KO happens at round end.
+        # This avoids mixing disconnected mid-round dips with the actual KO.
+        ko_frames = [(j, p1, p2) for j, p1, p2 in valid_frames
                      if min(p1, p2) < best_min_hp + 0.10]
-        if ko_frames:
-            p1_med = float(np.median([f[0] for f in ko_frames[-30:]]))
-            p2_med = float(np.median([f[1] for f in ko_frames[-30:]]))
-        else:
-            p1_med, p2_med = best_p1, best_p2
+        if not ko_frames:
+            ko_frames = [(search_start, best_p1, best_p2)]
+
+        # Split into clusters separated by > 60 frames (~2s)
+        clusters = [[ko_frames[0]]]
+        for item in ko_frames[1:]:
+            if item[0] - clusters[-1][-1][0] > 60:
+                clusters.append([item])
+            else:
+                clusters[-1].append(item)
+
+        # Use the last cluster (closest to round end = actual KO)
+        last_cluster = clusters[-1]
+        ko_use = last_cluster[-30:]
+        p1_med = float(np.median([f[1] for f in ko_use]))
+        p2_med = float(np.median([f[2] for f in ko_use]))
 
         hp_diff = abs(p1_med - p2_med)
 
