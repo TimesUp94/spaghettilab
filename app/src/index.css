@@ -1,0 +1,93 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-surface-4;
+  }
+  body {
+    @apply bg-surface-0 text-text-primary font-sans antialiased;
+    user-select: none;
+  }
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-surface-1;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-surface-4 rounded-full;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-text-muted;
+  }
+}
+
+@layer components {
+  .stat-card {
+    @apply bg-surface-2 rounded-lg p-4 border border-surface-4/50;
+  }
+  .btn-primary {
+    @apply px-4 py-2 bg-accent-purple/20 text-accent-purple border border-accent-purple/30
+           rounded-lg hover:bg-accent-purple/30 transition-all duration-200
+           font-medium text-sm cursor-pointer;
+  }
+  .btn-ghost {
+    @apply px-3 py-1.5 text-text-secondary hover:text-text-primary hover:bg-surface-3
+           rounded-md transition-all duration-200 text-sm cursor-pointer;
+  }
+  .tab-btn {
+    @apply px-4 py-2 text-sm font-medium text-text-secondary
+           border-b-2 border-transparent hover:text-text-primary
+           transition-all duration-200 cursor-pointer;
+  }
+  .tab-btn.active {
+    @apply text-text-primary border-accent-purple;
+  }
+  .highlight-card {
+    @apply bg-surface-2 rounded-lg p-3 border border-surface-4/50
+           hover:border-accent-gold/30 transition-all duration-200 cursor-pointer;
+  }
+  .timeline-marker {
+    @apply absolute top-0 bottom-0 w-0.5 opacity-60;
+  }
+}
+
+/* Video player custom styles */
+video::-webkit-media-controls {
+  display: none !important;
+}
+
+.health-gradient-p1 {
+  background: linear-gradient(90deg, #a82020 0%, #e84040 50%, #ff6b6b 100%);
+}
+
+.health-gradient-p2 {
+  background: linear-gradient(90deg, #2060a8 0%, #4088e8 50%, #6bb0ff 100%);
+}
+
+/* Glow effects */
+.glow-gold {
+  box-shadow: 0 0 20px rgba(240, 192, 64, 0.15);
+}
+
+.glow-p1 {
+  box-shadow: 0 0 12px rgba(232, 64, 64, 0.2);
+}
+
+.glow-p2 {
+  box-shadow: 0 0 12px rgba(64, 136, 232, 0.2);
+}
+
+/* Animation for highlight pulse */
+@keyframes highlight-pulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+.animate-highlight-pulse {
+  animation: highlight-pulse 2s ease-in-out infinite;
+}

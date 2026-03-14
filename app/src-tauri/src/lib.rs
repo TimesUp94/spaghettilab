@@ -1,0 +1,1191 @@
+use rusqlite::Connection;
+use serde::Serialize;
+use std::path::PathBuf;
+use std::process::Command;
+
+// ── Data models ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Clone)]
+pub struct Replay {
+    pub replay_id: String,
+    pub video_path: String,
+    pub duration_ms: f64,
+    pub frame_count: i64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct FrameDataPoint {
+    pub timestamp_ms: f64,
+    pub p1_health_pct: Option<f64>,
+    pub p2_health_pct: Option<f64>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct DamageEvent {
+    pub event_id: i64,
+    pub replay_id: String,
+    pub timestamp_ms: f64,
+    pub frame_start: i64,
+    pub frame_end: i64,
+    pub target_side: i64,
+    pub damage_pct: f64,
+    pub pre_health_pct: f64,
+    pub post_health_pct: f64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct RoundResult {
+    pub replay_id: String,
+    pub round_index: usize,
+    pub round_start_ms: f64,
+    pub round_end_ms: f64,
+    pub winner: String,
+    pub winner_final_hp: f64,
+    pub loser_final_hp: f64,
+    pub winner_min_hp: f64,
+    pub max_deficit: f64,
+    pub deficit_timestamp_ms: f64,
+    pub is_comeback: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct MatchStats {
+    pub replay_id: String,
+    pub total_rounds: usize,
+    pub p1_round_wins: usize,
+    pub p2_round_wins: usize,
+    pub total_damage_events: usize,
+    pub p1_damage_taken: f64,
+    pub p2_damage_taken: f64,
+    pub p1_biggest_hit: f64,
+    pub p2_biggest_hit: f64,
+    pub avg_round_duration_s: f64,
+    pub longest_round_s: f64,
+    pub shortest_round_s: f64,
+    pub comeback_count: usize,
+    pub close_rounds: usize,
+    pub avg_winner_final_hp: f64,
+    pub duration_s: f64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct Highlight {
+    pub kind: String,         // "comeback", "close_round", "big_damage", "perfect"
+    pub label: String,
+    pub timestamp_ms: f64,
+    pub end_ms: f64,
+    pub details: String,
+    pub severity: f64,        // 0-1, for sorting
+}
+
+#[derive(Debug, Serialize)]
+pub struct AnalysisStatus {
+    pub running: bool,
+    pub progress_lines: Vec<String>,
+    pub error: Option<String>,
+    pub db_path: Option<String>,
+}
+
+// ── Constants for round detection ────────────────────────────────────────────
+
+const HP_CEILING: f64 = 0.875;
+const MIN_ROUND_FRAMES: usize = 450;  // ~15 seconds at 30fps
+const COMEBACK_DEFICIT: f64 = 0.35;
+const DEFICIT_SMOOTH_WINDOW: usize = 91;  // ~3s heavy smoothing for deficit tracking
+const TIMER_SMOOTH_WINDOW: usize = 61;  // ~2s window for timer noise filtering
+const HP_RESET_WINDOW: usize = 90;  // ~3s window for HP reset detection
+
+// ── Signal processing helpers ────────────────────────────────────────────────
+
+fn rolling_median(arr: &[f64], window: usize) -> Vec<f64> {
+    let half = window / 2;
+    let min_valid = (window / 3).max(3); // require at least 1/3 of window to be valid data
+    let n = arr.len();
+    let mut out = vec![f64::NAN; n];
+    for i in 0..n {
+        let lo = if i >= half { i - half } else { 0 };
+        let hi = if i + half + 1 <= n { i + half + 1 } else { n };
+        let mut valid: Vec<f64> = arr[lo..hi].iter().copied().filter(|v| !v.is_nan()).collect();
+        if valid.len() >= min_valid {
+            valid.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            out[i] = valid[valid.len() / 2];
+        }
+    }
+    out
+}
+
+fn clip(v: f64, lo: f64, hi: f64) -> f64 {
+    v.max(lo).min(hi)
+}
+
+/// Forward-fill None values (carry last known value forward).
+fn forward_fill_i32(arr: &[Option<i32>]) -> Vec<Option<i32>> {
+    let mut out = arr.to_vec();
+    let mut last: Option<i32> = None;
+    for v in out.iter_mut() {
+        if v.is_some() {
+            last = *v;
+        } else {
+            *v = last;
+        }
+    }
+    out
+}
+
+/// Rolling median for optional i32 values.
+fn rolling_median_i32(arr: &[Option<i32>], window: usize) -> Vec<Option<i32>> {
+    let half = window / 2;
+    let n = arr.len();
+    let mut out = vec![None; n];
+    for i in 0..n {
+        let lo = if i >= half { i - half } else { 0 };
+        let hi = if i + half + 1 <= n { i + half + 1 } else { n };
+        let mut vals: Vec<i32> = arr[lo..hi].iter().filter_map(|v| *v).collect();
+        if !vals.is_empty() {
+            vals.sort();
+            out[i] = Some(vals[vals.len() / 2]);
+        }
+    }
+    out
+}
+
+// ── Round detection using timer + HP resets + gaps ──────────────────────────
+//
+// GGS round detection strategy (three complementary signals):
+// 1. TIMER: Timer counts down from ~99 each round. Smoothed with 61-frame
+//    window to filter OCR noise. Jump from <=70 to >=88 = new round.
+// 2. HP RESETS: Both players' rolling median HP (90-frame window) goes
+//    from <0.50 to >0.85 = new round boundary.
+// 3. GAME BREAKS: Data gaps >5s = character select / game boundary.
+//
+// A typical GGS round lasts ~30 seconds. Rounds >45s are recursively
+// split at internal gaps or HP resets.
+
+fn detect_rounds_for_replay(
+    conn: &Connection,
+    replay_id: &str,
+) -> Result<Vec<RoundResult>, String> {
+    // Read ALL frame data (including NULL HP for gap detection)
+    let has_timer_col = conn
+        .prepare("SELECT timer_value FROM frame_data LIMIT 1")
+        .is_ok();
+
+    let rows: Vec<(f64, Option<f64>, Option<f64>, Option<i32>)> = if has_timer_col {
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp_ms, p1_health_pct, p2_health_pct, timer_value
+                 FROM frame_data
+                 WHERE replay_id = ?
+                 ORDER BY timestamp_ms",
+            )
+            .map_err(|e| e.to_string())?;
+        let result: Vec<_> = stmt
+            .query_map([replay_id], |row| {
+                Ok((
+                    row.get::<_, f64>(0)?,
+                    row.get::<_, Option<f64>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                    row.get::<_, Option<i32>>(3)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        result
+    } else {
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp_ms, p1_health_pct, p2_health_pct
+                 FROM frame_data
+                 WHERE replay_id = ?
+                 ORDER BY timestamp_ms",
+            )
+            .map_err(|e| e.to_string())?;
+        let result: Vec<_> = stmt
+            .query_map([replay_id], |row| {
+                Ok((
+                    row.get::<_, f64>(0)?,
+                    row.get::<_, Option<f64>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                    None::<i32>,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        result
+    };
+
+    let n = rows.len();
+    if n < MIN_ROUND_FRAMES {
+        return Ok(vec![]);
+    }
+
+    let ts: Vec<f64> = rows.iter().map(|r| r.0).collect();
+    let p1_raw: Vec<f64> = rows
+        .iter()
+        .map(|r| r.1.filter(|&v| v > 0.0).unwrap_or(f64::NAN))
+        .collect();
+    let p2_raw: Vec<f64> = rows
+        .iter()
+        .map(|r| r.2.filter(|&v| v > 0.0).unwrap_or(f64::NAN))
+        .collect();
+    let timer_raw: Vec<Option<i32>> = rows.iter().map(|r| r.3).collect();
+
+    // Normalize HP by ceiling
+    let mut p1_norm: Vec<f64> = p1_raw
+        .iter()
+        .map(|v| if v.is_nan() { f64::NAN } else { clip(v / HP_CEILING, 0.0, 1.0) })
+        .collect();
+    let mut p2_norm: Vec<f64> = p2_raw
+        .iter()
+        .map(|v| if v.is_nan() { f64::NAN } else { clip(v / HP_CEILING, 0.0, 1.0) })
+        .collect();
+
+    // ── Data cleaning: filter junk HP from non-gameplay screens ──
+    // If both players' HP stays below 0.35 for > 5 seconds (150 frames),
+    // it's a lobby/menu screen misidentified as gameplay. Null out those frames.
+    {
+        let junk_thresh = 0.35;
+        let junk_window = 150usize; // ~5 seconds at 30fps
+        let p1_junk = rolling_median(&p1_norm, junk_window);
+        let p2_junk = rolling_median(&p2_norm, junk_window);
+        for i in 0..n {
+            if !p1_junk[i].is_nan() && !p2_junk[i].is_nan()
+                && p1_junk[i] < junk_thresh && p2_junk[i] < junk_thresh
+            {
+                p1_norm[i] = f64::NAN;
+                p2_norm[i] = f64::NAN;
+            }
+        }
+    }
+
+    // Smooth HP for round metrics and winner detection (window=31 ≈ 1s)
+    // Must be wide enough to filter OCR/scene-detection noise spikes
+    let p1_smooth = rolling_median(&p1_norm, 31);
+    let p2_smooth = rolling_median(&p2_norm, 31);
+
+    // Heavy smoothing for deficit/comeback tracking (window=91 ≈ 3s)
+    // HP extraction noise can create false deficits with lighter smoothing
+    let p1_heavy = rolling_median(&p1_norm, DEFICIT_SMOOTH_WINDOW);
+    let p2_heavy = rolling_median(&p2_norm, DEFICIT_SMOOTH_WINDOW);
+
+    // ── Signal 1: Timer-based round starts ──
+    // Forward-fill + wide-window smooth to filter OCR noise, then detect jumps.
+    let timer_ff = forward_fill_i32(&timer_raw);
+    let timer_smooth = rolling_median_i32(&timer_ff, TIMER_SMOOTH_WINDOW);
+
+    let mut timer_starts: Vec<usize> = Vec::new();
+    let mut lowest_since_start: i32 = 99;
+    for i in 0..n {
+        if let Some(t) = timer_smooth[i] {
+            lowest_since_start = lowest_since_start.min(t);
+            // Timer jumped from low (<=70) to high (>=88) = new round
+            if t >= 88 && lowest_since_start <= 70 {
+                if timer_starts.last().map_or(true, |&last| i - last > MIN_ROUND_FRAMES) {
+                    timer_starts.push(i);
+                    lowest_since_start = t;
+                }
+            }
+        }
+    }
+
+    // ── Signal 2: HP reset detection ──
+    // When both players' rolling median HP goes from low (<0.50) to high (>0.85),
+    // a new round has started.
+    let p1_rm = rolling_median(&p1_norm, HP_RESET_WINDOW);
+    let p2_rm = rolling_median(&p2_norm, HP_RESET_WINDOW);
+    let mut hp_resets: Vec<usize> = Vec::new();
+    let mut min_hp_since_reset: f64 = 1.0;
+    for i in 0..n {
+        if !p1_rm[i].is_nan() && !p2_rm[i].is_nan() {
+            let current_min = p1_rm[i].min(p2_rm[i]);
+            min_hp_since_reset = min_hp_since_reset.min(current_min);
+            if p1_rm[i] > 0.85 && p2_rm[i] > 0.85 && min_hp_since_reset < 0.50 {
+                if hp_resets.last().map_or(true, |&last| i - last > MIN_ROUND_FRAMES) {
+                    hp_resets.push(i);
+                    min_hp_since_reset = current_min;
+                }
+            }
+        }
+    }
+
+    // ── Signal 3: Game break detection (gaps > 5s) ──
+    let mut game_breaks: Vec<usize> = Vec::new();
+    let mut prev_valid_idx: Option<usize> = None;
+    for i in 0..n {
+        if !p1_norm[i].is_nan() {
+            if let Some(pv) = prev_valid_idx {
+                let gap_ms = ts[i] - ts[pv];
+                if gap_ms > 5000.0 {
+                    game_breaks.push(i);
+                }
+            }
+            prev_valid_idx = Some(i);
+        }
+    }
+
+    // ── Merge all boundary signals ──
+    let mut all_indices: Vec<usize> = Vec::new();
+    all_indices.extend_from_slice(&timer_starts);
+    all_indices.extend_from_slice(&hp_resets);
+    all_indices.extend_from_slice(&game_breaks);
+    all_indices.sort();
+    all_indices.dedup();
+
+    // Deduplicate within 10 seconds
+    let mut deduped: Vec<usize> = Vec::new();
+    for &idx in &all_indices {
+        if deduped.last().map_or(true, |&last| ts[idx] - ts[last] > 10000.0) {
+            deduped.push(idx);
+        }
+    }
+
+    // ── Wallbreak filter: real round starts always have timer ≈99 ──
+    // During wallbreak, bars disappear briefly but timer stays at mid-round value.
+    // Check that the smoothed timer reaches ≥93 within 90 frames (~3s) after each
+    // boundary. This filters wallbreak transitions and other false boundaries.
+    deduped.retain(|&b| {
+        let check_end = (b + 90).min(n);
+        (b..check_end).any(|j| timer_smooth[j].map_or(false, |t| t >= 93))
+    });
+
+    // Add first valid data frame as start if needed
+    // (first-valid doesn't need timer validation — could be mid-round)
+    let first_valid = (0..n).find(|&i| !p1_norm[i].is_nan());
+    if let Some(fv) = first_valid {
+        if deduped.is_empty() || deduped[0] - fv > MIN_ROUND_FRAMES {
+            deduped.insert(0, fv);
+        }
+    }
+
+    // ── Build rounds from boundaries ──
+    let mut round_starts: Vec<(usize, f64)> = Vec::new();
+    for &idx in &deduped {
+        round_starts.push((idx, ts[idx]));
+    }
+
+    // Helper: find KO moment and determine winner for a span.
+    // Uses smoothed HP. Handles two GGS edge cases:
+    //   1. Last round of match: bars disappear (HP goes NaN before KO visible)
+    //   2. Wallbreak: HP shows combo damage but doesn't visually reach zero
+    // Strategy: KO moment detection → fallback to average HP in last 25% if ambiguous
+    let find_winner_ko = |s: usize, e: usize| -> Option<(String, f64, f64)> {
+        let span = e - s;
+        // Search last 60% of the round for the frame where min(p1, p2) is lowest
+        let search_start = s + (span as f64 * 0.4) as usize;
+        let mut best_min_hp: f64 = 2.0;
+        let mut best_p1: f64 = 0.5;
+        let mut best_p2: f64 = 0.5;
+        let mut valid_frames: Vec<(f64, f64)> = Vec::new();
+
+        for j in search_start..e {
+            if !p1_smooth[j].is_nan() && !p2_smooth[j].is_nan() {
+                valid_frames.push((p1_smooth[j], p2_smooth[j]));
+                let min_hp = p1_smooth[j].min(p2_smooth[j]);
+                if min_hp < best_min_hp {
+                    best_min_hp = min_hp;
+                    best_p1 = p1_smooth[j];
+                    best_p2 = p2_smooth[j];
+                }
+            }
+        }
+
+        if valid_frames.is_empty() {
+            return None;
+        }
+
+        // Use frames near the KO moment for robustness
+        let ko_frames: Vec<(f64, f64)> = valid_frames
+            .iter()
+            .copied()
+            .filter(|&(p1, p2)| p1.min(p2) < best_min_hp + 0.10)
+            .collect();
+        let (ep1, ep2) = if !ko_frames.is_empty() {
+            let last_ko: Vec<_> = ko_frames.iter().rev().take(30).collect();
+            let mut p1_vals: Vec<f64> = last_ko.iter().map(|f| f.0).collect();
+            let mut p2_vals: Vec<f64> = last_ko.iter().map(|f| f.1).collect();
+            p1_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            p2_vals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            (p1_vals[p1_vals.len() / 2], p2_vals[p2_vals.len() / 2])
+        } else {
+            (best_p1, best_p2)
+        };
+
+        let hp_diff = (ep1 - ep2).abs();
+
+        // If KO moment is clear (large HP gap), use it directly
+        if hp_diff >= 0.15 {
+            let winner = if ep1 >= ep2 { "P1".to_string() } else { "P2".to_string() };
+            return Some((winner, ep1, ep2));
+        }
+
+        // Ambiguous KO moment — fallback strategies:
+
+        // Strategy A: Find last valid HP readings before data gaps out
+        // (handles last-round-of-match where bars disappear)
+        let last_quarter_start = s + (span as f64 * 0.75) as usize;
+        let mut last_valid_p1: Option<f64> = None;
+        let mut last_valid_p2: Option<f64> = None;
+        for j in (last_quarter_start..e).rev() {
+            if last_valid_p1.is_none() && !p1_smooth[j].is_nan() {
+                last_valid_p1 = Some(p1_smooth[j]);
+            }
+            if last_valid_p2.is_none() && !p2_smooth[j].is_nan() {
+                last_valid_p2 = Some(p2_smooth[j]);
+            }
+            if last_valid_p1.is_some() && last_valid_p2.is_some() {
+                break;
+            }
+        }
+
+        // Strategy B: Average HP in last 25% of the round
+        // (handles wallbreak where HP shows combo but not zero)
+        let mut p1_sum = 0.0f64;
+        let mut p2_sum = 0.0f64;
+        let mut avg_count = 0usize;
+        for j in last_quarter_start..e {
+            if !p1_smooth[j].is_nan() && !p2_smooth[j].is_nan() {
+                p1_sum += p1_smooth[j];
+                p2_sum += p2_smooth[j];
+                avg_count += 1;
+            }
+        }
+
+        // Also find the minimum HP each player reaches in the last 40%
+        let mut p1_min_last = 2.0f64;
+        let mut p2_min_last = 2.0f64;
+        for j in search_start..e {
+            if !p1_smooth[j].is_nan() { p1_min_last = p1_min_last.min(p1_smooth[j]); }
+            if !p2_smooth[j].is_nan() { p2_min_last = p2_min_last.min(p2_smooth[j]); }
+        }
+
+        // Combine signals: whoever reached lower minimum HP is the loser
+        // (catches wallbreak combo damage even if bar doesn't hit zero)
+        let min_signal = p2_min_last - p1_min_last;  // positive = P1 went lower = P2 wins
+
+        let avg_signal = if avg_count >= 10 {
+            let p1_avg = p1_sum / avg_count as f64;
+            let p2_avg = p2_sum / avg_count as f64;
+            p2_avg - p1_avg  // positive = P1 lower avg = P2 wins
+        } else if let (Some(lp1), Some(lp2)) = (last_valid_p1, last_valid_p2) {
+            lp2 - lp1  // positive = P1 lower = P2 wins
+        } else {
+            ep2 - ep1  // fall back to KO moment
+        };
+
+        // Weighted combination: minimum HP matters more than average
+        let combined = min_signal * 0.6 + avg_signal * 0.4;
+        let (winner, _fp1, _fp2) = if combined > 0.0 {
+            ("P2".to_string(), p1_min_last.min(2.0), p2_min_last.min(2.0))
+        } else {
+            ("P1".to_string(), p1_min_last.min(2.0), p2_min_last.min(2.0))
+        };
+
+        // Use the better HP values for reporting
+        let report_p1 = if p1_min_last < 2.0 { p1_min_last } else { ep1 };
+        let report_p2 = if p2_min_last < 2.0 { p2_min_last } else { ep2 };
+        Some((winner, report_p1, report_p2))
+    };
+
+    // Helper: recursively split long rounds at gaps or HP resets
+    fn split_long_round(
+        s_idx: usize,
+        e_idx: usize,
+        ts: &[f64],
+        p1_norm: &[f64],
+        p2_norm: &[f64],
+        depth: usize,
+    ) -> Vec<(usize, usize)> {
+        let dur = (ts[e_idx.min(ts.len() - 1)] - ts[s_idx]) / 1000.0;
+        if dur <= 45.0 || depth > 3 {
+            return vec![(s_idx, e_idx)];
+        }
+
+        let mut best_split: Option<usize> = None;
+        let mut best_score: f64 = 0.0;
+
+        // Strategy 1: largest data gap > 1.5s
+        let mut last_v: Option<usize> = None;
+        for i in s_idx..e_idx {
+            if !p1_norm[i].is_nan() {
+                if let Some(lv) = last_v {
+                    let g = (ts[i] - ts[lv]) / 1000.0;
+                    if g > 1.5 && g > best_score {
+                        let mid_t = ts[i] / 1000.0;
+                        let start_t = ts[s_idx] / 1000.0;
+                        let end_t = ts[e_idx.min(ts.len() - 1)] / 1000.0;
+                        let dur1 = mid_t - start_t;
+                        let dur2 = end_t - mid_t;
+                        if dur1 >= 12.0 && dur2 >= 12.0 {
+                            best_split = Some(i);
+                            best_score = g;
+                        }
+                    }
+                }
+                last_v = Some(i);
+            }
+        }
+
+        // Strategy 2: HP reset within the long round (narrower window)
+        let local_len = e_idx - s_idx;
+        if local_len > 60 {
+            let half = 30usize;
+            let mut min_hp_local: f64 = 1.0;
+            for j in 0..local_len {
+                let gi = s_idx + j;
+                // Compute local rolling median
+                let lo = if j >= half { gi - half } else { s_idx };
+                let hi = (gi + half + 1).min(e_idx);
+                let mut p1_chunk: Vec<f64> = (lo..hi)
+                    .filter(|&k| !p1_norm[k].is_nan())
+                    .map(|k| p1_norm[k])
+                    .collect();
+                let mut p2_chunk: Vec<f64> = (lo..hi)
+                    .filter(|&k| !p2_norm[k].is_nan())
+                    .map(|k| p2_norm[k])
+                    .collect();
+                if p1_chunk.len() >= 10 && p2_chunk.len() >= 10 {
+                    p1_chunk.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    p2_chunk.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    let p1_med = p1_chunk[p1_chunk.len() / 2];
+                    let p2_med = p2_chunk[p2_chunk.len() / 2];
+                    let current_min = p1_med.min(p2_med);
+                    min_hp_local = min_hp_local.min(current_min);
+
+                    if p1_med > 0.75 && p2_med > 0.75 && min_hp_local < 0.55 {
+                        let mid_t = ts[gi] / 1000.0;
+                        let start_t = ts[s_idx] / 1000.0;
+                        let end_t = ts[e_idx.min(ts.len() - 1)] / 1000.0;
+                        let dur1 = mid_t - start_t;
+                        let dur2 = end_t - mid_t;
+                        if dur1 >= 12.0 && dur2 >= 12.0 {
+                            let balance = 1.0 - (dur1 - dur2).abs() / dur;
+                            let hp_drop = 1.0 - min_hp_local;
+                            let score = balance * 0.3 + hp_drop * 0.7;
+                            if score > best_score {
+                                best_split = Some(gi);
+                                best_score = score;
+                            }
+                        }
+                        min_hp_local = current_min;
+                    }
+                }
+            }
+        }
+
+        if let Some(split_idx) = best_split {
+            let mut result = split_long_round(s_idx, split_idx, ts, p1_norm, p2_norm, depth + 1);
+            result.extend(split_long_round(split_idx, e_idx, ts, p1_norm, p2_norm, depth + 1));
+            return result;
+        }
+
+        vec![(s_idx, e_idx)]
+    }
+
+    // ── Build initial round spans ──
+    struct RoundSpan {
+        s_idx: usize,
+        e_idx: usize,
+    }
+
+    let mut initial_spans: Vec<RoundSpan> = Vec::new();
+    for ri in 0..round_starts.len() {
+        let (s_idx, _) = round_starts[ri];
+        let e_idx = if ri + 1 < round_starts.len() {
+            round_starts[ri + 1].0
+        } else {
+            n - 1
+        };
+
+        let total_frames = e_idx - s_idx;
+        if total_frames < MIN_ROUND_FRAMES {
+            continue;
+        }
+
+        // Valid data ratio check
+        let valid_count = (s_idx..e_idx)
+            .filter(|&j| !p1_norm[j].is_nan() && !p2_norm[j].is_nan())
+            .count();
+        if total_frames > 0 && (valid_count as f64) / (total_frames as f64) < 0.30 {
+            continue;
+        }
+
+        initial_spans.push(RoundSpan { s_idx, e_idx });
+    }
+
+    // ── Split long rounds and build results ──
+    let mut results: Vec<RoundResult> = Vec::new();
+    let mut round_counter: usize = 0;
+
+    for span in &initial_spans {
+        let dur_s = (ts[span.e_idx.min(n - 1)] - ts[span.s_idx]) / 1000.0;
+        let sub_spans = if dur_s > 45.0 {
+            split_long_round(span.s_idx, span.e_idx, &ts, &p1_norm, &p2_norm, 0)
+        } else {
+            vec![(span.s_idx, span.e_idx)]
+        };
+
+        for (s_idx, e_idx) in sub_spans {
+            let s_ms = ts[s_idx];
+            let e_ms = ts[e_idx.min(n - 1)];
+            let sub_dur = (e_ms - s_ms) / 1000.0;
+
+            if sub_dur < 12.0 {
+                continue;
+            }
+
+            // Valid data check for sub-span
+            let valid_count = (s_idx..e_idx)
+                .filter(|&j| !p1_norm[j].is_nan() && !p2_norm[j].is_nan())
+                .count();
+            if valid_count == 0 {
+                continue;
+            }
+
+            // Determine winner using KO-moment approach
+            let (winner, ep1, ep2) = match find_winner_ko(s_idx, e_idx) {
+                Some(v) => v,
+                None => continue,
+            };
+
+            // ── Round metrics ──
+            let (w_smooth, l_smooth) = if winner == "P2" {
+                (&p2_smooth, &p1_smooth)
+            } else {
+                (&p1_smooth, &p2_smooth)
+            };
+
+            let mut w_valid: Vec<f64> = Vec::new();
+            let mut l_valid: Vec<f64> = Vec::new();
+            let mut ts_valid: Vec<f64> = Vec::new();
+
+            for i in s_idx..e_idx {
+                if !w_smooth[i].is_nan() && !l_smooth[i].is_nan() {
+                    w_valid.push(w_smooth[i]);
+                    l_valid.push(l_smooth[i]);
+                    ts_valid.push(ts[i]);
+                }
+            }
+
+            if w_valid.is_empty() {
+                continue;
+            }
+
+            let winner_final_hp = if winner == "P2" { ep2 } else { ep1 };
+            let loser_final_hp = if winner == "P2" { ep1 } else { ep2 };
+            let winner_min_hp = w_valid.iter().cloned().fold(f64::INFINITY, f64::min);
+
+            // Use heavy smoothing for deficit tracking to filter HP noise
+            let (w_heavy, l_heavy) = if winner == "P2" {
+                (&p2_heavy, &p1_heavy)
+            } else {
+                (&p1_heavy, &p2_heavy)
+            };
+
+            // Skip first 15% of round to avoid HP reset transition artifacts
+            let deficit_start = s_idx + (e_idx - s_idx) * 15 / 100;
+            let mut max_deficit: f64 = 0.0;
+            let mut deficit_ts: f64 = ts[s_idx];
+            for i in deficit_start..e_idx {
+                if !w_heavy[i].is_nan() && !l_heavy[i].is_nan() {
+                    let deficit = l_heavy[i] - w_heavy[i];
+                    if deficit > max_deficit {
+                        max_deficit = deficit;
+                        deficit_ts = ts[i];
+                    }
+                }
+            }
+
+            let is_comeback = max_deficit >= COMEBACK_DEFICIT;
+
+            results.push(RoundResult {
+                replay_id: replay_id.to_string(),
+                round_index: round_counter,
+                round_start_ms: s_ms,
+                round_end_ms: e_ms,
+                winner,
+                winner_final_hp,
+                loser_final_hp,
+                winner_min_hp,
+                max_deficit,
+                deficit_timestamp_ms: deficit_ts,
+                is_comeback,
+            });
+            round_counter += 1;
+        }
+    }
+
+    Ok(results)
+}
+
+fn compute_match_stats(
+    replay: &Replay,
+    rounds: &[RoundResult],
+    damage_events: &[DamageEvent],
+) -> MatchStats {
+    let p1_wins = rounds.iter().filter(|r| r.winner == "P1").count();
+    let p2_wins = rounds.iter().filter(|r| r.winner == "P2").count();
+
+    let mut p1_dmg_taken = 0.0;
+    let mut p2_dmg_taken = 0.0;
+    let mut p1_biggest = 0.0f64;
+    let mut p2_biggest = 0.0f64;
+
+    for e in damage_events {
+        if e.target_side == 1 {
+            p1_dmg_taken += e.damage_pct;
+            p1_biggest = p1_biggest.max(e.damage_pct);
+        } else {
+            p2_dmg_taken += e.damage_pct;
+            p2_biggest = p2_biggest.max(e.damage_pct);
+        }
+    }
+
+    let durations: Vec<f64> = rounds
+        .iter()
+        .map(|r| (r.round_end_ms - r.round_start_ms) / 1000.0)
+        .collect();
+    let avg_dur = if durations.is_empty() {
+        0.0
+    } else {
+        durations.iter().sum::<f64>() / durations.len() as f64
+    };
+    let longest = durations.iter().cloned().fold(0.0f64, f64::max);
+    let shortest = durations
+        .iter()
+        .cloned()
+        .fold(f64::INFINITY, f64::min);
+    let shortest = if shortest.is_infinite() {
+        0.0
+    } else {
+        shortest
+    };
+
+    let comeback_count = rounds.iter().filter(|r| r.is_comeback).count();
+    let close_rounds = rounds.iter().filter(|r| r.winner_final_hp < 0.20).count();
+    let avg_winner_hp = if rounds.is_empty() {
+        0.0
+    } else {
+        rounds.iter().map(|r| r.winner_final_hp).sum::<f64>() / rounds.len() as f64
+    };
+
+    MatchStats {
+        replay_id: replay.replay_id.clone(),
+        total_rounds: rounds.len(),
+        p1_round_wins: p1_wins,
+        p2_round_wins: p2_wins,
+        total_damage_events: damage_events.len(),
+        p1_damage_taken: p1_dmg_taken,
+        p2_damage_taken: p2_dmg_taken,
+        p1_biggest_hit: p1_biggest,
+        p2_biggest_hit: p2_biggest,
+        avg_round_duration_s: avg_dur,
+        longest_round_s: longest,
+        shortest_round_s: shortest,
+        comeback_count,
+        close_rounds,
+        avg_winner_final_hp: avg_winner_hp,
+        duration_s: replay.duration_ms / 1000.0,
+    }
+}
+
+fn generate_highlights(
+    rounds: &[RoundResult],
+    damage_events: &[DamageEvent],
+) -> Vec<Highlight> {
+    let mut highlights: Vec<Highlight> = Vec::new();
+
+    // Comeback highlights
+    for r in rounds {
+        if r.is_comeback {
+            highlights.push(Highlight {
+                kind: "comeback".to_string(),
+                label: format!(
+                    "{} comeback ({:.0}% deficit)",
+                    r.winner,
+                    r.max_deficit * 100.0
+                ),
+                timestamp_ms: r.round_start_ms,
+                end_ms: r.round_end_ms,
+                details: format!(
+                    "{} was down {:.0}% HP but won with {:.0}% remaining. Min HP: {:.0}%",
+                    r.winner,
+                    r.max_deficit * 100.0,
+                    r.winner_final_hp * 100.0,
+                    r.winner_min_hp * 100.0
+                ),
+                severity: r.max_deficit,
+            });
+        }
+    }
+
+    // Close rounds (winner < 20% HP)
+    for r in rounds {
+        if r.winner_final_hp < 0.20 && !r.is_comeback {
+            highlights.push(Highlight {
+                kind: "close_round".to_string(),
+                label: format!(
+                    "Close round - {} wins at {:.0}% HP",
+                    r.winner,
+                    r.winner_final_hp * 100.0
+                ),
+                timestamp_ms: r.round_start_ms,
+                end_ms: r.round_end_ms,
+                details: format!(
+                    "{} barely won with only {:.0}% HP remaining",
+                    r.winner,
+                    r.winner_final_hp * 100.0
+                ),
+                severity: 1.0 - r.winner_final_hp,
+            });
+        }
+    }
+
+    // Big damage events (> 30%)
+    for e in damage_events {
+        if e.damage_pct > 0.30 {
+            let target = if e.target_side == 1 { "P1" } else { "P2" };
+            highlights.push(Highlight {
+                kind: "big_damage".to_string(),
+                label: format!("{:.0}% damage to {}", e.damage_pct * 100.0, target),
+                timestamp_ms: e.timestamp_ms,
+                end_ms: e.timestamp_ms + 2000.0,
+                details: format!(
+                    "{} took {:.0}% damage ({:.0}% -> {:.0}%)",
+                    target,
+                    e.damage_pct * 100.0,
+                    e.pre_health_pct * 100.0,
+                    e.post_health_pct * 100.0
+                ),
+                severity: e.damage_pct,
+            });
+        }
+    }
+
+    // Perfect rounds (winner ends > 90%)
+    for r in rounds {
+        if r.winner_final_hp > 0.90 {
+            highlights.push(Highlight {
+                kind: "perfect".to_string(),
+                label: format!("Near-perfect by {}", r.winner),
+                timestamp_ms: r.round_start_ms,
+                end_ms: r.round_end_ms,
+                details: format!(
+                    "{} won with {:.0}% HP remaining (min: {:.0}%)",
+                    r.winner,
+                    r.winner_final_hp * 100.0,
+                    r.winner_min_hp * 100.0
+                ),
+                severity: r.winner_final_hp,
+            });
+        }
+    }
+
+    highlights.sort_by(|a, b| {
+        b.severity
+            .partial_cmp(&a.severity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    highlights
+}
+
+// ── Tauri commands ───────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn get_replays(db_path: String) -> Result<Vec<Replay>, String> {
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT replay_id, video_path, duration_ms, frame_count FROM replays ORDER BY replay_id")
+        .map_err(|e| e.to_string())?;
+
+    let replays: Vec<Replay> = stmt
+        .query_map([], |row| {
+            Ok(Replay {
+                replay_id: row.get(0)?,
+                video_path: row.get(1)?,
+                duration_ms: row.get(2)?,
+                frame_count: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(replays)
+}
+
+#[tauri::command]
+fn get_frame_data(db_path: String, replay_id: String) -> Result<Vec<FrameDataPoint>, String> {
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT timestamp_ms, p1_health_pct, p2_health_pct
+             FROM frame_data
+             WHERE replay_id = ?
+             ORDER BY timestamp_ms",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let points: Vec<FrameDataPoint> = stmt
+        .query_map([&replay_id], |row| {
+            Ok(FrameDataPoint {
+                timestamp_ms: row.get(0)?,
+                p1_health_pct: row.get(1)?,
+                p2_health_pct: row.get(2)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(points)
+}
+
+#[tauri::command]
+fn get_damage_events(db_path: String, replay_id: String) -> Result<Vec<DamageEvent>, String> {
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT event_id, replay_id, timestamp_ms, frame_start, frame_end,
+                    target_side, damage_pct, pre_health_pct, post_health_pct
+             FROM damage_events
+             WHERE replay_id = ?
+             ORDER BY timestamp_ms",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let events: Vec<DamageEvent> = stmt
+        .query_map([&replay_id], |row| {
+            Ok(DamageEvent {
+                event_id: row.get(0)?,
+                replay_id: row.get(1)?,
+                timestamp_ms: row.get(2)?,
+                frame_start: row.get(3)?,
+                frame_end: row.get(4)?,
+                target_side: row.get(5)?,
+                damage_pct: row.get(6)?,
+                pre_health_pct: row.get(7)?,
+                post_health_pct: row.get(8)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(events)
+}
+
+#[tauri::command]
+fn get_rounds(db_path: String, replay_id: String) -> Result<Vec<RoundResult>, String> {
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    detect_rounds_for_replay(&conn, &replay_id)
+}
+
+#[tauri::command]
+fn get_match_stats(db_path: String, replay_id: String) -> Result<MatchStats, String> {
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+
+    // Get replay info
+    let replay: Replay = conn
+        .query_row(
+            "SELECT replay_id, video_path, duration_ms, frame_count FROM replays WHERE replay_id = ?",
+            [&replay_id],
+            |row| {
+                Ok(Replay {
+                    replay_id: row.get(0)?,
+                    video_path: row.get(1)?,
+                    duration_ms: row.get(2)?,
+                    frame_count: row.get(3)?,
+                })
+            },
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rounds = detect_rounds_for_replay(&conn, &replay_id)?;
+
+    // Get damage events
+    let mut stmt = conn
+        .prepare(
+            "SELECT event_id, replay_id, timestamp_ms, frame_start, frame_end,
+                    target_side, damage_pct, pre_health_pct, post_health_pct
+             FROM damage_events WHERE replay_id = ? ORDER BY timestamp_ms",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let events: Vec<DamageEvent> = stmt
+        .query_map([&replay_id], |row| {
+            Ok(DamageEvent {
+                event_id: row.get(0)?,
+                replay_id: row.get(1)?,
+                timestamp_ms: row.get(2)?,
+                frame_start: row.get(3)?,
+                frame_end: row.get(4)?,
+                target_side: row.get(5)?,
+                damage_pct: row.get(6)?,
+                pre_health_pct: row.get(7)?,
+                post_health_pct: row.get(8)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(compute_match_stats(&replay, &rounds, &events))
+}
+
+#[tauri::command]
+fn get_highlights(db_path: String, replay_id: String) -> Result<Vec<Highlight>, String> {
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let rounds = detect_rounds_for_replay(&conn, &replay_id)?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT event_id, replay_id, timestamp_ms, frame_start, frame_end,
+                    target_side, damage_pct, pre_health_pct, post_health_pct
+             FROM damage_events WHERE replay_id = ? ORDER BY timestamp_ms",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let events: Vec<DamageEvent> = stmt
+        .query_map([&replay_id], |row| {
+            Ok(DamageEvent {
+                event_id: row.get(0)?,
+                replay_id: row.get(1)?,
+                timestamp_ms: row.get(2)?,
+                frame_start: row.get(3)?,
+                frame_end: row.get(4)?,
+                target_side: row.get(5)?,
+                damage_pct: row.get(6)?,
+                pre_health_pct: row.get(7)?,
+                post_health_pct: row.get(8)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(generate_highlights(&rounds, &events))
+}
+
+#[tauri::command]
+async fn analyze_video(
+    video_path: String,
+    output_dir: String,
+    _sample_every: Option<u32>,
+) -> Result<String, String> {
+    // Find project root: try CARGO_MANIFEST_DIR (dev), then walk up from exe
+    let project_root = {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let from_manifest = manifest.parent().map(|p| p.to_path_buf());
+        match from_manifest {
+            Some(p) if p.join("scripts").join("analyze_replay.py").exists() => p,
+            _ => {
+                // In release, exe is in target/release/ or installed location
+                // Try to find project root by walking up from exe
+                let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+                let mut dir = exe.parent().map(|p| p.to_path_buf());
+                loop {
+                    match dir {
+                        Some(d) if d.join("scripts").join("analyze_replay.py").exists() => break d,
+                        Some(d) => dir = d.parent().map(|p| p.to_path_buf()),
+                        None => return Err("Cannot find project root with scripts/analyze_replay.py".into()),
+                    }
+                }
+            }
+        }
+    };
+
+    let script = project_root.join("scripts").join("analyze_replay.py");
+    let config = project_root.join("config").join("default.yaml");
+
+    let mut cmd = Command::new("python");
+    cmd.arg(script.to_str().unwrap())
+        .arg(&video_path)
+        .arg("--config")
+        .arg(config.to_str().unwrap())
+        .arg("--output")
+        .arg(&output_dir);
+
+    let output = cmd.output().map_err(|e| format!("Failed to run Python: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        return Err(format!("Analysis failed:\n{}\n{}", stdout, stderr));
+    }
+
+    // Return path to the DB
+    let db_path = PathBuf::from(&output_dir).join("analysis.db");
+    Ok(db_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn export_clip(
+    video_path: String,
+    start_ms: f64,
+    end_ms: f64,
+    output_path: String,
+) -> Result<(), String> {
+    let start_s = start_ms / 1000.0;
+    let duration_s = (end_ms - start_ms) / 1000.0;
+
+    let output = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-ss",
+            &format!("{:.3}", start_s),
+            "-i",
+            &video_path,
+            "-t",
+            &format!("{:.3}", duration_s),
+            "-c",
+            "copy",
+            "-avoid_negative_ts",
+            "make_zero",
+            &output_path,
+        ])
+        .output()
+        .map_err(|e| format!("Failed to run ffmpeg: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ffmpeg error: {}", stderr));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn resolve_video_path(db_path: String, replay_id: String) -> Result<String, String> {
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let path: String = conn
+        .query_row(
+            "SELECT video_path FROM replays WHERE replay_id = ?",
+            [&replay_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+// ── App setup ────────────────────────────────────────────────────────────────
+
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
+        .invoke_handler(tauri::generate_handler![
+            get_replays,
+            get_frame_data,
+            get_damage_events,
+            get_rounds,
+            get_match_stats,
+            get_highlights,
+            analyze_video,
+            export_clip,
+            resolve_video_path,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

@@ -1,0 +1,44 @@
+resolution:
+  width: 1920
+  height: 1080
+
+fps: 30
+sample_every_n_frames: 1
+
+# ROI coordinates — initial estimates, refine with scripts/calibrate_roi.py
+rois:
+  p1_health_bar:
+    x1: 135
+    y1: 55
+    x2: 895
+    y2: 72
+  p2_health_bar:
+    x1: 1025
+    y1: 55
+    x2: 1785
+    y2: 72
+  timer:
+    x1: 910
+    y1: 30
+    x2: 1010
+    y2: 100
+  timer_digits:
+    x1: 920
+    y1: 115
+    x2: 1000
+    y2: 165
+  p1_tension_bar:
+    x1: 50
+    y1: 1040
+    x2: 440
+    y2: 1058
+  p2_tension_bar:
+    x1: 1480
+    y1: 1040
+    x2: 1870
+    y2: 1058
+
+health_bar:
+  background_threshold: 50
+  min_delta_pct: 0.005
+  smoothing_window: 3

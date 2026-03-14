@@ -1,0 +1,30 @@
+# Video files
+*.mp4
+*.mkv
+*.avi
+
+# Data / output
+data/
+output/
+*.db
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+
+# Rust / Tauri build
+app/src-tauri/target/
+
+# Node
+app/node_modules/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
