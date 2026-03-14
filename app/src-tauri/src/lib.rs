@@ -384,13 +384,16 @@ fn detect_rounds_for_replay(
         let search_start = s + (span as f64 * 0.4) as usize;
 
         // Early check: count raw frames with HP < 0.15 in last 60%.
-        // If one player has significantly more near-zero frames (3x more, min 3),
-        // that player was KO'd. Allows some noise on the other side.
+        // Filter post-KO garbage: only count if the OTHER player is NOT at full HP.
+        // After a KO, the winning player's bar resets to ~1.0 while the loser's
+        // shows residual low values — these aren't real combat frames.
         let p1_ko_count = (search_start..e)
-            .filter(|&j| !p1_norm[j].is_nan() && p1_norm[j] < 0.15)
+            .filter(|&j| !p1_norm[j].is_nan() && p1_norm[j] < 0.15
+                      && !p2_norm[j].is_nan() && p2_norm[j] < 0.90)
             .count();
         let p2_ko_count = (search_start..e)
-            .filter(|&j| !p2_norm[j].is_nan() && p2_norm[j] < 0.15)
+            .filter(|&j| !p2_norm[j].is_nan() && p2_norm[j] < 0.15
+                      && !p1_norm[j].is_nan() && p1_norm[j] < 0.90)
             .count();
         if p1_ko_count >= 3 && p1_ko_count >= p2_ko_count * 3 + 1 {
             return Some(("P2".to_string(), 0.0, 1.0));

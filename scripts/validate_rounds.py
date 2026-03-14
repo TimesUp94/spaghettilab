@@ -45,13 +45,17 @@ def find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm=None, p2_norm=None):
     span = e_idx - s_idx
     search_start = s_idx + int(span * 0.4)
 
-    # Early check: count raw frames with HP < 0.10 in last 60%.
-    # 3+ frames near zero = unambiguous KO.
+    # Early check: count raw frames with HP < 0.15 in last 60%.
+    # Filter post-KO garbage: only count if the OTHER player is NOT at full HP.
+    # After a KO, the winning player's bar resets to ~1.0 while the loser's
+    # shows residual low values — these aren't real combat frames.
     if p1_norm is not None and p2_norm is not None:
         p1_ko = sum(1 for j in range(search_start, e_idx)
-                    if not np.isnan(p1_norm[j]) and p1_norm[j] < 0.15)
+                    if not np.isnan(p1_norm[j]) and p1_norm[j] < 0.15
+                    and not np.isnan(p2_norm[j]) and p2_norm[j] < 0.90)
         p2_ko = sum(1 for j in range(search_start, e_idx)
-                    if not np.isnan(p2_norm[j]) and p2_norm[j] < 0.15)
+                    if not np.isnan(p2_norm[j]) and p2_norm[j] < 0.15
+                    and not np.isnan(p1_norm[j]) and p1_norm[j] < 0.90)
         if p1_ko >= 3 and p1_ko >= p2_ko * 3 + 1:
             return "P2", "[0.00, 1.00]"
         if p2_ko >= 3 and p2_ko >= p1_ko * 3 + 1:
