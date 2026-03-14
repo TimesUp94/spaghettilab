@@ -78,14 +78,15 @@ def find_winner(p1_smooth, p2_smooth, s_idx, e_idx):
         # Ambiguous — use fallback strategies
         last_q_start = s_idx + int(span * 0.75)
 
-        # Min HP each player reaches in last 40% (catches wallbreak combo)
+        # Min HP each player reaches in last 40% using RAW values.
+        # Raw p1_norm/p2_norm captures brief near-zero frames right before KO.
         p1_min_last = 2.0
         p2_min_last = 2.0
         for j in range(search_start, e_idx):
-            if not np.isnan(p1_smooth[j]):
-                p1_min_last = min(p1_min_last, p1_smooth[j])
-            if not np.isnan(p2_smooth[j]):
-                p2_min_last = min(p2_min_last, p2_smooth[j])
+            if not np.isnan(p1_norm[j]):
+                p1_min_last = min(p1_min_last, p1_norm[j])
+            if not np.isnan(p2_norm[j]):
+                p2_min_last = min(p2_min_last, p2_norm[j])
 
         min_signal = p2_min_last - p1_min_last  # positive = P1 went lower = P2 wins
 

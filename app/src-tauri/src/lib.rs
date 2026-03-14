@@ -462,12 +462,14 @@ fn detect_rounds_for_replay(
             }
         }
 
-        // Also find the minimum HP each player reaches in the last 40%
+        // Find minimum HP each player reaches in the last 40% using RAW values.
+        // Raw p1_norm/p2_norm captures brief near-zero frames right before KO
+        // that smoothed values miss. Even 1 frame near zero is a strong KO signal.
         let mut p1_min_last = 2.0f64;
         let mut p2_min_last = 2.0f64;
         for j in search_start..e {
-            if !p1_smooth[j].is_nan() { p1_min_last = p1_min_last.min(p1_smooth[j]); }
-            if !p2_smooth[j].is_nan() { p2_min_last = p2_min_last.min(p2_smooth[j]); }
+            if !p1_norm[j].is_nan() { p1_min_last = p1_min_last.min(p1_norm[j]); }
+            if !p2_norm[j].is_nan() { p2_min_last = p2_min_last.min(p2_norm[j]); }
         }
 
         // Combine signals: whoever reached lower minimum HP is the loser
