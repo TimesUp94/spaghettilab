@@ -150,8 +150,16 @@ def detect_rounds(rows):
             lowest_since_start = min(lowest_since_start, t)
             if t >= 88 and lowest_since_start <= 70:
                 if not timer_starts or (i - timer_starts[-1]) > MIN_ROUND_FRAMES:
-                    timer_starts.append(i)
-                    lowest_since_start = t
+                    # Validate: smoothed timer must reach ≥93 within 90 frames.
+                    # Filters wallbreak/super flash noise without blocking real boundaries.
+                    check_end = min(i + 90, n)
+                    confirmed = any(
+                        timer_smooth[j] is not None and timer_smooth[j] >= 93
+                        for j in range(i, check_end)
+                    )
+                    if confirmed:
+                        timer_starts.append(i)
+                        lowest_since_start = t
 
     # HP reset detection: both HP go from low to high, indicating new round
     # Use rolling median HP over 90 frames (3s). When BOTH medians are > 0.85
@@ -231,7 +239,8 @@ def detect_rounds(rows):
             winner, hp_info = find_winner(p1_smooth, p2_smooth, s_idx, e_idx)
             return [(dur, winner, hp_info, start_t)]
 
-        # Strategy 1: Split at largest data gap > 1.5s (only if timer confirms)
+        # Strategy 1: Split at largest data gap > 5s
+        # Must be long enough to exclude super flash animations (2-4s)
         best_split = None
         best_score = 0
         last_v = None
@@ -239,7 +248,7 @@ def detect_rounds(rows):
             if not np.isnan(p1_norm[i]):
                 if last_v is not None:
                     g = (timestamps[i] - timestamps[last_v]) / 1000.0
-                    if g > 1.5 and g > best_score:
+                    if g > 5.0 and g > best_score:
                         mid_t = timestamps[i] / 1000.0
                         dur1 = mid_t - start_t
                         dur2 = start_t + dur - mid_t

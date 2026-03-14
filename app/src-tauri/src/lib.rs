@@ -280,11 +280,21 @@ fn detect_rounds_for_replay(
     for i in 0..n {
         if let Some(t) = timer_smooth[i] {
             lowest_since_start = lowest_since_start.min(t);
-            // Timer jumped from low (<=70) to high (>=88) = new round
+            // Timer jumped from low (<=70) to high (>=88) = potential new round
             if t >= 88 && lowest_since_start <= 70 {
                 if timer_starts.last().map_or(true, |&last| i - last > MIN_ROUND_FRAMES) {
-                    timer_starts.push(i);
-                    lowest_since_start = t;
+                    // Validate: smoothed timer must reach ≥93 within 90 frames.
+                    // Filters wallbreak/super flash OCR noise (peaks at ~88-90).
+                    // Real round starts reach 99 quickly. Without this check, a false
+                    // boundary blocks detection of the real one via MIN_ROUND_FRAMES.
+                    let check_end = (i + 90).min(n);
+                    let confirmed = (i..check_end)
+                        .any(|j| timer_smooth[j].map_or(false, |tv| tv >= 93));
+                    if confirmed {
+                        timer_starts.push(i);
+                        lowest_since_start = t;
+                    }
+                    // else: false timer jump — don't push, don't reset lowest
                 }
             }
         }
@@ -505,13 +515,15 @@ fn detect_rounds_for_replay(
         let mut best_split: Option<usize> = None;
         let mut best_score: f64 = 0.0;
 
-        // Strategy 1: largest data gap > 1.5s
+        // Strategy 1: largest data gap > 5s
+        // Must be long enough to exclude super flash animations (2-4s)
+        // Real between-round transitions are 8-15s+
         let mut last_v: Option<usize> = None;
         for i in s_idx..e_idx {
             if !p1_norm[i].is_nan() {
                 if let Some(lv) = last_v {
                     let g = (ts[i] - ts[lv]) / 1000.0;
-                    if g > 1.5 && g > best_score {
+                    if g > 5.0 && g > best_score {
                         let mid_t = ts[i] / 1000.0;
                         let start_t = ts[s_idx] / 1000.0;
                         let end_t = ts[e_idx.min(ts.len() - 1)] / 1000.0;
