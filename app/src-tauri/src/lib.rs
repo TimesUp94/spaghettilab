@@ -280,8 +280,10 @@ fn detect_rounds_for_replay(
     for i in 0..n {
         if let Some(t) = timer_smooth[i] {
             lowest_since_start = lowest_since_start.min(t);
-            // Timer jumped from low (<=70) to high (>=88) = potential new round
-            if t >= 88 && lowest_since_start <= 70 {
+            // Timer jumped from low to high = potential new round.
+            // Use <= 80 (not 70) to catch short rounds where timer only drops to ~82-85.
+            // The inline >=93 validation prevents false triggers from small fluctuations.
+            if t >= 88 && lowest_since_start <= 80 {
                 if timer_starts.last().map_or(true, |&last| i - last > MIN_ROUND_FRAMES) {
                     // Validate: smoothed timer must reach ≥93 within 90 frames.
                     // Filters wallbreak/super flash OCR noise (peaks at ~88-90).
@@ -531,12 +533,12 @@ fn detect_rounds_for_replay(
             return vec![(s_idx, e_idx)];
         }
 
-        // Timer confirmation: smoothed timer must reach ≥90 within 180 frames (6s).
-        // Wider window than main detection because split points may land during
-        // KO animation where forward-fill carries old timer values, adding smoothing lag.
+        // Timer confirmation: smoothed timer must reach ≥93 within 120 frames (4s).
+        // Slightly wider than main detection (90 frames) to handle smoothing lag
+        // at KO animation gaps, but not so wide that next game's timer bleeds in.
         let timer_ok = |idx: usize| -> bool {
-            let check_end = (idx + 180).min(n);
-            (idx..check_end).any(|j| timer_smooth[j].map_or(false, |t| t >= 90))
+            let check_end = (idx + 120).min(n);
+            (idx..check_end).any(|j| timer_smooth[j].map_or(false, |t| t >= 93))
         };
 
         let mut best_split: Option<usize> = None;

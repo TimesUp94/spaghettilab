@@ -160,7 +160,7 @@ def detect_rounds(rows):
         t = timer_smooth[i]
         if t is not None:
             lowest_since_start = min(lowest_since_start, t)
-            if t >= 88 and lowest_since_start <= 70:
+            if t >= 88 and lowest_since_start <= 80:
                 if not timer_starts or (i - timer_starts[-1]) > MIN_ROUND_FRAMES:
                     # Validate: smoothed timer must reach ≥93 within 90 frames.
                     # Filters wallbreak/super flash noise without blocking real boundaries.
@@ -242,10 +242,10 @@ def detect_rounds(rows):
         rounds.append((dur, winner, hp_info, timestamps[s_idx] / 1000.0, s_idx, e_idx))
 
     # Post-process: recursively split rounds > 45s
-    # Timer confirmation for split candidates (wider window for KO animation lag)
+    # Timer confirmation for split candidates (slightly wider window for KO lag)
     def timer_ok(idx):
-        check_end = min(idx + 180, n)
-        return any(timer_smooth[j] is not None and timer_smooth[j] >= 90
+        check_end = min(idx + 120, n)
+        return any(timer_smooth[j] is not None and timer_smooth[j] >= 93
                    for j in range(idx, check_end))
 
     def split_long_round(s_idx, e_idx, depth=0):
