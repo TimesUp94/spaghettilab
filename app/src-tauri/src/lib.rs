@@ -383,18 +383,19 @@ fn detect_rounds_for_replay(
         let span = e - s;
         let search_start = s + (span as f64 * 0.4) as usize;
 
-        // Early check: count raw frames with HP < 0.10 in last 60%.
-        // 3+ frames near zero = unambiguous KO, overrides smoothed analysis.
+        // Early check: count raw frames with HP < 0.15 in last 60%.
+        // If one player has significantly more near-zero frames (3x more, min 3),
+        // that player was KO'd. Allows some noise on the other side.
         let p1_ko_count = (search_start..e)
-            .filter(|&j| !p1_norm[j].is_nan() && p1_norm[j] < 0.10)
+            .filter(|&j| !p1_norm[j].is_nan() && p1_norm[j] < 0.15)
             .count();
         let p2_ko_count = (search_start..e)
-            .filter(|&j| !p2_norm[j].is_nan() && p2_norm[j] < 0.10)
+            .filter(|&j| !p2_norm[j].is_nan() && p2_norm[j] < 0.15)
             .count();
-        if p1_ko_count >= 3 && p2_ko_count == 0 {
+        if p1_ko_count >= 3 && p1_ko_count >= p2_ko_count * 3 + 1 {
             return Some(("P2".to_string(), 0.0, 1.0));
         }
-        if p2_ko_count >= 3 && p1_ko_count == 0 {
+        if p2_ko_count >= 3 && p2_ko_count >= p1_ko_count * 3 + 1 {
             return Some(("P1".to_string(), 1.0, 0.0));
         }
 

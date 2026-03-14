@@ -49,12 +49,12 @@ def find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm=None, p2_norm=None):
     # 3+ frames near zero = unambiguous KO.
     if p1_norm is not None and p2_norm is not None:
         p1_ko = sum(1 for j in range(search_start, e_idx)
-                    if not np.isnan(p1_norm[j]) and p1_norm[j] < 0.10)
+                    if not np.isnan(p1_norm[j]) and p1_norm[j] < 0.15)
         p2_ko = sum(1 for j in range(search_start, e_idx)
-                    if not np.isnan(p2_norm[j]) and p2_norm[j] < 0.10)
-        if p1_ko >= 3 and p2_ko == 0:
+                    if not np.isnan(p2_norm[j]) and p2_norm[j] < 0.15)
+        if p1_ko >= 3 and p1_ko >= p2_ko * 3 + 1:
             return "P2", "[0.00, 1.00]"
-        if p2_ko >= 3 and p1_ko == 0:
+        if p2_ko >= 3 and p2_ko >= p1_ko * 3 + 1:
             return "P1", "[1.00, 0.00]"
 
     best_min_hp = 2.0
