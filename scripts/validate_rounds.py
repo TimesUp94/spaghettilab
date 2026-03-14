@@ -230,10 +230,10 @@ def detect_rounds(rows):
         rounds.append((dur, winner, hp_info, timestamps[s_idx] / 1000.0, s_idx, e_idx))
 
     # Post-process: recursively split rounds > 45s
-    # Timer confirmation for split candidates
+    # Timer confirmation for split candidates (wider window for KO animation lag)
     def timer_ok(idx):
-        check_end = min(idx + 90, n)
-        return any(timer_smooth[j] is not None and timer_smooth[j] >= 93
+        check_end = min(idx + 180, n)
+        return any(timer_smooth[j] is not None and timer_smooth[j] >= 90
                    for j in range(idx, check_end))
 
     def split_long_round(s_idx, e_idx, depth=0):

@@ -515,10 +515,12 @@ fn detect_rounds_for_replay(
             return vec![(s_idx, e_idx)];
         }
 
-        // Timer confirmation: smoothed timer must reach ≥93 within 90 frames
+        // Timer confirmation: smoothed timer must reach ≥90 within 180 frames (6s).
+        // Wider window than main detection because split points may land during
+        // KO animation where forward-fill carries old timer values, adding smoothing lag.
         let timer_ok = |idx: usize| -> bool {
-            let check_end = (idx + 90).min(n);
-            (idx..check_end).any(|j| timer_smooth[j].map_or(false, |t| t >= 93))
+            let check_end = (idx + 180).min(n);
+            (idx..check_end).any(|j| timer_smooth[j].map_or(false, |t| t >= 90))
         };
 
         let mut best_split: Option<usize> = None;
