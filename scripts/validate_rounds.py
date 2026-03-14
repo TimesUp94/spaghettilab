@@ -160,7 +160,7 @@ def detect_rounds(rows):
         t = timer_smooth[i]
         if t is not None:
             lowest_since_start = min(lowest_since_start, t)
-            if t >= 88 and lowest_since_start <= 80:
+            if t >= 88 and lowest_since_start <= 70:
                 if not timer_starts or (i - timer_starts[-1]) > MIN_ROUND_FRAMES:
                     # Validate: smoothed timer must reach ≥93 within 90 frames.
                     # Filters wallbreak/super flash noise without blocking real boundaries.
