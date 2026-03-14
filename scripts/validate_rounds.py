@@ -203,18 +203,17 @@ def detect_rounds(rows):
     # Merge all boundaries (timer + HP resets + game breaks)
     all_bounds = sorted(set(timer_starts + hp_resets + game_breaks))
 
+    # Wallbreak filter BEFORE dedup: real round starts always have timer ≈99.
+    # Apply before dedup so false boundaries don't shadow valid nearby ones.
+    all_bounds = [b for b in all_bounds
+                  if any(timer_smooth[j] is not None and timer_smooth[j] >= 93
+                         for j in range(b, min(b + 90, n)))]
+
     # Deduplicate within 10 seconds
     merged = []
     for b in all_bounds:
         if not merged or (timestamps[b] - timestamps[merged[-1]]) > 10000:
             merged.append(b)
-
-    # Wallbreak filter: real round starts always have timer ≈99.
-    # During wallbreak, bars disappear briefly but timer stays mid-round.
-    # Check that smoothed timer reaches ≥93 within 90 frames (~3s) after boundary.
-    merged = [b for b in merged
-              if any(timer_smooth[j] is not None and timer_smooth[j] >= 93
-                     for j in range(b, min(b + 90, n)))]
 
     # Add first valid data frame as start if needed
     # (first-valid doesn't need timer validation — could be mid-round)

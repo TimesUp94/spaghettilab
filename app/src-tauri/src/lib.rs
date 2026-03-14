@@ -343,6 +343,14 @@ fn detect_rounds_for_replay(
     all_indices.sort();
     all_indices.dedup();
 
+    // ── Wallbreak filter: real round starts always have timer ≈99 ──
+    // Apply BEFORE dedup so that false boundaries (wallbreak/super flash) don't
+    // shadow valid nearby boundaries during the 10-second dedup window.
+    all_indices.retain(|&b| {
+        let check_end = (b + 90).min(n);
+        (b..check_end).any(|j| timer_smooth[j].map_or(false, |t| t >= 93))
+    });
+
     // Deduplicate within 10 seconds
     let mut deduped: Vec<usize> = Vec::new();
     for &idx in &all_indices {
@@ -350,15 +358,6 @@ fn detect_rounds_for_replay(
             deduped.push(idx);
         }
     }
-
-    // ── Wallbreak filter: real round starts always have timer ≈99 ──
-    // During wallbreak, bars disappear briefly but timer stays at mid-round value.
-    // Check that the smoothed timer reaches ≥93 within 90 frames (~3s) after each
-    // boundary. This filters wallbreak transitions and other false boundaries.
-    deduped.retain(|&b| {
-        let check_end = (b + 90).min(n);
-        (b..check_end).any(|j| timer_smooth[j].map_or(false, |t| t >= 93))
-    });
 
     // Add first valid data frame as start if needed
     // (first-valid doesn't need timer validation — could be mid-round)
