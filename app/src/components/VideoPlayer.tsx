@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from "react";
-import type { RoundResult, DamageEvent } from "../types";
+import type { RoundResult, DamageEvent, Match } from "../types";
 
 interface Props {
   src: string | null;
@@ -8,6 +8,8 @@ interface Props {
   durationMs: number;
   rounds: RoundResult[];
   damageEvents: DamageEvent[];
+  selectedMatch: Match | null;
+  onClearSelection: () => void;
 }
 
 function formatTime(s: number): string {
@@ -23,6 +25,8 @@ export function VideoPlayer({
   durationMs,
   rounds,
   damageEvents,
+  selectedMatch,
+  onClearSelection,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
@@ -79,6 +83,11 @@ export function VideoPlayer({
     }
   }, []);
 
+  // Zoom range for progress bar
+  const zoomStartS = selectedMatch ? selectedMatch.start_ms / 1000 : 0;
+  const zoomEndS = selectedMatch ? selectedMatch.end_ms / 1000 : duration;
+  const zoomDuration = zoomEndS - zoomStartS;
+
   const handleProgressClick = useCallback(
     (e: React.MouseEvent) => {
       const bar = progressRef.current;
@@ -86,9 +95,9 @@ export function VideoPlayer({
       if (!bar || !video) return;
       const rect = bar.getBoundingClientRect();
       const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-      video.currentTime = pct * duration;
+      video.currentTime = zoomStartS + pct * zoomDuration;
     },
-    [duration]
+    [zoomStartS, zoomDuration]
   );
 
   const skipSeconds = useCallback((delta: number) => {
@@ -134,7 +143,30 @@ export function VideoPlayer({
     return () => window.removeEventListener("keydown", handler);
   }, [togglePlay, skipSeconds]);
 
-  const progress = duration > 0 ? currentTime / duration : 0;
+  // Map a time (seconds) to a 0-100% position within the zoom range
+  const toBarPct = (s: number) =>
+    zoomDuration > 0
+      ? ((s - zoomStartS) / zoomDuration) * 100
+      : 0;
+
+  const progress = toBarPct(currentTime);
+
+  // Filter rounds/damage to zoom range
+  const visibleRounds = selectedMatch
+    ? rounds.filter(
+        (r) =>
+          r.round_start_ms >= selectedMatch.start_ms &&
+          r.round_end_ms <= selectedMatch.end_ms
+      )
+    : rounds;
+
+  const visibleDamage = selectedMatch
+    ? damageEvents.filter(
+        (e) =>
+          e.timestamp_ms >= selectedMatch.start_ms &&
+          e.timestamp_ms <= selectedMatch.end_ms
+      )
+    : damageEvents;
 
   // Find current round
   const currentMs = currentTime * 1000;
@@ -194,13 +226,13 @@ export function VideoPlayer({
         {/* Filled progress */}
         <div
           className="absolute top-0 left-0 h-full bg-accent-purple/40 transition-[width] duration-75"
-          style={{ width: `${progress * 100}%` }}
+          style={{ width: `${Math.max(0, Math.min(100, progress))}%` }}
         />
 
         {/* Round region shading */}
-        {rounds.map((r, i) => {
-          const start = (r.round_start_ms / 1000 / duration) * 100;
-          const end = (r.round_end_ms / 1000 / duration) * 100;
+        {visibleRounds.map((r, i) => {
+          const start = toBarPct(r.round_start_ms / 1000);
+          const end = toBarPct(r.round_end_ms / 1000);
           const isP1Win = r.winner === "P1";
           return (
             <div
@@ -214,8 +246,8 @@ export function VideoPlayer({
         })}
 
         {/* Round boundary markers */}
-        {rounds.map((r, i) => {
-          const pos = (r.round_end_ms / 1000 / duration) * 100;
+        {visibleRounds.map((r, i) => {
+          const pos = toBarPct(r.round_end_ms / 1000);
           return (
             <div
               key={`round-${i}`}
@@ -226,10 +258,10 @@ export function VideoPlayer({
         })}
 
         {/* Comeback markers */}
-        {rounds
+        {visibleRounds
           .filter((r) => r.is_comeback)
           .map((r, i) => {
-            const pos = (r.deficit_timestamp_ms / 1000 / duration) * 100;
+            const pos = toBarPct(r.deficit_timestamp_ms / 1000);
             return (
               <div
                 key={`cb-${i}`}
@@ -241,10 +273,10 @@ export function VideoPlayer({
           })}
 
         {/* High damage markers */}
-        {damageEvents
+        {visibleDamage
           .filter((e) => e.damage_pct > 0.30)
           .map((e, i) => {
-            const pos = (e.timestamp_ms / 1000 / duration) * 100;
+            const pos = toBarPct(e.timestamp_ms / 1000);
             const color = e.target_side === 1 ? "bg-p1/40" : "bg-p2/40";
             return (
               <div
@@ -258,7 +290,7 @@ export function VideoPlayer({
         {/* Playhead */}
         <div
           className="absolute top-0 bottom-0 w-0.5 bg-text-primary"
-          style={{ left: `${progress * 100}%` }}
+          style={{ left: `${Math.max(0, Math.min(100, progress))}%` }}
         />
       </div>
 
@@ -289,6 +321,16 @@ export function VideoPlayer({
         <span className="text-[11px] font-mono text-text-secondary ml-1">
           {formatTime(currentTime)} / {formatTime(duration)}
         </span>
+
+        {selectedMatch && (
+          <button
+            onClick={onClearSelection}
+            className="text-[10px] text-accent-purple hover:text-accent-purple/80 transition-colors cursor-pointer px-1.5 py-0.5 rounded bg-accent-purple/10"
+            title="Show full timeline"
+          >
+            G{selectedMatch.match_index + 1} &times;
+          </button>
+        )}
 
         {/* Playback speed */}
         <div className="ml-auto flex items-center gap-3">

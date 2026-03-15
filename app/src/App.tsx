@@ -106,9 +106,59 @@ export default function App() {
     startMs: number;
     endMs: number;
   } | null>(null);
+  const [selectedMatchIndex, setSelectedMatchIndex] = useState<number | null>(
+    null
+  );
 
   // Derived: group rounds into matches
   const matches = useMemo(() => groupRoundsIntoMatches(rounds), [rounds]);
+
+  const selectedMatch =
+    selectedMatchIndex !== null ? matches[selectedMatchIndex] ?? null : null;
+
+  // Compute match-scoped stats when a match is selected
+  const displayStats = useMemo(() => {
+    if (!selectedMatch || !stats) return stats;
+    const matchDamage = damageEvents.filter(
+      (e) =>
+        e.timestamp_ms >= selectedMatch.start_ms &&
+        e.timestamp_ms <= selectedMatch.end_ms
+    );
+    const p1Hits = matchDamage.filter((e) => e.target_side === 1);
+    const p2Hits = matchDamage.filter((e) => e.target_side === 2);
+    const durations = selectedMatch.rounds.map(
+      (r) => (r.round_end_ms - r.round_start_ms) / 1000
+    );
+    const winnerHps = selectedMatch.rounds.map((r) => r.winner_final_hp);
+    return {
+      ...stats,
+      total_rounds: selectedMatch.rounds.length,
+      p1_round_wins: selectedMatch.p1_rounds_won,
+      p2_round_wins: selectedMatch.p2_rounds_won,
+      total_damage_events: matchDamage.length,
+      p1_damage_taken: p1Hits.reduce((s, e) => s + e.damage_pct, 0),
+      p2_damage_taken: p2Hits.reduce((s, e) => s + e.damage_pct, 0),
+      p1_biggest_hit:
+        p1Hits.length > 0 ? Math.max(...p1Hits.map((e) => e.damage_pct)) : 0,
+      p2_biggest_hit:
+        p2Hits.length > 0 ? Math.max(...p2Hits.map((e) => e.damage_pct)) : 0,
+      avg_round_duration_s:
+        durations.length > 0
+          ? durations.reduce((a, b) => a + b, 0) / durations.length
+          : 0,
+      longest_round_s: durations.length > 0 ? Math.max(...durations) : 0,
+      shortest_round_s: durations.length > 0 ? Math.min(...durations) : 0,
+      comeback_count: selectedMatch.rounds.filter((r) => r.is_comeback).length,
+      close_rounds: selectedMatch.rounds.filter(
+        (r) => r.winner_final_hp < 0.2
+      ).length,
+      avg_winner_final_hp:
+        winnerHps.length > 0
+          ? winnerHps.reduce((a, b) => a + b, 0) / winnerHps.length
+          : 0,
+      duration_s: (selectedMatch.end_ms - selectedMatch.start_ms) / 1000,
+    } as MatchStats;
+  }, [selectedMatch, stats, damageEvents]);
 
   const openDatabase = useCallback(async (path: string) => {
     setDbPath(path);
@@ -141,6 +191,7 @@ export default function App() {
   const loadReplayData = useCallback(
     async (db: string, replay: Replay) => {
       setSelectedReplay(replay);
+      setSelectedMatchIndex(null);
       setLoading(true);
       try {
         const [fd, de, rn, st, hl, vp] = await Promise.all([
@@ -190,6 +241,18 @@ export default function App() {
     setSeekToMs(ms);
   }, []);
 
+  const handleRoundSeek = useCallback(
+    (ms: number) => {
+      setSeekToMs(ms);
+      // Find which match contains this timestamp
+      const idx = matches.findIndex((m) =>
+        m.rounds.some((r) => r.round_start_ms === ms)
+      );
+      setSelectedMatchIndex(idx >= 0 ? idx : null);
+    },
+    [matches]
+  );
+
   const handleExport = useCallback((startMs: number, endMs: number) => {
     setExportTarget({ startMs, endMs });
   }, []);
@@ -234,7 +297,7 @@ export default function App() {
             }}
             className="text-accent-purple font-semibold text-sm tracking-wide hover:text-accent-purple/80 transition-colors cursor-pointer"
           >
-            REPLANAL
+            SPAGHETTI LAB
           </button>
           <span className="text-text-muted text-xs">|</span>
           <span className="text-text-secondary text-xs truncate max-w-[400px]">
@@ -286,10 +349,17 @@ export default function App() {
                     durationMs={selectedReplay.duration_ms}
                     rounds={rounds}
                     damageEvents={damageEvents}
+                    selectedMatch={selectedMatch}
+                    onClearSelection={() => setSelectedMatchIndex(null)}
                   />
                 </div>
                 <div className="w-[320px] shrink-0">
-                  <MatchOverview stats={stats} replay={selectedReplay} />
+                  <MatchOverview
+                    stats={displayStats!}
+                    replay={selectedReplay}
+                    selectedMatch={selectedMatch}
+                    onClearSelection={() => setSelectedMatchIndex(null)}
+                  />
                 </div>
               </div>
 
@@ -301,6 +371,8 @@ export default function App() {
                   damageEvents={damageEvents}
                   highlights={highlights}
                   onSeek={handleSeek}
+                  selectedMatch={selectedMatch}
+                  onClearSelection={() => setSelectedMatchIndex(null)}
                 />
               </div>
 
@@ -343,14 +415,15 @@ export default function App() {
                   {activeTab === "matches" && (
                     <MatchList
                       matches={matches}
-                      onSeek={handleSeek}
+                      onSeek={handleRoundSeek}
                       onExport={handleExport}
+                      selectedMatchIndex={selectedMatchIndex}
                     />
                   )}
                   {activeTab === "rounds" && (
                     <RoundBreakdown
                       rounds={rounds}
-                      onSeek={handleSeek}
+                      onSeek={handleRoundSeek}
                       onExport={handleExport}
                     />
                   )}

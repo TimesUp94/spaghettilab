@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/refs/heads/dev/crates/tauri-config-schema/schema.json",
-  "productName": "Replanal",
+  "productName": "Spaghetti Lab",
   "version": "0.1.0",
-  "identifier": "com.replanal.analyzer",
+  "identifier": "com.spaghettilab.analyzer",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Replanal - GGS Replay Analyzer",
+        "title": "Spaghetti Lab - GGS Replay Analyzer",
         "width": 1440,
         "height": 900,
         "minWidth": 1024,

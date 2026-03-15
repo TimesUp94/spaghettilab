@@ -1,8 +1,10 @@
-import type { MatchStats, Replay } from "../types";
+import type { MatchStats, Replay, Match } from "../types";
 
 interface Props {
   stats: MatchStats;
   replay: Replay;
+  selectedMatch: Match | null;
+  onClearSelection: () => void;
 }
 
 function StatRow({
@@ -29,7 +31,12 @@ function StatRow({
   );
 }
 
-export function MatchOverview({ stats, replay }: Props) {
+export function MatchOverview({
+  stats,
+  replay,
+  selectedMatch,
+  onClearSelection,
+}: Props) {
   const p1Name = replay.replay_id.match(/_([^_]+)_vs_/)?.[1] || "P1";
   const p2Name = replay.replay_id.match(/_vs_(.+)$/)?.[1] || "P2";
 
@@ -37,6 +44,19 @@ export function MatchOverview({ stats, replay }: Props) {
     <div className="bg-surface-2 rounded-lg border border-surface-4/50 h-full flex flex-col">
       {/* Header with round score */}
       <div className="p-3 border-b border-surface-4/30">
+        {selectedMatch && (
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-[10px] text-accent-purple font-medium">
+              Game {selectedMatch.match_index + 1}
+            </span>
+            <button
+              onClick={onClearSelection}
+              className="text-[10px] text-text-muted hover:text-text-secondary transition-colors cursor-pointer"
+            >
+              Show all
+            </button>
+          </div>
+        )}
         <div className="flex items-center justify-between">
           <div className="text-center flex-1">
             <div className="text-p1-light text-xs font-medium truncate">

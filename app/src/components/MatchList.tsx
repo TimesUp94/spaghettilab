@@ -4,6 +4,7 @@ interface Props {
   matches: Match[];
   onSeek: (ms: number) => void;
   onExport: (startMs: number, endMs: number) => void;
+  selectedMatchIndex: number | null;
 }
 
 function formatTime(ms: number): string {
@@ -13,7 +14,12 @@ function formatTime(ms: number): string {
   return `${m}:${sec.toString().padStart(2, "0")}`;
 }
 
-export function MatchList({ matches, onSeek, onExport }: Props) {
+export function MatchList({
+  matches,
+  onSeek,
+  onExport,
+  selectedMatchIndex,
+}: Props) {
   if (matches.length === 0) {
     return (
       <div className="text-text-muted text-sm text-center py-8">
@@ -28,20 +34,23 @@ export function MatchList({ matches, onSeek, onExport }: Props) {
         const dur = ((m.end_ms - m.start_ms) / 1000).toFixed(0);
         const isP1Win = m.winner === "P1";
         const hasComeback = m.rounds.some((r) => r.is_comeback);
+        const isSelected = selectedMatchIndex === m.match_index;
 
         return (
           <div
             key={m.match_index}
             className={`rounded-lg bg-surface-2 border transition-all duration-150 ${
-              hasComeback
-                ? "border-accent-gold/20"
-                : "border-surface-4/30"
+              isSelected
+                ? "border-accent-purple/50 ring-1 ring-accent-purple/20"
+                : hasComeback
+                  ? "border-accent-gold/20"
+                  : "border-surface-4/30"
             }`}
           >
             {/* Match header */}
             <div
               className="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-surface-3 rounded-t-lg"
-              onClick={() => onSeek(m.start_ms)}
+              onClick={() => onSeek(m.rounds[0].round_start_ms)}
             >
               <span className="text-text-muted text-xs font-mono w-6 shrink-0">
                 G{m.match_index + 1}

@@ -10,8 +10,8 @@ export function WelcomeScreen({ onOpenDb, onAnalyze }: Props) {
         {/* Logo / Title */}
         <div className="mb-8">
           <h1 className="text-5xl font-bold tracking-tight mb-3">
-            <span className="text-accent-purple">REPL</span>
-            <span className="text-text-primary">ANAL</span>
+            <span className="text-accent-purple">SPAGHETTI</span>{" "}
+            <span className="text-text-primary">LAB</span>
           </h1>
           <p className="text-text-secondary text-sm">
             Guilty Gear Strive Replay Analyzer

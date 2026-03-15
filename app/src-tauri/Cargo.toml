@@ -1,10 +1,10 @@
 [package]
-name = "replanal"
+name = "spaghetti-lab"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "replanal_lib"
+name = "spaghetti_lab_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [build-dependencies]

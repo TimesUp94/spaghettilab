@@ -14,6 +14,7 @@ import type {
   RoundResult,
   DamageEvent,
   Highlight,
+  Match,
 } from "../types";
 
 interface Props {
@@ -22,6 +23,8 @@ interface Props {
   damageEvents: DamageEvent[];
   highlights: Highlight[];
   onSeek: (ms: number) => void;
+  selectedMatch: Match | null;
+  onClearSelection: () => void;
 }
 
 interface ChartPoint {
@@ -42,14 +45,27 @@ export function HealthTimeline({
   damageEvents,
   highlights,
   onSeek,
+  selectedMatch,
+  onClearSelection,
 }: Props) {
-  // Downsample to ~800 points for smooth rendering
+  // Downsample to ~800 points, zoom-aware
   const chartData = useMemo(() => {
     if (frameData.length === 0) return [];
-    const step = Math.max(1, Math.floor(frameData.length / 800));
+    let data = frameData;
+    if (selectedMatch) {
+      const pad =
+        ((selectedMatch.end_ms - selectedMatch.start_ms) / 1000) * 0.03;
+      const lo = selectedMatch.start_ms / 1000 - pad;
+      const hi = selectedMatch.end_ms / 1000 + pad;
+      data = frameData.filter((f) => {
+        const s = f.timestamp_ms / 1000;
+        return s >= lo && s <= hi;
+      });
+    }
+    const step = Math.max(1, Math.floor(data.length / 800));
     const points: ChartPoint[] = [];
-    for (let i = 0; i < frameData.length; i += step) {
-      const f = frameData[i];
+    for (let i = 0; i < data.length; i += step) {
+      const f = data[i];
       points.push({
         time_s: f.timestamp_ms / 1000,
         p1:
@@ -63,7 +79,7 @@ export function HealthTimeline({
       });
     }
     return points;
-  }, [frameData]);
+  }, [frameData, selectedMatch]);
 
   const handleClick = useCallback(
     (data: any) => {
@@ -75,7 +91,17 @@ export function HealthTimeline({
     [onSeek]
   );
 
-  const comebacks = rounds.filter((r) => r.is_comeback);
+  // Filter rounds to visible range when zoomed
+  const visibleRounds = useMemo(() => {
+    if (!selectedMatch) return rounds;
+    return rounds.filter(
+      (r) =>
+        r.round_start_ms >= selectedMatch.start_ms &&
+        r.round_end_ms <= selectedMatch.end_ms
+    );
+  }, [rounds, selectedMatch]);
+
+  const comebacks = visibleRounds.filter((r) => r.is_comeback);
 
   if (chartData.length === 0) {
     return (
@@ -88,9 +114,25 @@ export function HealthTimeline({
   return (
     <div className="bg-surface-2 rounded-lg border border-surface-4/50 p-2">
       <div className="flex items-center justify-between px-2 mb-1">
-        <span className="text-[10px] text-text-muted uppercase tracking-wider font-medium">
-          Health Timeline
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-text-muted uppercase tracking-wider font-medium">
+            Health Timeline
+          </span>
+          {selectedMatch && (
+            <>
+              <span className="text-[10px] text-accent-purple font-medium">
+                Game {selectedMatch.match_index + 1}
+              </span>
+              <button
+                onClick={onClearSelection}
+                className="text-[10px] text-text-muted hover:text-text-secondary transition-colors cursor-pointer px-1"
+                title="Show full timeline"
+              >
+                Show all
+              </button>
+            </>
+          )}
+        </div>
         <div className="flex items-center gap-3 text-[10px]">
           <span className="flex items-center gap-1">
             <span className="w-2 h-2 rounded-full bg-p1" />
@@ -158,7 +200,7 @@ export function HealthTimeline({
           />
 
           {/* Round boundary lines */}
-          {rounds.map((r, i) => (
+          {visibleRounds.map((r, i) => (
             <ReferenceLine
               key={`rb-${i}`}
               x={r.round_end_ms / 1000}
