@@ -60,6 +60,24 @@ def find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm=None, p2_norm=None):
             return "P2", "[0.00, 1.00]"
         if p2_ko >= 3 and p2_ko >= p1_ko * 3 + 1:
             return "P1", "[1.00, 0.00]"
+        # Both players have KO frames but neither dominates — could be KO
+        # animation artifact OR wallbreak/comeback. When the two KO moments
+        # are close together (≤90 frames / 3s), it's a KO animation and the
+        # first player to reach zero is the real loser. When far apart (>90),
+        # it's a wallbreak/comeback — let the KO clustering handle it.
+        if p1_ko >= 3 and p2_ko >= 3:
+            first_p1 = next((j for j in range(search_start, e_idx)
+                            if not np.isnan(p1_norm[j]) and p1_norm[j] < 0.05), None)
+            first_p2 = next((j for j in range(search_start, e_idx)
+                            if not np.isnan(p2_norm[j]) and p2_norm[j] < 0.05), None)
+            if first_p1 is not None and first_p2 is not None:
+                gap = abs(first_p1 - first_p2)
+                if gap <= 90:
+                    # Close together = KO animation. First to zero is real.
+                    if first_p1 < first_p2:
+                        return "P2", "[0.00, 1.00]"
+                    elif first_p2 < first_p1:
+                        return "P1", "[1.00, 0.00]"
 
     best_min_hp = 2.0
     best_p1 = None
@@ -119,15 +137,34 @@ def find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm=None, p2_norm=None):
 
         min_signal = p2_min_last - p1_min_last  # positive = P1 went lower = P2 wins
 
-        # Average HP in last 25%
-        p1_vals = [p1_smooth[j] for j in range(last_q_start, e_idx) if not np.isnan(p1_smooth[j])]
-        p2_vals = [p2_smooth[j] for j in range(last_q_start, e_idx) if not np.isnan(p2_smooth[j])]
+        # Detect transition artifact: both min values in [0.40, 0.55] with
+        # tiny difference = "loading screen" where both bars show ~50%.
+        if (0.40 <= p1_min_last <= 0.55 and 0.40 <= p2_min_last <= 0.55
+                and abs(min_signal) < 0.05):
+            min_signal = 0.0
+
+        # Average HP in last 25%. Exclude transition artifacts where both
+        # bars drop simultaneously below 0.60 (loading screen pattern).
+        p1_vals = []
+        p2_vals = []
+        for j in range(last_q_start, e_idx):
+            if not np.isnan(p1_smooth[j]) and not np.isnan(p2_smooth[j]):
+                if p1_smooth[j] < 0.60 and p2_smooth[j] < 0.60:
+                    continue
+                p1_vals.append(p1_smooth[j])
+                p2_vals.append(p2_smooth[j])
         if len(p1_vals) >= 10 and len(p2_vals) >= 10:
             avg_signal = np.mean(p2_vals) - np.mean(p1_vals)
         else:
             avg_signal = p2_med - p1_med
 
-        combined = min_signal * 0.6 + avg_signal * 0.4
+        # Dynamic weighting: when both players' min HP is similar, the
+        # difference is noise (transition artifacts, OCR jitter). Use
+        # avg_signal which captures the post-round result screen HP.
+        hp_range = abs(p1_min_last - p2_min_last)
+        min_weight = min(hp_range / 0.20, 0.8)
+        avg_weight = 1.0 - min_weight
+        combined = min_signal * min_weight + avg_signal * avg_weight
         winner = "P2" if combined > 0 else "P1"
         rp1 = p1_min_last if p1_min_last < 2.0 else p1_med
         rp2 = p2_min_last if p2_min_last < 2.0 else p2_med
@@ -261,7 +298,7 @@ def detect_rounds(rows):
     # Post-process: recursively split rounds > 45s
     # Timer confirmation for split candidates (slightly wider window for KO lag)
     def timer_ok(idx):
-        check_end = min(idx + 120, n)
+        check_end = min(idx + 210, n)
         return any(timer_smooth[j] is not None and timer_smooth[j] >= 93
                    for j in range(idx, check_end))
 
@@ -270,8 +307,8 @@ def detect_rounds(rows):
     # Requires: 1) one player's HP was near zero before the gap (KO happened),
     #           2) timer ≥ 90 nearby, 3) both HP reset to > 0.90 after gap.
     def round_reset_ok(idx):
-        # Check for KO evidence before the gap (within preceding 150 frames)
-        ko_start = max(0, idx - 150)
+        # Check for KO evidence before the gap (within preceding 450 frames / 15s)
+        ko_start = max(0, idx - 450)
         p1_ko = sum(1 for j in range(ko_start, idx)
                     if not np.isnan(p1_norm[j]) and p1_norm[j] < 0.10)
         p2_ko = sum(1 for j in range(ko_start, idx)

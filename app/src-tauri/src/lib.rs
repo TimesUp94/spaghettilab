@@ -224,11 +224,11 @@ fn detect_rounds_for_replay(
     let ts: Vec<f64> = rows.iter().map(|r| r.0).collect();
     let p1_raw: Vec<f64> = rows
         .iter()
-        .map(|r| r.1.filter(|&v| v > 0.0).unwrap_or(f64::NAN))
+        .map(|r| r.1.unwrap_or(f64::NAN))
         .collect();
     let p2_raw: Vec<f64> = rows
         .iter()
-        .map(|r| r.2.filter(|&v| v > 0.0).unwrap_or(f64::NAN))
+        .map(|r| r.2.unwrap_or(f64::NAN))
         .collect();
     let timer_raw: Vec<Option<i32>> = rows.iter().map(|r| r.3).collect();
 
@@ -401,6 +401,25 @@ fn detect_rounds_for_replay(
         if p2_ko_count >= 3 && p2_ko_count >= p1_ko_count * 3 + 1 {
             return Some(("P1".to_string(), 1.0, 0.0));
         }
+        // Both players have KO frames but neither dominates — could be KO
+        // animation artifact OR wallbreak/comeback. When the two KO moments
+        // are close together (≤90 frames / 3s), it's a KO animation and the
+        // first player to reach zero is the real loser. When far apart (>90),
+        // it's a wallbreak/comeback — let the KO clustering handle it.
+        if p1_ko_count >= 3 && p2_ko_count >= 3 {
+            let first_p1 = (search_start..e).find(|&j| !p1_norm[j].is_nan() && p1_norm[j] < 0.05);
+            let first_p2 = (search_start..e).find(|&j| !p2_norm[j].is_nan() && p2_norm[j] < 0.05);
+            if let (Some(fp1), Some(fp2)) = (first_p1, first_p2) {
+                let gap = if fp1 > fp2 { fp1 - fp2 } else { fp2 - fp1 };
+                if gap <= 90 {
+                    if fp1 < fp2 {
+                        return Some(("P2".to_string(), 0.0, 1.0));
+                    } else if fp2 < fp1 {
+                        return Some(("P1".to_string(), 1.0, 0.0));
+                    }
+                }
+            }
+        }
 
         // Search last 60% of the round for the frame where min(p1, p2) is lowest
         let mut best_min_hp: f64 = 2.0;
@@ -485,19 +504,6 @@ fn detect_rounds_for_replay(
             }
         }
 
-        // Strategy B: Average HP in last 25% of the round
-        // (handles wallbreak where HP shows combo but not zero)
-        let mut p1_sum = 0.0f64;
-        let mut p2_sum = 0.0f64;
-        let mut avg_count = 0usize;
-        for j in last_quarter_start..e {
-            if !p1_smooth[j].is_nan() && !p2_smooth[j].is_nan() {
-                p1_sum += p1_smooth[j];
-                p2_sum += p2_smooth[j];
-                avg_count += 1;
-            }
-        }
-
         // Find minimum HP each player reaches in the last 40% (smoothed)
         let mut p1_min_last = 2.0f64;
         let mut p2_min_last = 2.0f64;
@@ -507,12 +513,35 @@ fn detect_rounds_for_replay(
         }
 
         // Combine signals: whoever reached lower minimum HP is the loser
-        // (catches wallbreak combo damage even if bar doesn't hit zero)
-        let min_signal = p2_min_last - p1_min_last;  // positive = P1 went lower = P2 wins
+        let mut min_signal = p2_min_last - p1_min_last;  // positive = P1 went lower = P2 wins
 
-        let avg_signal = if avg_count >= 10 {
-            let p1_avg = p1_sum / avg_count as f64;
-            let p2_avg = p2_sum / avg_count as f64;
+        // Detect transition artifact: both min values in [0.40, 0.55] with
+        // tiny difference = "loading screen" where both bars show ~50%.
+        if p1_min_last >= 0.40 && p1_min_last <= 0.55
+            && p2_min_last >= 0.40 && p2_min_last <= 0.55
+            && min_signal.abs() < 0.05
+        {
+            min_signal = 0.0;
+        }
+
+        // Strategy B: Average HP in last 25% of the round.
+        // Exclude transition artifacts where both bars drop simultaneously
+        // below 0.60 (loading screen pattern).
+        let mut p1_avg_vals: Vec<f64> = Vec::new();
+        let mut p2_avg_vals: Vec<f64> = Vec::new();
+        for j in last_quarter_start..e {
+            if !p1_smooth[j].is_nan() && !p2_smooth[j].is_nan() {
+                if p1_smooth[j] < 0.60 && p2_smooth[j] < 0.60 {
+                    continue;
+                }
+                p1_avg_vals.push(p1_smooth[j]);
+                p2_avg_vals.push(p2_smooth[j]);
+            }
+        }
+
+        let avg_signal = if p1_avg_vals.len() >= 10 && p2_avg_vals.len() >= 10 {
+            let p1_avg: f64 = p1_avg_vals.iter().sum::<f64>() / p1_avg_vals.len() as f64;
+            let p2_avg: f64 = p2_avg_vals.iter().sum::<f64>() / p2_avg_vals.len() as f64;
             p2_avg - p1_avg  // positive = P1 lower avg = P2 wins
         } else if let (Some(lp1), Some(lp2)) = (last_valid_p1, last_valid_p2) {
             lp2 - lp1  // positive = P1 lower = P2 wins
@@ -520,8 +549,13 @@ fn detect_rounds_for_replay(
             ep2 - ep1  // fall back to KO moment
         };
 
-        // Weighted combination: minimum HP matters more than average
-        let combined = min_signal * 0.6 + avg_signal * 0.4;
+        // Dynamic weighting: when both players' min HP is similar, the
+        // difference is noise (transition artifacts, OCR jitter). Use
+        // avg_signal which captures the post-round result screen HP.
+        let hp_range = (p1_min_last - p2_min_last).abs();
+        let min_weight = (hp_range / 0.20).min(0.8);
+        let avg_weight = 1.0 - min_weight;
+        let combined = min_signal * min_weight + avg_signal * avg_weight;
         let (winner, _fp1, _fp2) = if combined > 0.0 {
             ("P2".to_string(), p1_min_last.min(2.0), p2_min_last.min(2.0))
         } else {
@@ -553,17 +587,17 @@ fn detect_rounds_for_replay(
             return vec![(s_idx, e_idx)];
         }
 
-        // Timer confirmation: smoothed timer must reach ≥93 within 120 frames (4s).
+        // Timer confirmation: smoothed timer must reach ≥93 within 210 frames (7s).
         let timer_ok = |idx: usize| -> bool {
-            let check_end = (idx + 120).min(n);
+            let check_end = (idx + 210).min(n);
             (idx..check_end).any(|j| timer_smooth[j].map_or(false, |t| t >= 93))
         };
 
         // Alternative confirmation for wallbreak transitions: KO evidence before
         // the gap + timer ≥90 nearby + both HP reset to >0.90 after.
         let round_reset_ok = |idx: usize| -> bool {
-            // Check for KO evidence before the gap (within preceding 150 frames)
-            let ko_start = if idx >= 150 { idx - 150 } else { 0 };
+            // Check for KO evidence before the gap (within preceding 450 frames / 15s)
+            let ko_start = if idx >= 450 { idx - 450 } else { 0 };
             let p1_ko = (ko_start..idx)
                 .filter(|&j| !p1_norm[j].is_nan() && p1_norm[j] < 0.10)
                 .count();
