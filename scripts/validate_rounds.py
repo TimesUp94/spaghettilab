@@ -35,7 +35,7 @@ def forward_fill(vals):
     return result
 
 
-def find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm=None, p2_norm=None):
+def find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm=None, p2_norm=None, timestamps=None):
     """Determine round winner using KO moment + fallback strategies.
 
     Handles GGS edge cases:
@@ -44,7 +44,6 @@ def find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm=None, p2_norm=None):
     """
     span = e_idx - s_idx
     search_start = s_idx + int(span * 0.4)
-
     # Early check: count raw frames with HP < 0.15 in last 60%.
     # Filter post-KO garbage: only count if the OTHER player is NOT at full HP.
     # After a KO, the winning player's bar resets to ~1.0 while the loser's
@@ -73,11 +72,27 @@ def find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm=None, p2_norm=None):
             if first_p1 is not None and first_p2 is not None:
                 gap = abs(first_p1 - first_p2)
                 if gap <= 90:
-                    # Close together = KO animation. First to zero is real.
-                    if first_p1 < first_p2:
-                        return "P2", "[0.00, 1.00]"
-                    elif first_p2 < first_p1:
-                        return "P1", "[1.00, 0.00]"
+                    # KO animation: first to zero is real loser, BUT only
+                    # if it's a one-sided KO (other player > 0.15).
+                    # If the earlier zero has both players near KO, it's
+                    # ambiguous — check the later zero instead.
+                    earlier, later = (first_p1, first_p2) if first_p1 < first_p2 else (first_p2, first_p1)
+                    earlier_is_p1 = first_p1 < first_p2
+                    other_at_earlier = p2_norm[earlier] if earlier_is_p1 else p1_norm[earlier]
+                    other_at_later = p1_norm[later] if earlier_is_p1 else p2_norm[later]
+                    if other_at_earlier > 0.15:
+                        # Earlier zero is one-sided — earlier player died
+                        if earlier_is_p1:
+                            return "P2", "[0.00, 1.00]"
+                        else:
+                            return "P1", "[1.00, 0.00]"
+                    elif other_at_later > 0.15:
+                        # Earlier zero was ambiguous, but later zero is
+                        # one-sided — later player died
+                        if earlier_is_p1:
+                            return "P1", "[1.00, 0.00]"
+                        else:
+                            return "P2", "[0.00, 1.00]"
 
     best_min_hp = 2.0
     best_p1 = None
@@ -292,7 +307,7 @@ def detect_rounds(rows):
             continue
 
         dur = (timestamps[e_idx] - timestamps[s_idx]) / 1000.0
-        winner, hp_info = find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm, p2_norm)
+        winner, hp_info = find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm, p2_norm, timestamps)
         rounds.append((dur, winner, hp_info, timestamps[s_idx] / 1000.0, s_idx, e_idx))
 
     # Post-process: recursively split rounds > 45s
@@ -338,7 +353,7 @@ def detect_rounds(rows):
         start_t = timestamps[s_idx] / 1000.0
 
         if dur <= 45 or depth > 3:
-            winner, hp_info = find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm, p2_norm)
+            winner, hp_info = find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm, p2_norm, timestamps)
             return [(dur, winner, hp_info, start_t)]
 
         # Strategy 1: Split at largest data gap > 1.5s (timer must confirm)
@@ -386,7 +401,7 @@ def detect_rounds(rows):
             return left + right
 
         # Can't split — return as-is
-        winner, hp_info = find_winner(p1_smooth, p2_smooth, s_idx, e_idx)
+        winner, hp_info = find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm, p2_norm, timestamps)
         return [(dur, winner, hp_info, start_t)]
 
     final_rounds = []

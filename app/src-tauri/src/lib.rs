@@ -412,10 +412,30 @@ fn detect_rounds_for_replay(
             if let (Some(fp1), Some(fp2)) = (first_p1, first_p2) {
                 let gap = if fp1 > fp2 { fp1 - fp2 } else { fp2 - fp1 };
                 if gap <= 90 {
-                    if fp1 < fp2 {
-                        return Some(("P2".to_string(), 0.0, 1.0));
-                    } else if fp2 < fp1 {
-                        return Some(("P1".to_string(), 1.0, 0.0));
+                    // Only use first-to-zero when it's a one-sided KO
+                    // (other player > 0.15 HP). If both are near KO at the
+                    // earlier moment, it's ambiguous — check the later zero.
+                    let (earlier, later, earlier_is_p1) = if fp1 < fp2 {
+                        (fp1, fp2, true)
+                    } else {
+                        (fp2, fp1, false)
+                    };
+                    let other_at_earlier = if earlier_is_p1 { p2_norm[earlier] } else { p1_norm[earlier] };
+                    let other_at_later = if earlier_is_p1 { p1_norm[later] } else { p2_norm[later] };
+                    if other_at_earlier > 0.15 {
+                        // Earlier zero is one-sided — earlier player died
+                        if earlier_is_p1 {
+                            return Some(("P2".to_string(), 0.0, 1.0));
+                        } else {
+                            return Some(("P1".to_string(), 1.0, 0.0));
+                        }
+                    } else if other_at_later > 0.15 {
+                        // Later zero is one-sided — later player died
+                        if earlier_is_p1 {
+                            return Some(("P1".to_string(), 1.0, 0.0));
+                        } else {
+                            return Some(("P2".to_string(), 0.0, 1.0));
+                        }
                     }
                 }
             }
