@@ -26,6 +26,7 @@ import {
   deleteNote,
   getDefaultDbPath,
   resolveVideoPath,
+  reanalyzeReplay,
   exportSpag,
   openSpag,
   saveSpag,
@@ -52,16 +53,12 @@ function groupRoundsIntoMatches(rounds: RoundResult[]): Match[] {
   let p1Wins = 0;
   let p2Wins = 0;
 
-  for (const round of rounds) {
-    currentRounds.push(round);
-    if (round.winner === "P1") p1Wins++;
-    else if (round.winner === "P2") p2Wins++;
-
-    if (p1Wins >= 2 || p2Wins >= 2) {
+  const flushMatch = () => {
+    if (currentRounds.length > 0) {
       matches.push({
         match_index: matches.length,
         rounds: currentRounds,
-        winner: p1Wins >= 2 ? "P1" : "P2",
+        winner: p1Wins >= 2 ? "P1" : p2Wins >= 2 ? "P2" : p1Wins > p2Wins ? "P1" : p2Wins > p1Wins ? "P2" : "??",
         p1_rounds_won: p1Wins,
         p2_rounds_won: p2Wins,
         start_ms: currentRounds[0].round_start_ms,
@@ -71,20 +68,25 @@ function groupRoundsIntoMatches(rounds: RoundResult[]): Match[] {
       p1Wins = 0;
       p2Wins = 0;
     }
+  };
+
+  for (const round of rounds) {
+    // Force new match if backend detected a match boundary (timer=99, both 0 wins)
+    if (round.is_match_start && currentRounds.length > 0) {
+      flushMatch();
+    }
+
+    currentRounds.push(round);
+    if (round.winner === "P1") p1Wins++;
+    else if (round.winner === "P2") p2Wins++;
+
+    if (p1Wins >= 2 || p2Wins >= 2) {
+      flushMatch();
+    }
   }
 
   // Remaining rounds that didn't complete a match
-  if (currentRounds.length > 0) {
-    matches.push({
-      match_index: matches.length,
-      rounds: currentRounds,
-      winner: p1Wins > p2Wins ? "P1" : p2Wins > p1Wins ? "P2" : "??",
-      p1_rounds_won: p1Wins,
-      p2_rounds_won: p2Wins,
-      start_ms: currentRounds[0].round_start_ms,
-      end_ms: currentRounds[currentRounds.length - 1].round_end_ms,
-    });
-  }
+  flushMatch();
 
   return matches;
 }
@@ -367,6 +369,23 @@ export default function App() {
     [dbPath]
   );
 
+  // Reanalyze: re-run Python CV pipeline then reload
+  const [reanalyzing, setReanalyzing] = useState(false);
+  const handleReanalyze = useCallback(async () => {
+    if (!dbPath || !selectedReplay) return;
+    setReanalyzing(true);
+    setError(null);
+    try {
+      await reanalyzeReplay(dbPath, selectedReplay.replay_id);
+      await loadReplayData(dbPath, selectedReplay);
+    } catch (err) {
+      console.error("Reanalysis failed:", err);
+      setError(String(err));
+    } finally {
+      setReanalyzing(false);
+    }
+  }, [dbPath, selectedReplay, loadReplayData]);
+
   // .spag file support
   const openSpagFile = useCallback(async (path: string) => {
     setLoading(true);
@@ -571,6 +590,10 @@ export default function App() {
           selectedReplay={selectedReplay}
           onSelect={handleSelectReplay}
           onOpenDb={handleOpenDb}
+          onReload={selectedReplay && dbPath ? () => loadReplayData(dbPath, selectedReplay) : undefined}
+          reloading={loading}
+          onReanalyze={selectedReplay && dbPath ? handleReanalyze : undefined}
+          reanalyzing={reanalyzing}
         />
 
         {/* Main content */}

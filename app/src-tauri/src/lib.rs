@@ -48,6 +48,7 @@ pub struct RoundResult {
     pub max_deficit: f64,
     pub deficit_timestamp_ms: f64,
     pub is_comeback: bool,
+    pub is_match_start: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -180,8 +181,36 @@ fn detect_rounds_for_replay(
     let has_timer_col = conn
         .prepare("SELECT timer_value FROM frame_data LIMIT 1")
         .is_ok();
+    let has_rounds_won_col = conn
+        .prepare("SELECT p1_rounds_won FROM frame_data LIMIT 1")
+        .is_ok();
 
-    let rows: Vec<(f64, Option<f64>, Option<f64>, Option<i32>)> = if has_timer_col {
+    // (timestamp_ms, p1_hp, p2_hp, timer, p1_rounds_won, p2_rounds_won)
+    let rows: Vec<(f64, Option<f64>, Option<f64>, Option<i32>, Option<i32>, Option<i32>)> = if has_timer_col && has_rounds_won_col {
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp_ms, p1_health_pct, p2_health_pct, timer_value, p1_rounds_won, p2_rounds_won
+                 FROM frame_data
+                 WHERE replay_id = ?
+                 ORDER BY timestamp_ms",
+            )
+            .map_err(|e| e.to_string())?;
+        let result: Vec<_> = stmt
+            .query_map([replay_id], |row| {
+                Ok((
+                    row.get::<_, f64>(0)?,
+                    row.get::<_, Option<f64>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                    row.get::<_, Option<i32>>(3)?,
+                    row.get::<_, Option<i32>>(4)?,
+                    row.get::<_, Option<i32>>(5)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        result
+    } else if has_timer_col {
         let mut stmt = conn
             .prepare(
                 "SELECT timestamp_ms, p1_health_pct, p2_health_pct, timer_value
@@ -197,6 +226,8 @@ fn detect_rounds_for_replay(
                     row.get::<_, Option<f64>>(1)?,
                     row.get::<_, Option<f64>>(2)?,
                     row.get::<_, Option<i32>>(3)?,
+                    None::<i32>,
+                    None::<i32>,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -218,6 +249,8 @@ fn detect_rounds_for_replay(
                     row.get::<_, f64>(0)?,
                     row.get::<_, Option<f64>>(1)?,
                     row.get::<_, Option<f64>>(2)?,
+                    None::<i32>,
+                    None::<i32>,
                     None::<i32>,
                 ))
             })
@@ -242,6 +275,8 @@ fn detect_rounds_for_replay(
         .map(|r| r.2.unwrap_or(f64::NAN))
         .collect();
     let timer_raw: Vec<Option<i32>> = rows.iter().map(|r| r.3).collect();
+    let p1_rounds_won: Vec<Option<i32>> = rows.iter().map(|r| r.4).collect();
+    let p2_rounds_won: Vec<Option<i32>> = rows.iter().map(|r| r.5).collect();
 
     // Normalize HP by ceiling
     let mut p1_norm: Vec<f64> = p1_raw
@@ -346,11 +381,40 @@ fn detect_rounds_for_replay(
         }
     }
 
+    // ── Signal 4: Match boundary (timer=99 + both players 0 rounds won) ──
+    // When the round counter hearts reset to 2-2, a new match has started.
+    // Use forward-filled rounds_won and smoothed timer to detect this reliably.
+    let p1_rw_ff = forward_fill_i32(&p1_rounds_won);
+    let p2_rw_ff = forward_fill_i32(&p2_rounds_won);
+    let mut match_boundaries: Vec<usize> = Vec::new();
+    {
+        let mut prev_had_wins = false; // true if either player had round wins before
+        for i in 0..n {
+            let t = timer_smooth[i].unwrap_or(0);
+            let p1w = p1_rw_ff[i].unwrap_or(-1);
+            let p2w = p2_rw_ff[i].unwrap_or(-1);
+
+            if p1w > 0 || p2w > 0 {
+                prev_had_wins = true;
+            }
+
+            // Timer at 99, both players at 0 wins, and we previously saw wins
+            // = definitive new match start
+            if t >= 97 && p1w == 0 && p2w == 0 && prev_had_wins {
+                if match_boundaries.last().map_or(true, |&last| i - last > MIN_ROUND_FRAMES) {
+                    match_boundaries.push(i);
+                    prev_had_wins = false;
+                }
+            }
+        }
+    }
+
     // ── Merge all boundary signals ──
     let mut all_indices: Vec<usize> = Vec::new();
     all_indices.extend_from_slice(&timer_starts);
     all_indices.extend_from_slice(&hp_resets);
     all_indices.extend_from_slice(&game_breaks);
+    all_indices.extend_from_slice(&match_boundaries);
     all_indices.sort();
     all_indices.dedup();
 
@@ -379,10 +443,21 @@ fn detect_rounds_for_replay(
         }
     }
 
+    // Track which boundary indices are match starts
+    let match_boundary_set: std::collections::HashSet<usize> = match_boundaries.iter().copied().collect();
+    // Map deduped boundaries to whether they correspond to a match boundary
+    // (a deduped boundary is a match start if any match_boundary is within 10s)
+    let is_match_start_boundary: Vec<bool> = deduped.iter().map(|&idx| {
+        match_boundary_set.iter().any(|&mb| {
+            let diff = if idx > mb { idx - mb } else { mb - idx };
+            (diff as f64) < 300.0 // within ~10 seconds in frame indices
+        })
+    }).collect();
+
     // ── Build rounds from boundaries ──
-    let mut round_starts: Vec<(usize, f64)> = Vec::new();
-    for &idx in &deduped {
-        round_starts.push((idx, ts[idx]));
+    let mut round_starts: Vec<(usize, f64, bool)> = Vec::new();
+    for (i, &idx) in deduped.iter().enumerate() {
+        round_starts.push((idx, ts[idx], is_match_start_boundary[i]));
     }
 
     // Helper: find KO moment and determine winner for a span.
@@ -741,11 +816,12 @@ fn detect_rounds_for_replay(
     struct RoundSpan {
         s_idx: usize,
         e_idx: usize,
+        is_match_start: bool,
     }
 
     let mut initial_spans: Vec<RoundSpan> = Vec::new();
     for ri in 0..round_starts.len() {
-        let (s_idx, _) = round_starts[ri];
+        let (s_idx, _, is_ms) = round_starts[ri];
         let e_idx = if ri + 1 < round_starts.len() {
             round_starts[ri + 1].0
         } else {
@@ -765,7 +841,7 @@ fn detect_rounds_for_replay(
             continue;
         }
 
-        initial_spans.push(RoundSpan { s_idx, e_idx });
+        initial_spans.push(RoundSpan { s_idx, e_idx, is_match_start: is_ms });
     }
 
     // ── Split long rounds and build results ──
@@ -780,7 +856,23 @@ fn detect_rounds_for_replay(
             vec![(span.s_idx, span.e_idx)]
         };
 
-        for (s_idx, e_idx) in sub_spans {
+        for (sub_i, (s_idx, e_idx)) in sub_spans.iter().enumerate() {
+            let (s_idx, e_idx) = (*s_idx, *e_idx);
+            // Only the first sub-span inherits the match_start flag
+            let is_match_start = sub_i == 0 && span.is_match_start;
+
+            // Trim span to first/last frame with valid HP data.
+            // This excludes dead time (character select, menus, transitions)
+            // that appears as NULL HP gaps at the start/end of a round boundary.
+            let trimmed_start = (s_idx..e_idx)
+                .find(|&j| !p1_norm[j].is_nan() && !p2_norm[j].is_nan());
+            let trimmed_end = (s_idx..e_idx).rev()
+                .find(|&j| !p1_norm[j].is_nan() && !p2_norm[j].is_nan());
+            let (s_idx, e_idx) = match (trimmed_start, trimmed_end) {
+                (Some(s), Some(e)) => (s, e + 1),
+                _ => continue, // no valid data in this span
+            };
+
             let s_ms = ts[s_idx];
             let e_ms = ts[e_idx.min(n - 1)];
             let sub_dur = (e_ms - s_ms) / 1000.0;
@@ -865,6 +957,7 @@ fn detect_rounds_for_replay(
                 max_deficit,
                 deficit_timestamp_ms: deficit_ts,
                 is_comeback,
+                is_match_start,
             });
             round_counter += 1;
         }
@@ -1346,6 +1439,38 @@ async fn analyze_video(
     }
 
     Ok(db_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn reanalyze_replay(db_path: String, replay_id: String) -> Result<(), String> {
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    let video_path = resolve_video_for_replay(&conn, &replay_id)?;
+    drop(conn);
+
+    let project_root = find_project_root()?;
+    let (output_dir, _) = default_output_paths()?;
+
+    let script = project_root.join("scripts").join("analyze_replay.py");
+    let config = project_root.join("config").join("default.yaml");
+
+    let mut cmd = Command::new("python");
+    cmd.env("PYTHONPATH", project_root.to_str().unwrap())
+        .arg(script.to_str().unwrap())
+        .arg(video_path.to_str().unwrap())
+        .arg("--config")
+        .arg(config.to_str().unwrap())
+        .arg("--output")
+        .arg(output_dir.to_str().unwrap());
+
+    let output = cmd.output().map_err(|e| format!("Failed to run Python: {}", e))?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Reanalysis failed:\n{}\n{}", stdout, stderr));
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -1946,6 +2071,7 @@ pub fn run() {
             get_highlights,
             get_default_db_path,
             analyze_video,
+            reanalyze_replay,
             export_clip,
             resolve_video_path,
             extract_preview_frame,

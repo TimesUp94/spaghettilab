@@ -35,6 +35,7 @@ export interface RoundResult {
   max_deficit: number;
   deficit_timestamp_ms: number;
   is_comeback: boolean;
+  is_match_start: boolean;
 }
 
 export interface MatchStats {

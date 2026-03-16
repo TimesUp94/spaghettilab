@@ -5,6 +5,10 @@ interface Props {
   selectedReplay: Replay | null;
   onSelect: (r: Replay) => void;
   onOpenDb: () => void;
+  onReload?: () => void;
+  reloading?: boolean;
+  onReanalyze?: () => void;
+  reanalyzing?: boolean;
 }
 
 function formatDuration(ms: number): string {
@@ -33,13 +37,35 @@ function extractSetInfo(replayId: string): {
   return { number: "", players: replayId, bracket: "" };
 }
 
-export function Sidebar({ replays, selectedReplay, onSelect }: Props) {
+export function Sidebar({ replays, selectedReplay, onSelect, onReload, reloading, onReanalyze, reanalyzing }: Props) {
   return (
     <aside className="w-[260px] bg-surface-1 border-r border-surface-4/50 flex flex-col shrink-0">
-      <div className="p-3 border-b border-surface-4/50">
+      <div className="p-3 border-b border-surface-4/50 flex items-center justify-between">
         <h2 className="text-xs font-semibold text-text-secondary uppercase tracking-wider">
           Sets ({replays.length})
         </h2>
+        <div className="flex items-center gap-2">
+          {onReanalyze && (
+            <button
+              onClick={onReanalyze}
+              disabled={reanalyzing || reloading}
+              className="text-[10px] text-text-muted hover:text-accent-green transition-colors cursor-pointer disabled:opacity-50"
+              title="Re-run full CV analysis (Python + round detection)"
+            >
+              {reanalyzing ? "Analyzing..." : "Reanalyze"}
+            </button>
+          )}
+          {onReload && (
+            <button
+              onClick={onReload}
+              disabled={reloading || reanalyzing}
+              className="text-[10px] text-text-muted hover:text-accent-purple transition-colors cursor-pointer disabled:opacity-50"
+              title="Re-run round detection only (fast)"
+            >
+              {reloading ? "..." : "Reload"}
+            </button>
+          )}
+        </div>
       </div>
       <div className="flex-1 overflow-y-auto">
         {replays.map((r) => {

@@ -27,10 +27,12 @@ class HealthBarExtractor(BaseExtractor):
     animations) that would otherwise cause false 0% or inflated readings.
     """
 
-    # x-ranges for health bar measurement (tight to avoid portraits and
-    # center HUD). At 100% health, the bar fills most of this range.
-    P1_X1, P1_X2 = 200, 700
-    P2_X1, P2_X2 = 1220, 1720
+    # x-ranges for health bar measurement.  The bars fill from the
+    # portrait (edge) toward the center.  At low health the remaining
+    # sliver sits near the center, so the range must extend close to
+    # the timer area (~x=960) to catch it.
+    P1_X1, P1_X2 = 200, 900
+    P2_X1, P2_X2 = 1040, 1800
 
     # Two Y bands — one per overlay style.
     BAND_LOW = (73, 97)     # "sets/" overlay (bars at y~75-95)
@@ -50,6 +52,10 @@ class HealthBarExtractor(BaseExtractor):
     # Resets band selection and median buffers, but preserves max_w calibration.
     _RESET_GAP = 15
 
+    # Max rate health can drop per frame (prevents instant 0% from noise).
+    # 3% per frame ≈ 90% per second at 30fps — well above any real damage rate.
+    _MAX_DROP_PER_FRAME = 0.03
+
     def __init__(self, config: HealthBarConfig | None = None):
         self.config = config or HealthBarConfig()
         self._last_frame: int = -9999
@@ -66,6 +72,9 @@ class HealthBarExtractor(BaseExtractor):
         # Rolling median buffers for raw pixel measurements
         self._p1_buf: deque[int] = deque(maxlen=self._MEDIAN_WINDOW)
         self._p2_buf: deque[int] = deque(maxlen=self._MEDIAN_WINDOW)
+        # Track last emitted percentages for monotonic constraint + hold
+        self._last_p1_pct: float = 1.0
+        self._last_p2_pct: float = 1.0
 
     @property
     def required_rois(self) -> list[str]:
@@ -85,6 +94,8 @@ class HealthBarExtractor(BaseExtractor):
             self._activate_count = 0
             self._p1_buf.clear()
             self._p2_buf.clear()
+            self._last_p1_pct = 1.0
+            self._last_p2_pct = 1.0
         self._last_frame = ctx.frame_number
 
         # Measure both bands
@@ -141,32 +152,91 @@ class HealthBarExtractor(BaseExtractor):
 
         p1_w, p2_w = measurements[key]
 
-        # Update per-band max widths (use raw values for calibration)
+        # ── Monotonic / spike-rejection constraint ────────────────────
+        # Health only decreases during gameplay.  Screen effects (supers,
+        # hit flashes) can cause enormous spikes that corrupt max_w and
+        # the median buffer.  Clamp readings that jump above the recent
+        # median + tolerance.
+        p1_was_clamped = False
+        p2_was_clamped = False
+        if self._p1_buf:
+            prev_p1 = int(np.median(list(self._p1_buf)))
+            cap_p1 = int(prev_p1 * 1.05) + 3
+            if p1_w > cap_p1:
+                p1_w = cap_p1
+                p1_was_clamped = True
+        if self._p2_buf:
+            prev_p2 = int(np.median(list(self._p2_buf)))
+            cap_p2 = int(prev_p2 * 1.05) + 3
+            if p2_w > cap_p2:
+                p2_w = cap_p2
+                p2_was_clamped = True
+
+        # Update per-band max widths.  Only update when the reading was
+        # NOT clamped — clamped values come from screen effects and should
+        # not inflate the "full health" reference.
         p1_max, p2_max = self._max_w[key]
-        if p1_w > p1_max:
+        if p1_w > p1_max and not p1_was_clamped:
             p1_max = p1_w
-        if p2_w > p2_max:
+        if p2_w > p2_max and not p2_was_clamped:
             p2_max = p2_w
         self._max_w[key] = (p1_max, p2_max)
 
-        # Rolling median to smooth screen dim/flash artifacts
-        self._p1_buf.append(p1_w)
-        self._p2_buf.append(p2_w)
-        p1_smooth = int(np.median(list(self._p1_buf)))
-        p2_smooth = int(np.median(list(self._p2_buf)))
+        # Rolling median to smooth screen dim/flash artifacts.
+        # Skip clamped readings — they're from screen effects and would
+        # pollute the buffer with artificially high values.
+        if not p1_was_clamped:
+            self._p1_buf.append(p1_w)
+        if not p2_was_clamped:
+            self._p2_buf.append(p2_w)
+        p1_smooth = int(np.median(list(self._p1_buf))) if self._p1_buf else p1_w
+        p2_smooth = int(np.median(list(self._p2_buf))) if self._p2_buf else p2_w
 
         p1_pct = p1_smooth / p1_max if p1_max > 0 else 0.0
         p2_pct = p2_smooth / p2_max if p2_max > 0 else 0.0
 
+        # ── Max drop rate + hold-on-zero ─────────────────────────────
+        # Two different drop rates:
+        # - Normal (bar detected): _MAX_DROP_PER_FRAME (3%) — fast enough
+        #   for real gameplay, prevents single-frame glitches.
+        # - Undetectable (raw=0, bar too dim): much slower (0.5%) so the
+        #   reading decays gradually instead of instantly hitting 0%.
+        #   At 0.5%/frame it takes ~20 frames (0.67s) to drop 10%.
+        _SLOW_DROP = 0.002  # per frame when bar is undetectable
+        # 0.2%/frame → takes 50 frames (1.7s) to drop 10%
+
+        # Use the RAW measurement (before buffer) to decide: if the bar
+        # was literally undetectable this frame, slow the decay.
+        p2_bar_gone = (p2_w == 0)
+        p1_bar_gone = (p1_w == 0)
+
+        # P2 drop rate: slow when undetectable, normal otherwise
+        if self._last_p2_pct > 0:
+            drop = _SLOW_DROP if p2_bar_gone else self._MAX_DROP_PER_FRAME
+            if p2_pct < self._last_p2_pct - drop:
+                p2_pct = self._last_p2_pct - drop
+
+        # P1 drop rate (symmetric)
+        if self._last_p1_pct > 0:
+            drop = _SLOW_DROP if p1_bar_gone else self._MAX_DROP_PER_FRAME
+            if p1_pct < self._last_p1_pct - drop:
+                p1_pct = self._last_p1_pct - drop
+
+        p1_pct = max(0.0, min(1.0, p1_pct))
+        p2_pct = max(0.0, min(1.0, p2_pct))
+
+        self._last_p1_pct = p1_pct
+        self._last_p2_pct = p2_pct
+
         data.p1_health = HealthReading(
             side=Side.P1,
-            health_pct=min(1.0, p1_pct),
+            health_pct=p1_pct,
             bar_pixels_filled=p1_smooth,
             bar_pixels_total=p1_max,
         )
         data.p2_health = HealthReading(
             side=Side.P2,
-            health_pct=min(1.0, p2_pct),
+            health_pct=p2_pct,
             bar_pixels_filled=p2_smooth,
             bar_pixels_total=p2_max,
         )
@@ -233,3 +303,5 @@ class HealthBarExtractor(BaseExtractor):
         self._p1_buf.clear()
         self._p2_buf.clear()
         self._last_frame = -9999
+        self._last_p1_pct = 1.0
+        self._last_p2_pct = 1.0

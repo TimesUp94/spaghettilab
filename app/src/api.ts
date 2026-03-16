@@ -59,6 +59,10 @@ export async function analyzeVideo(
   return invoke("analyze_video", { videoPath, sampleEvery });
 }
 
+export async function reanalyzeReplay(dbPath: string, replayId: string): Promise<void> {
+  return invoke("reanalyze_replay", { dbPath, replayId });
+}
+
 export async function getDefaultDbPath(): Promise<string> {
   return invoke("get_default_db_path");
 }
