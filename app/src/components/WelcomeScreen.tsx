@@ -1,3 +1,8 @@
+import { open as shellOpen } from "@tauri-apps/plugin-shell";
+
+const DONATE_URL =
+  "https://www.paypal.com/donate/?business=79WVBGLTEYV8N&no_recurring=0&item_name=Supports+the+Spaghetti+Showdown+community%2C+further+tool+development+and+TimesUp+himself&currency_code=EUR";
+
 interface Props {
   onAnalyze: () => void;
   onSplitVod: () => void;
@@ -6,7 +11,7 @@ interface Props {
 
 export function WelcomeScreen({ onAnalyze, onSplitVod, onOpenSpag }: Props) {
   return (
-    <div className="h-screen flex items-center justify-center bg-surface-0">
+    <div className="h-screen flex flex-col items-center justify-center bg-surface-0">
       <div className="text-center max-w-lg">
         {/* Logo / Title */}
         <div className="mb-8">
@@ -90,6 +95,12 @@ export function WelcomeScreen({ onAnalyze, onSplitVod, onOpenSpag }: Props) {
           ))}
         </div>
       </div>
+      <button
+        onClick={() => shellOpen(DONATE_URL)}
+        className="mt-8 text-[11px] text-text-muted hover:text-accent-purple transition-colors cursor-pointer"
+      >
+        Support the Spaghetti Showdown community
+      </button>
     </div>
   );
 }

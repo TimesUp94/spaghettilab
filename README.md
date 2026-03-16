@@ -117,6 +117,10 @@ A hands-on optimization pass will happen when tournament scheduling allows. Cont
 
 `YYYY.M.DD-preview.N` - date-based versioning. The `preview` tag means this is early software under active development.
 
+## Support
+
+If you find this tool useful, consider [supporting the project](https://www.paypal.com/donate/?business=79WVBGLTEYV8N&no_recurring=0&item_name=Supports+the+Spaghetti+Showdown+community%2C+further+tool+development+and+TimesUp+himself&currency_code=EUR). Donations help fund the Spaghetti Showdown community, further tool development, and keep the lights on.
+
 ## License
 
 Not yet specified. Contact the maintainer for usage questions.
