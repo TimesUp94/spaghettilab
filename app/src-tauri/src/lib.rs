@@ -1214,31 +1214,87 @@ fn get_highlights(db_path: String, replay_id: String) -> Result<Vec<Highlight>, 
 }
 
 /// Find project root: try CARGO_MANIFEST_DIR (dev), then walk up from exe.
+/// Find the root directory containing scripts/analyze_replay.py.
+///
+/// Search order:
+/// 1. CARGO_MANIFEST_DIR parent (dev builds)
+/// 2. Walk up from exe (dev / portable)
+/// 3. Resource directory next to exe (installed via NSIS)
 fn find_project_root() -> Result<PathBuf, String> {
+    let marker = |d: &PathBuf| d.join("scripts").join("analyze_replay.py").exists();
+
+    // 1. Dev: relative to Cargo manifest
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let from_manifest = manifest.parent().map(|p| p.to_path_buf());
-    match from_manifest {
-        Some(p) if p.join("scripts").join("analyze_replay.py").exists() => Ok(p),
-        _ => {
-            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-            let mut dir = exe.parent().map(|p| p.to_path_buf());
-            loop {
-                match dir {
-                    Some(d) if d.join("scripts").join("analyze_replay.py").exists() => return Ok(d),
-                    Some(d) => dir = d.parent().map(|p| p.to_path_buf()),
-                    None => return Err("Cannot find project root with scripts/analyze_replay.py".into()),
-                }
-            }
+    if let Some(p) = manifest.parent().map(|p| p.to_path_buf()) {
+        if marker(&p) {
+            return Ok(p);
         }
     }
+
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe_dir = exe.parent().map(|p| p.to_path_buf())
+        .ok_or_else(|| "Cannot determine exe directory".to_string())?;
+
+    // 2. Walk up from exe (dev / portable)
+    let mut dir = Some(exe_dir.clone());
+    while let Some(d) = dir {
+        if marker(&d) {
+            return Ok(d);
+        }
+        dir = d.parent().map(|p| p.to_path_buf());
+    }
+
+    // 3. Installed: resources are bundled next to the exe in a resources/ subdir,
+    //    or directly next to the exe (NSIS places them in the install dir).
+    //    Tauri NSIS puts resources at <install_dir>/resources/
+    let resource_dir = exe_dir.join("resources");
+    if marker(&resource_dir) {
+        return Ok(resource_dir);
+    }
+
+    // 4. Also check exe_dir itself (some bundle layouts)
+    if marker(&exe_dir) {
+        return Ok(exe_dir);
+    }
+
+    Err(format!(
+        "Cannot find project root with scripts/analyze_replay.py. Searched near: {}",
+        exe_dir.display()
+    ))
 }
 
 /// Return the default output directory and DB path.
+///
+/// For installed apps, output goes to AppData/Local/SpaghettiLab/output.
+/// For dev, output goes to <project_root>/output.
 fn default_output_paths() -> Result<(PathBuf, PathBuf), String> {
-    let root = find_project_root()?;
-    let output_dir = root.join("output");
+    // Try dev location first
+    if let Ok(root) = find_project_root() {
+        // Check if this looks like a dev environment (has pyproject.toml or .git)
+        if root.join("pyproject.toml").exists() || root.join(".git").exists() {
+            let output_dir = root.join("output");
+            let db_path = output_dir.join("analysis.db");
+            return Ok((output_dir, db_path));
+        }
+    }
+
+    // Installed: use AppData/Local
+    let app_data = std::env::var("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs_fallback()
+        });
+    let output_dir = app_data.join("SpaghettiLab").join("output");
     let db_path = output_dir.join("analysis.db");
     Ok((output_dir, db_path))
+}
+
+fn dirs_fallback() -> PathBuf {
+    // Fallback: put data next to exe
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 #[tauri::command]
@@ -1255,11 +1311,15 @@ async fn analyze_video(
     let project_root = find_project_root()?;
     let (output_dir, db_path) = default_output_paths()?;
 
+    std::fs::create_dir_all(&output_dir).map_err(|e| e.to_string())?;
+
     let script = project_root.join("scripts").join("analyze_replay.py");
     let config = project_root.join("config").join("default.yaml");
 
     let mut cmd = Command::new("python");
-    cmd.arg(script.to_str().unwrap())
+    // Set PYTHONPATH so `import replanal` works from installed location
+    cmd.env("PYTHONPATH", project_root.to_str().unwrap())
+        .arg(script.to_str().unwrap())
         .arg(&video_path)
         .arg("--config")
         .arg(config.to_str().unwrap())
@@ -1416,7 +1476,8 @@ async fn scan_vod(
     let script = project_root.join("scripts").join("split_vod.py");
 
     let mut cmd = Command::new("python");
-    cmd.arg(script.to_str().unwrap())
+    cmd.env("PYTHONPATH", project_root.to_str().unwrap())
+        .arg(script.to_str().unwrap())
         .arg(&video_path)
         .arg("--preview")
         .arg("--json-output")

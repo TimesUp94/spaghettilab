@@ -9,6 +9,15 @@
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build"
   },
+  "bundle": {
+    "resources": {
+      "../../scripts/analyze_replay.py": "scripts/analyze_replay.py",
+      "../../scripts/analyze_sets.py": "scripts/analyze_sets.py",
+      "../../scripts/split_vod.py": "scripts/split_vod.py",
+      "../../replanal/**/*": "replanal/",
+      "../../config/default.yaml": "config/default.yaml"
+    }
+  },
   "app": {
     "windows": [
       {
