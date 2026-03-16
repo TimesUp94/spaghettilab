@@ -5,31 +5,29 @@ resolution:
 fps: 30
 sample_every_n_frames: 1
 
-# ROI coordinates for tournament stream recordings (Spaghetti Showdown overlay).
-# The health bar extractor and scene detector read from the full frame
-# at hardcoded positions (y=118-138) and don't use these ROIs.
-# These ROIs are used by the timer extractor and future extractors.
+# ROI coordinates (confirmed from pixel inspection at 1920x1080).
+# Videos are auto-resized to 1920x1080 before extraction.
 rois:
   p1_health_bar:
-    x1: 100
-    y1: 118
-    x2: 960
-    y2: 138
+    x1: 200
+    y1: 112
+    x2: 900
+    y2: 142
   p2_health_bar:
-    x1: 960
-    y1: 118
-    x2: 1860
-    y2: 138
+    x1: 1040
+    y1: 112
+    x2: 1800
+    y2: 142
   timer:
-    x1: 880
-    y1: 100
-    x2: 1040
+    x1: 920
+    y1: 110
+    x2: 1000
     y2: 180
   timer_digits:
     x1: 920
-    y1: 115
+    y1: 110
     x2: 1000
-    y2: 165
+    y2: 180
   p1_tension_bar:
     x1: 50
     y1: 1040

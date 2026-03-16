@@ -9,6 +9,7 @@ interface Props {
   reloading?: boolean;
   onReanalyze?: () => void;
   reanalyzing?: boolean;
+  onAnalyzeNew?: () => void;
 }
 
 function formatDuration(ms: number): string {
@@ -37,7 +38,7 @@ function extractSetInfo(replayId: string): {
   return { number: "", players: replayId, bracket: "" };
 }
 
-export function Sidebar({ replays, selectedReplay, onSelect, onReload, reloading, onReanalyze, reanalyzing }: Props) {
+export function Sidebar({ replays, selectedReplay, onSelect, onReload, reloading, onReanalyze, reanalyzing, onAnalyzeNew }: Props) {
   return (
     <aside className="w-[260px] bg-surface-1 border-r border-surface-4/50 flex flex-col shrink-0">
       <div className="p-3 border-b border-surface-4/50 flex items-center justify-between">
@@ -67,6 +68,17 @@ export function Sidebar({ replays, selectedReplay, onSelect, onReload, reloading
           )}
         </div>
       </div>
+      {onAnalyzeNew && (
+        <div className="p-2 border-b border-surface-4/50">
+          <button
+            onClick={onAnalyzeNew}
+            className="w-full px-3 py-2 text-xs font-medium text-accent-green bg-accent-green/8 border border-accent-green/20
+                       rounded-lg hover:bg-accent-green/15 hover:border-accent-green/35 transition-all cursor-pointer"
+          >
+            + Analyze Video
+          </button>
+        </div>
+      )}
       <div className="flex-1 overflow-y-auto">
         {replays.map((r) => {
           const isSelected = selectedReplay?.replay_id === r.replay_id;

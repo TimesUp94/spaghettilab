@@ -7,9 +7,10 @@ interface Props {
   onAnalyze: () => void;
   onSplitVod: () => void;
   onOpenSpag: () => void;
+  onOpenDatabase: () => void;
 }
 
-export function WelcomeScreen({ onAnalyze, onSplitVod, onOpenSpag }: Props) {
+export function WelcomeScreen({ onAnalyze, onSplitVod, onOpenSpag, onOpenDatabase }: Props) {
   return (
     <div className="h-screen flex flex-col items-center justify-center bg-surface-0">
       <div className="text-center max-w-lg">
@@ -33,7 +34,21 @@ export function WelcomeScreen({ onAnalyze, onSplitVod, onOpenSpag }: Props) {
         <div className="w-48 h-px bg-gradient-to-r from-transparent via-accent-purple/40 to-transparent mx-auto mb-10" />
 
         {/* Actions */}
-        <div className="grid grid-cols-3 gap-3 max-w-md mx-auto">
+        <div className="grid grid-cols-4 gap-3 max-w-lg mx-auto">
+          <button
+            onClick={onOpenDatabase}
+            className="px-5 py-4 bg-accent-purple/12 text-accent-purple border border-accent-purple/20
+                       rounded-xl hover:bg-accent-purple/20 hover:border-accent-purple/35
+                       transition-all duration-300 cursor-pointer group"
+          >
+            <div className="text-lg mb-1 opacity-70 group-hover:opacity-100 transition-opacity">
+              &#128202;
+            </div>
+            <div className="font-medium text-sm">View Database</div>
+            <div className="text-[10px] text-text-muted mt-1">
+              Open analyzed sets
+            </div>
+          </button>
           <button
             onClick={onAnalyze}
             className="px-5 py-4 bg-accent-green/12 text-accent-green border border-accent-green/20

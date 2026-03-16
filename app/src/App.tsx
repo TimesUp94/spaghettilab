@@ -484,6 +484,16 @@ export default function App() {
     return () => { unlisten.then(fn => fn()); };
   }, [openSpagFile]);
 
+  const handleOpenDefaultDb = useCallback(async () => {
+    try {
+      const path = await getDefaultDbPath();
+      await openDatabase(path);
+    } catch {
+      // No default DB — fall back to file picker
+      await handleOpenDb();
+    }
+  }, [openDatabase, handleOpenDb]);
+
   // Welcome screen
   if (view === "welcome") {
     return (
@@ -491,6 +501,7 @@ export default function App() {
         onAnalyze={() => setView("analyze")}
         onSplitVod={() => setView("split")}
         onOpenSpag={handleOpenSpag}
+        onOpenDatabase={handleOpenDefaultDb}
       />
     );
   }
@@ -500,7 +511,7 @@ export default function App() {
     return (
       <AnalysisProgress
         onComplete={handleAnalysisComplete}
-        onCancel={() => setView("welcome")}
+        onCancel={() => setView(dbPath ? "dashboard" : "welcome")}
       />
     );
   }
@@ -594,6 +605,7 @@ export default function App() {
           reloading={loading}
           onReanalyze={selectedReplay && dbPath ? handleReanalyze : undefined}
           reanalyzing={reanalyzing}
+          onAnalyzeNew={() => setView("analyze")}
         />
 
         {/* Main content */}

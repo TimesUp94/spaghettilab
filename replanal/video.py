@@ -23,6 +23,9 @@ def iter_frames(
             if not ret:
                 break
             if frame_number % sample_every == 0:
+                h, w = frame.shape[:2]
+                if h != 1080 or w != 1920:
+                    frame = cv2.resize(frame, (1920, 1080))
                 timestamp_ms = (frame_number / fps) * 1000.0
                 yield frame_number, timestamp_ms, frame
             frame_number += 1
