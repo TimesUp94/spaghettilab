@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/refs/heads/dev/crates/tauri-config-schema/schema.json",
   "productName": "Spaghetti Lab",
-  "version": "2026.3.16-preview.1",
+  "version": "2026.3.16-preview.3",
   "identifier": "com.spaghettilab.analyzer",
   "build": {
     "frontendDist": "../dist",
