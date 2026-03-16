@@ -49,11 +49,14 @@ if (-not $Version) {
     $today = Get-Date
     $datePrefix = "{0}.{1}.{2}" -f $today.Year, $today.Month, $today.Day
 
-    # Find the latest preview number for today's date
-    $existingTags = git -C $RepoRoot tag -l "v${datePrefix}-preview.*" 2>$null
+    # Find the latest preview number for today's date (check local tags + GitHub releases)
+    $existingTags = @()
+    $existingTags += git -C $RepoRoot tag -l "v${datePrefix}-preview.*" 2>$null
+    $ghReleases = & $gh release list --limit 20 2>$null | Select-String "v${datePrefix}-preview\.(\d+)" -AllMatches
+    foreach ($m in $ghReleases.Matches) { $existingTags += $m.Value }
     $maxN = 0
     foreach ($tag in $existingTags) {
-        if ($tag -match "preview\.(\d+)$") {
+        if ($tag -match "preview\.(\d+)") {
             $n = [int]$Matches[1]
             if ($n -gt $maxN) { $maxN = $n }
         }

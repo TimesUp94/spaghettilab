@@ -55,13 +55,17 @@ if [[ -z "$VERSION" ]]; then
     DATE_PREFIX="$(date +%Y.%-m.%-d)"
 
     MAX_N=0
+    # Check both local tags and GitHub releases
     while IFS= read -r tag; do
         [[ -z "$tag" ]] && continue
-        if [[ "$tag" =~ preview\.([0-9]+)$ ]]; then
+        if [[ "$tag" =~ preview\.([0-9]+) ]]; then
             n="${BASH_REMATCH[1]}"
             (( n > MAX_N )) && MAX_N=$n
         fi
-    done < <(git -C "$REPO_ROOT" tag -l "v${DATE_PREFIX}-preview.*" 2>/dev/null)
+    done < <(
+        git -C "$REPO_ROOT" tag -l "v${DATE_PREFIX}-preview.*" 2>/dev/null
+        "$GH" release list --limit 20 2>/dev/null | grep -o "v${DATE_PREFIX}-preview\.[0-9]*" || true
+    )
 
     VERSION="${DATE_PREFIX}-preview.$((MAX_N + 1))"
 fi
@@ -70,7 +74,7 @@ echo "=== Spaghetti Lab Release ==="
 echo "Version: $VERSION"
 
 # --- Read current version ---
-OLD_VERSION=$(grep -oP '"version":\s*"\K[^"]+' "$TAURI_DIR/tauri.conf.json" | head -1)
+OLD_VERSION=$(sed -n 's/.*"version":\s*"\([^"]*\)".*/\1/p' "$TAURI_DIR/tauri.conf.json" | head -1)
 if [[ -z "$OLD_VERSION" ]]; then
     echo "Error: Could not read current version from tauri.conf.json" >&2
     exit 1
