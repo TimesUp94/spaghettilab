@@ -73,11 +73,11 @@ class HealthBarExtractor(BaseExtractor):
     def extract(self, ctx: FrameContext, data: FrameData) -> None:
         frame = ctx.frame_bgr
 
-        # Partial reset after a non-gameplay gap (round/set transitions).
-        # Preserves max_w so calibration carries across rounds.
+        # Full reset after a non-gameplay gap (round/set transitions).
         if ctx.frame_number - self._last_frame > self._RESET_GAP:
             self._activated = False
             self._activate_count = 0
+            self._max_w = (0, 0)
             self._p1_buf.clear()
             self._p2_buf.clear()
             self._last_p1_pct = 1.0
@@ -113,11 +113,14 @@ class HealthBarExtractor(BaseExtractor):
             return
 
         # ── Spike-rejection constraint (upward AND downward) ──────────
+        # Skip spike rejection while buffer is warming up after a gap reset,
+        # so the buffer can establish a true baseline from fresh readings.
         _FLOOR_FACTOR = 0.4
+        _WARMUP_MIN = self._MEDIAN_WINDOW // 2
 
         p1_was_clamped = False
         p2_was_clamped = False
-        if self._p1_buf:
+        if len(self._p1_buf) >= _WARMUP_MIN:
             prev_p1 = int(np.median(list(self._p1_buf)))
             cap_p1 = int(prev_p1 * 1.05) + 3
             floor_p1 = int(prev_p1 * _FLOOR_FACTOR)
@@ -126,7 +129,7 @@ class HealthBarExtractor(BaseExtractor):
                 p1_was_clamped = True
             elif p1_w < floor_p1:
                 p1_was_clamped = True
-        if self._p2_buf:
+        if len(self._p2_buf) >= _WARMUP_MIN:
             prev_p2 = int(np.median(list(self._p2_buf)))
             cap_p2 = int(prev_p2 * 1.05) + 3
             floor_p2 = int(prev_p2 * _FLOOR_FACTOR)

@@ -28,6 +28,8 @@ def init_db(db_path: Path) -> sqlite3.Connection:
             timer_value   INTEGER,
             p1_rounds_won INTEGER,
             p2_rounds_won INTEGER,
+            p1_tension_pct REAL,
+            p2_tension_pct REAL,
             PRIMARY KEY (replay_id, frame_number)
         )
     """)
@@ -44,6 +46,12 @@ def init_db(db_path: Path) -> sqlite3.Connection:
             post_health_pct REAL
         )
     """)
+    # Migrations: add columns that may not exist in older DBs
+    for col, coltype in [("p1_tension_pct", "REAL"), ("p2_tension_pct", "REAL")]:
+        try:
+            conn.execute(f"ALTER TABLE frame_data ADD COLUMN {col} {coltype}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
     conn.commit()
     return conn
 
@@ -60,7 +68,7 @@ def write_frame_data(conn: sqlite3.Connection, replay_id: str, frames: list[Fram
     """Write per-frame health data to SQLite."""
     conn.execute("DELETE FROM frame_data WHERE replay_id = ?", (replay_id,))
     conn.executemany(
-        "INSERT INTO frame_data (replay_id, frame_number, timestamp_ms, p1_health_pct, p2_health_pct, timer_value, p1_rounds_won, p2_rounds_won) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO frame_data (replay_id, frame_number, timestamp_ms, p1_health_pct, p2_health_pct, timer_value, p1_rounds_won, p2_rounds_won, p1_tension_pct, p2_tension_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (
                 replay_id,
@@ -71,6 +79,8 @@ def write_frame_data(conn: sqlite3.Connection, replay_id: str, frames: list[Fram
                 f.timer_value,
                 f.p1_rounds_won,
                 f.p2_rounds_won,
+                f.p1_tension_pct,
+                f.p2_tension_pct,
             )
             for f in frames
         ],

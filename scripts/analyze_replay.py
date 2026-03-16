@@ -17,6 +17,7 @@ from replanal.config import PipelineConfig
 from replanal.extractors.health import HealthBarExtractor
 from replanal.extractors.round_counter import RoundCounterExtractor
 from replanal.extractors.scene import SceneDetector
+from replanal.extractors.tension import TensionExtractor
 from replanal.extractors.timer import TimerExtractor
 from replanal.pipeline import ReplayPipeline
 from replanal.storage import init_db, write_damage_events, write_frame_data, write_frame_parquet, write_replay
@@ -42,8 +43,9 @@ def main():
     scene_det = SceneDetector()
     health_ext = HealthBarExtractor(config.health_bar)
     timer_ext = TimerExtractor()
+    tension_ext = TensionExtractor()
     heart_ext = RoundCounterExtractor()
-    pipeline = ReplayPipeline(config, [scene_det, health_ext, timer_ext, heart_ext])
+    pipeline = ReplayPipeline(config, [scene_det, health_ext, timer_ext, tension_ext, heart_ext])
 
     frames = pipeline.process_video(video_path)
     print(f"  Processed {len(frames)} frames")
