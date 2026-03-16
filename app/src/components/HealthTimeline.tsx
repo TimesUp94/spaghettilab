@@ -15,6 +15,7 @@ import type {
   DamageEvent,
   Highlight,
   Match,
+  Note,
 } from "../types";
 
 interface Props {
@@ -22,6 +23,7 @@ interface Props {
   rounds: RoundResult[];
   damageEvents: DamageEvent[];
   highlights: Highlight[];
+  notes: Note[];
   onSeek: (ms: number) => void;
   selectedMatch: Match | null;
   onClearSelection: () => void;
@@ -44,6 +46,7 @@ export function HealthTimeline({
   rounds,
   damageEvents,
   highlights,
+  notes,
   onSeek,
   selectedMatch,
   onClearSelection,
@@ -148,6 +151,12 @@ export function HealthTimeline({
               <span className="text-text-muted">Comeback</span>
             </span>
           )}
+          {notes.length > 0 && (
+            <span className="flex items-center gap-1">
+              <span className="w-2 h-2 rounded-sm bg-accent-green/60" />
+              <span className="text-text-muted">Notes</span>
+            </span>
+          )}
         </div>
       </div>
       <ResponsiveContainer width="100%" height={120}>
@@ -207,6 +216,17 @@ export function HealthTimeline({
               stroke="#555570"
               strokeDasharray="2 2"
               strokeOpacity={0.5}
+            />
+          ))}
+
+          {/* Note markers */}
+          {notes.map((note, i) => (
+            <ReferenceLine
+              key={`note-${i}`}
+              x={note.timestamp_ms / 1000}
+              stroke="#40c878"
+              strokeDasharray="4 2"
+              strokeOpacity={0.7}
             />
           ))}
 

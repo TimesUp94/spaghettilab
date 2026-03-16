@@ -80,6 +80,15 @@ pub struct Highlight {
     pub severity: f64,        // 0-1, for sorting
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct Note {
+    pub note_id: i64,
+    pub replay_id: String,
+    pub timestamp_ms: f64,
+    pub text: String,
+    pub created_at: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct AnalysisStatus {
     pub running: bool,
@@ -1403,6 +1412,91 @@ fn resolve_video_path(db_path: String, replay_id: String) -> Result<String, Stri
     Ok(path)
 }
 
+// ── Notes ────────────────────────────────────────────────────────────────────
+
+fn ensure_notes_table(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS notes (
+            note_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+            replay_id  TEXT NOT NULL,
+            timestamp_ms REAL NOT NULL,
+            text       TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );"
+    ).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_notes(db_path: String, replay_id: String) -> Result<Vec<Note>, String> {
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    ensure_notes_table(&conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT note_id, replay_id, timestamp_ms, text, created_at
+         FROM notes WHERE replay_id = ? ORDER BY timestamp_ms"
+    ).map_err(|e| e.to_string())?;
+    let notes = stmt.query_map([&replay_id], |row| {
+        Ok(Note {
+            note_id: row.get(0)?,
+            replay_id: row.get(1)?,
+            timestamp_ms: row.get(2)?,
+            text: row.get(3)?,
+            created_at: row.get(4)?,
+        })
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .collect();
+    Ok(notes)
+}
+
+#[tauri::command]
+fn add_note(db_path: String, replay_id: String, timestamp_ms: f64, text: String) -> Result<Note, String> {
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    ensure_notes_table(&conn)?;
+    conn.execute(
+        "INSERT INTO notes (replay_id, timestamp_ms, text) VALUES (?, ?, ?)",
+        rusqlite::params![&replay_id, timestamp_ms, &text],
+    ).map_err(|e| e.to_string())?;
+    let note_id = conn.last_insert_rowid();
+    let note = conn.query_row(
+        "SELECT note_id, replay_id, timestamp_ms, text, created_at FROM notes WHERE note_id = ?",
+        [note_id],
+        |row| Ok(Note {
+            note_id: row.get(0)?,
+            replay_id: row.get(1)?,
+            timestamp_ms: row.get(2)?,
+            text: row.get(3)?,
+            created_at: row.get(4)?,
+        })
+    ).map_err(|e| e.to_string())?;
+    Ok(note)
+}
+
+#[tauri::command]
+fn update_note(db_path: String, note_id: i64, text: String, timestamp_ms: Option<f64>) -> Result<(), String> {
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    ensure_notes_table(&conn)?;
+    match timestamp_ms {
+        Some(ts) => conn.execute(
+            "UPDATE notes SET text = ?, timestamp_ms = ? WHERE note_id = ?",
+            rusqlite::params![&text, ts, note_id],
+        ),
+        None => conn.execute(
+            "UPDATE notes SET text = ? WHERE note_id = ?",
+            rusqlite::params![&text, note_id],
+        ),
+    }.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn delete_note(db_path: String, note_id: i64) -> Result<(), String> {
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    ensure_notes_table(&conn)?;
+    conn.execute("DELETE FROM notes WHERE note_id = ?", [note_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ── VOD Splitter ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -1598,6 +1692,10 @@ pub fn run() {
             extract_preview_frame,
             scan_vod,
             cut_vod_sets,
+            get_notes,
+            add_note,
+            update_note,
+            delete_note,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

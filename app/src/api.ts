@@ -9,6 +9,7 @@ import type {
   VodRoiConfig,
   DetectedSetInfo,
   CutSetRequest,
+  Note,
 } from "./types";
 
 export async function getReplays(dbPath: string): Promise<Replay[]> {
@@ -99,4 +100,22 @@ export async function cutVodSets(
   outputDir: string
 ): Promise<string[]> {
   return invoke("cut_vod_sets", { videoPath, sets, outputDir });
+}
+
+// Notes
+
+export async function getNotes(dbPath: string, replayId: string): Promise<Note[]> {
+  return invoke("get_notes", { dbPath, replayId });
+}
+
+export async function addNote(dbPath: string, replayId: string, timestampMs: number, text: string): Promise<Note> {
+  return invoke("add_note", { dbPath, replayId, timestampMs, text });
+}
+
+export async function updateNote(dbPath: string, noteId: number, text: string, timestampMs?: number): Promise<void> {
+  return invoke("update_note", { dbPath, noteId, text, timestampMs });
+}
+
+export async function deleteNote(dbPath: string, noteId: number): Promise<void> {
+  return invoke("delete_note", { dbPath, noteId });
 }

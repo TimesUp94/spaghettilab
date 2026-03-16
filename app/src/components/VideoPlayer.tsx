@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from "react";
-import type { RoundResult, DamageEvent, Match } from "../types";
+import type { RoundResult, DamageEvent, Match, Note } from "../types";
 
 interface Props {
   src: string | null;
@@ -11,6 +11,8 @@ interface Props {
   selectedMatch: Match | null;
   onClearSelection: () => void;
   onLocateVideo?: () => void;
+  onTimeUpdate?: (ms: number) => void;
+  notes?: Note[];
 }
 
 function formatTime(s: number): string {
@@ -29,6 +31,8 @@ export function VideoPlayer({
   selectedMatch,
   onClearSelection,
   onLocateVideo,
+  onTimeUpdate,
+  notes,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
@@ -51,10 +55,13 @@ export function VideoPlayer({
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    const handler = () => setCurrentTime(video.currentTime);
+    const handler = () => {
+      setCurrentTime(video.currentTime);
+      onTimeUpdate?.(video.currentTime * 1000);
+    };
     video.addEventListener("timeupdate", handler);
     return () => video.removeEventListener("timeupdate", handler);
-  }, [src]);
+  }, [src, onTimeUpdate]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -296,6 +303,19 @@ export function VideoPlayer({
               />
             );
           })}
+
+        {/* Note markers */}
+        {notes?.map((note, i) => {
+          const pos = toBarPct(note.timestamp_ms / 1000);
+          return (
+            <div
+              key={`note-${i}`}
+              className="absolute top-0 bottom-0 w-1 bg-accent-green/50 rounded"
+              style={{ left: `${pos}%` }}
+              title={note.text}
+            />
+          );
+        })}
 
         {/* Playhead */}
         <div

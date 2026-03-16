@@ -8,6 +8,7 @@ import type {
   Match,
   MatchStats,
   Highlight,
+  Note,
   ActiveTab,
 } from "./types";
 import {
@@ -17,6 +18,10 @@ import {
   getRounds,
   getMatchStats,
   getHighlights,
+  getNotes,
+  addNote,
+  updateNote,
+  deleteNote,
   getDefaultDbPath,
   resolveVideoPath,
 } from "./api";
@@ -33,6 +38,7 @@ import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ExportModal } from "./components/ExportModal";
 import { AnalysisProgress } from "./components/AnalysisProgress";
 import { SplitVodView } from "./components/SplitVodView";
+import { NotesPanel } from "./components/NotesPanel";
 
 /** Group rounds into matches (first-to-2 round wins). */
 function groupRoundsIntoMatches(rounds: RoundResult[]): Match[] {
@@ -96,11 +102,13 @@ export default function App() {
   const [rounds, setRounds] = useState<RoundResult[]>([]);
   const [stats, setStats] = useState<MatchStats | null>(null);
   const [highlights, setHighlights] = useState<Highlight[]>([]);
+  const [notes, setNotes] = useState<Note[]>([]);
 
   // Video state
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [videoPath, setVideoPath] = useState<string | null>(null);
   const [seekToMs, setSeekToMs] = useState<number | null>(null);
+  const [currentTimeMs, setCurrentTimeMs] = useState(0);
 
   // UI state
   const [activeTab, setActiveTab] = useState<ActiveTab>("matches");
@@ -205,17 +213,19 @@ export default function App() {
       setSelectedMatchIndex(null);
       setLoading(true);
       try {
-        const [fd, de, rn, st, hl, vp] = await Promise.all([
+        const [fd, de, rn, st, hl, nt, vp] = await Promise.all([
           getFrameData(db, replay.replay_id),
           getDamageEvents(db, replay.replay_id),
           getRounds(db, replay.replay_id),
           getMatchStats(db, replay.replay_id),
           getHighlights(db, replay.replay_id),
+          getNotes(db, replay.replay_id).catch(() => [] as Note[]),
           resolveVideoPath(db, replay.replay_id).catch(() => ""),
         ]);
         setFrameData(fd);
         setDamageEvents(de);
         setRounds(rn);
+        setNotes(nt);
         setStats(st);
         setHighlights(hl);
         if (vp) {
@@ -289,6 +299,33 @@ export default function App() {
       await openDatabase(resultDbPath);
     },
     [openDatabase]
+  );
+
+  const handleAddNote = useCallback(
+    async (timestampMs: number, text: string) => {
+      if (!dbPath || !selectedReplay) return;
+      const note = await addNote(dbPath, selectedReplay.replay_id, timestampMs, text);
+      setNotes((prev) => [...prev, note].sort((a, b) => a.timestamp_ms - b.timestamp_ms));
+    },
+    [dbPath, selectedReplay]
+  );
+
+  const handleUpdateNote = useCallback(
+    async (noteId: number, text: string) => {
+      if (!dbPath) return;
+      await updateNote(dbPath, noteId, text);
+      setNotes((prev) => prev.map((n) => (n.note_id === noteId ? { ...n, text } : n)));
+    },
+    [dbPath]
+  );
+
+  const handleDeleteNote = useCallback(
+    async (noteId: number) => {
+      if (!dbPath) return;
+      await deleteNote(dbPath, noteId);
+      setNotes((prev) => prev.filter((n) => n.note_id !== noteId));
+    },
+    [dbPath]
   );
 
   // Welcome screen
@@ -400,6 +437,8 @@ export default function App() {
                     selectedMatch={selectedMatch}
                     onClearSelection={() => setSelectedMatchIndex(null)}
                     onLocateVideo={handleLocateVideo}
+                    onTimeUpdate={setCurrentTimeMs}
+                    notes={notes}
                   />
                 </div>
                 <div className="w-[320px] shrink-0">
@@ -419,6 +458,7 @@ export default function App() {
                   rounds={rounds}
                   damageEvents={damageEvents}
                   highlights={highlights}
+                  notes={notes}
                   onSeek={handleSeek}
                   selectedMatch={selectedMatch}
                   onClearSelection={() => setSelectedMatchIndex(null)}
@@ -434,6 +474,7 @@ export default function App() {
                       ["rounds", "Rounds"],
                       ["highlights", "Highlights"],
                       ["damage", "Damage Log"],
+                      ["notes", "Notes"],
                     ] as const
                   ).map(([key, label]) => (
                     <button
@@ -455,6 +496,11 @@ export default function App() {
                       {key === "highlights" && highlights.length > 0 && (
                         <span className="ml-1.5 text-[10px] text-accent-gold bg-accent-gold/15 px-1 py-0.5 rounded">
                           {highlights.length}
+                        </span>
+                      )}
+                      {key === "notes" && notes.length > 0 && (
+                        <span className="ml-1.5 text-[10px] text-accent-green bg-accent-green/15 px-1 py-0.5 rounded">
+                          {notes.length}
                         </span>
                       )}
                     </button>
@@ -487,6 +533,16 @@ export default function App() {
                     <DamageLog
                       events={damageEvents}
                       onSeek={handleSeek}
+                    />
+                  )}
+                  {activeTab === "notes" && (
+                    <NotesPanel
+                      notes={notes}
+                      onSeek={handleSeek}
+                      onAdd={handleAddNote}
+                      onUpdate={handleUpdateNote}
+                      onDelete={handleDeleteNote}
+                      currentTimeMs={currentTimeMs}
                     />
                   )}
                 </div>

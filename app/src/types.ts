@@ -75,7 +75,15 @@ export interface Match {
   end_ms: number;
 }
 
-export type ActiveTab = "matches" | "rounds" | "highlights" | "damage";
+export interface Note {
+  note_id: number;
+  replay_id: string;
+  timestamp_ms: number;
+  text: string;
+  created_at: string;
+}
+
+export type ActiveTab = "matches" | "rounds" | "highlights" | "damage" | "notes";
 
 // VOD Splitter types
 
