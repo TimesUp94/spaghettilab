@@ -1,7 +1,9 @@
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::io::BufRead;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use tauri::Emitter;
 
 // ── Data models ──────────────────────────────────────────────────────────────
 
@@ -1211,33 +1213,47 @@ fn get_highlights(db_path: String, replay_id: String) -> Result<Vec<Highlight>, 
     Ok(generate_highlights(&rounds, &events))
 }
 
-#[tauri::command]
-async fn analyze_video(
-    video_path: String,
-    output_dir: String,
-    _sample_every: Option<u32>,
-) -> Result<String, String> {
-    // Find project root: try CARGO_MANIFEST_DIR (dev), then walk up from exe
-    let project_root = {
-        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let from_manifest = manifest.parent().map(|p| p.to_path_buf());
-        match from_manifest {
-            Some(p) if p.join("scripts").join("analyze_replay.py").exists() => p,
-            _ => {
-                // In release, exe is in target/release/ or installed location
-                // Try to find project root by walking up from exe
-                let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-                let mut dir = exe.parent().map(|p| p.to_path_buf());
-                loop {
-                    match dir {
-                        Some(d) if d.join("scripts").join("analyze_replay.py").exists() => break d,
-                        Some(d) => dir = d.parent().map(|p| p.to_path_buf()),
-                        None => return Err("Cannot find project root with scripts/analyze_replay.py".into()),
-                    }
+/// Find project root: try CARGO_MANIFEST_DIR (dev), then walk up from exe.
+fn find_project_root() -> Result<PathBuf, String> {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let from_manifest = manifest.parent().map(|p| p.to_path_buf());
+    match from_manifest {
+        Some(p) if p.join("scripts").join("analyze_replay.py").exists() => Ok(p),
+        _ => {
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let mut dir = exe.parent().map(|p| p.to_path_buf());
+            loop {
+                match dir {
+                    Some(d) if d.join("scripts").join("analyze_replay.py").exists() => return Ok(d),
+                    Some(d) => dir = d.parent().map(|p| p.to_path_buf()),
+                    None => return Err("Cannot find project root with scripts/analyze_replay.py".into()),
                 }
             }
         }
-    };
+    }
+}
+
+/// Return the default output directory and DB path.
+fn default_output_paths() -> Result<(PathBuf, PathBuf), String> {
+    let root = find_project_root()?;
+    let output_dir = root.join("output");
+    let db_path = output_dir.join("analysis.db");
+    Ok((output_dir, db_path))
+}
+
+#[tauri::command]
+fn get_default_db_path() -> Result<String, String> {
+    let (_, db_path) = default_output_paths()?;
+    Ok(db_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn analyze_video(
+    video_path: String,
+    _sample_every: Option<u32>,
+) -> Result<String, String> {
+    let project_root = find_project_root()?;
+    let (output_dir, db_path) = default_output_paths()?;
 
     let script = project_root.join("scripts").join("analyze_replay.py");
     let config = project_root.join("config").join("default.yaml");
@@ -1248,7 +1264,7 @@ async fn analyze_video(
         .arg("--config")
         .arg(config.to_str().unwrap())
         .arg("--output")
-        .arg(&output_dir);
+        .arg(output_dir.to_str().unwrap());
 
     let output = cmd.output().map_err(|e| format!("Failed to run Python: {}", e))?;
 
@@ -1259,8 +1275,6 @@ async fn analyze_video(
         return Err(format!("Analysis failed:\n{}\n{}", stdout, stderr));
     }
 
-    // Return path to the DB
-    let db_path = PathBuf::from(&output_dir).join("analysis.db");
     Ok(db_path.to_string_lossy().to_string())
 }
 
@@ -1309,7 +1323,198 @@ fn resolve_video_path(db_path: String, replay_id: String) -> Result<String, Stri
             |row| row.get(0),
         )
         .map_err(|e| e.to_string())?;
+
+    let p = PathBuf::from(&path);
+
+    // If already absolute and exists, return as-is
+    if p.is_absolute() && p.exists() {
+        return Ok(path);
+    }
+
+    // Try resolving relative to project root
+    if let Ok(root) = find_project_root() {
+        let resolved = root.join(&p);
+        if resolved.exists() {
+            return Ok(resolved.to_string_lossy().to_string());
+        }
+    }
+
+    // Return the raw path — frontend will handle "not found"
     Ok(path)
+}
+
+// ── VOD Splitter ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct RoiRect {
+    pub y1: u32,
+    pub y2: u32,
+    pub x1: u32,
+    pub x2: u32,
+}
+
+impl RoiRect {
+    fn to_arg(&self) -> String {
+        format!("{},{},{},{}", self.y1, self.y2, self.x1, self.x2)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VodRoiConfig {
+    pub p1_tension: RoiRect,
+    pub p2_tension: RoiRect,
+    pub timer: RoiRect,
+    pub banner: RoiRect,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct DetectedSetInfo {
+    pub index: u32,
+    pub start_secs: f64,
+    pub end_secs: f64,
+    pub gameplay_duration_secs: f64,
+    pub game_count: u32,
+}
+
+#[tauri::command]
+async fn extract_preview_frame(
+    video_path: String,
+    timestamp_secs: f64,
+) -> Result<String, String> {
+    let (output_dir, _) = default_output_paths()?;
+    let preview_path = output_dir.join(".vod_preview.png");
+    std::fs::create_dir_all(&output_dir).map_err(|e| e.to_string())?;
+
+    let output = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-ss", &format!("{:.3}", timestamp_secs),
+            "-i", &video_path,
+            "-frames:v", "1",
+            "-q:v", "2",
+            "-v", "quiet",
+            preview_path.to_str().unwrap(),
+        ])
+        .output()
+        .map_err(|e| format!("Failed to run ffmpeg: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ffmpeg error: {}", stderr));
+    }
+
+    Ok(preview_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn scan_vod(
+    app_handle: tauri::AppHandle,
+    video_path: String,
+    roi_config: VodRoiConfig,
+) -> Result<Vec<DetectedSetInfo>, String> {
+    let project_root = find_project_root()?;
+    let script = project_root.join("scripts").join("split_vod.py");
+
+    let mut cmd = Command::new("python");
+    cmd.arg(script.to_str().unwrap())
+        .arg(&video_path)
+        .arg("--preview")
+        .arg("--json-output")
+        .arg("--p1-tension").arg(roi_config.p1_tension.to_arg())
+        .arg("--p2-tension").arg(roi_config.p2_tension.to_arg())
+        .arg("--timer-roi").arg(roi_config.timer.to_arg())
+        .arg("--banner-roi").arg(roi_config.banner.to_arg())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn: {}", e))?;
+
+    let stdout = child.stdout.take().unwrap();
+    let mut json_result: Option<String> = None;
+
+    for line in std::io::BufReader::new(stdout).lines() {
+        let line = line.map_err(|e| e.to_string())?;
+        if line.starts_with("PROGRESS:") {
+            let _ = app_handle.emit("vod-scan-progress", &line);
+        } else if line.starts_with("JSON_RESULT:") {
+            json_result = Some(line["JSON_RESULT:".len()..].to_string());
+        }
+    }
+
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err("VOD scan failed".into());
+    }
+
+    let json_str = json_result.ok_or("No JSON result from split_vod.py")?;
+    let parsed: serde_json::Value = serde_json::from_str(&json_str)
+        .map_err(|e| format!("Failed to parse JSON: {}", e))?;
+
+    let sets = parsed["sets"]
+        .as_array()
+        .ok_or("Invalid JSON: missing sets array")?
+        .iter()
+        .map(|s| DetectedSetInfo {
+            index: s["index"].as_u64().unwrap_or(0) as u32,
+            start_secs: s["start_secs"].as_f64().unwrap_or(0.0),
+            end_secs: s["end_secs"].as_f64().unwrap_or(0.0),
+            gameplay_duration_secs: s["gameplay_duration_secs"].as_f64().unwrap_or(0.0),
+            game_count: s["game_count"].as_u64().unwrap_or(0) as u32,
+        })
+        .collect();
+
+    Ok(sets)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CutSetRequest {
+    pub index: u32,
+    pub start_secs: f64,
+    pub end_secs: f64,
+}
+
+#[tauri::command]
+async fn cut_vod_sets(
+    app_handle: tauri::AppHandle,
+    video_path: String,
+    sets: Vec<CutSetRequest>,
+    output_dir: String,
+) -> Result<Vec<String>, String> {
+    std::fs::create_dir_all(&output_dir).map_err(|e| e.to_string())?;
+    let mut paths: Vec<String> = Vec::new();
+    let padding_before = 10.0;
+    let padding_after = 5.0;
+
+    for (i, set) in sets.iter().enumerate() {
+        let start = (set.start_secs - padding_before).max(0.0);
+        let duration = (set.end_secs + padding_after) - start;
+        let out_path = PathBuf::from(&output_dir)
+            .join(format!("set_{:02}.mp4", set.index));
+
+        let output = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-ss", &format!("{:.3}", start),
+                "-i", &video_path,
+                "-t", &format!("{:.3}", duration),
+                "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
+                "-v", "warning",
+                out_path.to_str().unwrap(),
+            ])
+            .output()
+            .map_err(|e| format!("ffmpeg error: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("Failed to cut set {}: {}", set.index, stderr));
+        }
+
+        paths.push(out_path.to_string_lossy().to_string());
+        let _ = app_handle.emit("vod-cut-progress", format!("{}/{}", i + 1, sets.len()));
+    }
+
+    Ok(paths)
 }
 
 // ── App setup ────────────────────────────────────────────────────────────────
@@ -1325,9 +1530,13 @@ pub fn run() {
             get_rounds,
             get_match_stats,
             get_highlights,
+            get_default_db_path,
             analyze_video,
             export_clip,
             resolve_video_path,
+            extract_preview_frame,
+            scan_vod,
+            cut_vod_sets,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

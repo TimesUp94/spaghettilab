@@ -1,14 +1,20 @@
 interface Props {
   onOpenDb: () => void;
   onAnalyze: () => void;
+  onSplitVod: () => void;
 }
 
-export function WelcomeScreen({ onOpenDb, onAnalyze }: Props) {
+export function WelcomeScreen({ onOpenDb, onAnalyze, onSplitVod }: Props) {
   return (
     <div className="h-screen flex items-center justify-center bg-surface-0">
       <div className="text-center max-w-lg">
         {/* Logo / Title */}
         <div className="mb-8">
+          <img
+            src="/spaghetti-showdown-logo.png"
+            alt="Spaghetti Showdown"
+            className="w-48 mx-auto mb-4 opacity-90"
+          />
           <h1 className="text-5xl font-bold tracking-tight mb-3">
             <span className="text-accent-purple">SPAGHETTI</span>{" "}
             <span className="text-text-primary">LAB</span>
@@ -22,7 +28,7 @@ export function WelcomeScreen({ onOpenDb, onAnalyze }: Props) {
         <div className="w-48 h-px bg-gradient-to-r from-transparent via-accent-purple/40 to-transparent mx-auto mb-10" />
 
         {/* Actions */}
-        <div className="grid grid-cols-2 gap-3 max-w-sm mx-auto">
+        <div className="grid grid-cols-3 gap-3 max-w-md mx-auto">
           <button
             onClick={onOpenDb}
             className="px-5 py-4 bg-accent-purple/12 text-accent-purple border border-accent-purple/20
@@ -49,6 +55,20 @@ export function WelcomeScreen({ onOpenDb, onAnalyze }: Props) {
             <div className="font-medium text-sm">Analyze Video</div>
             <div className="text-[10px] text-text-muted mt-1">
               Process a new replay
+            </div>
+          </button>
+          <button
+            onClick={onSplitVod}
+            className="px-5 py-4 bg-accent-gold/12 text-accent-gold border border-accent-gold/20
+                       rounded-xl hover:bg-accent-gold/20 hover:border-accent-gold/35
+                       transition-all duration-300 cursor-pointer group"
+          >
+            <div className="text-lg mb-1 opacity-70 group-hover:opacity-100 transition-opacity">
+              &#9986;
+            </div>
+            <div className="font-medium text-sm">Split VOD</div>
+            <div className="text-[10px] text-text-muted mt-1">
+              Cut a VOD into sets
             </div>
           </button>
         </div>

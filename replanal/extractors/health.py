@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import deque
+
 import cv2
 import numpy as np
 
@@ -11,42 +13,223 @@ from replanal.models import FrameContext, FrameData, HealthReading, Side
 class HealthBarExtractor(BaseExtractor):
     """Extracts health percentage from P1 and P2 health bars.
 
-    Uses brightness-based column scanning: the empty portion of a GGS health
-    bar is consistently dark regardless of character, so we threshold on the
-    V channel in HSV and count filled columns.
+    Tries two Y bands (one per known overlay style). Band selection:
+    - After a non-gameplay gap (round/set transition), band resets.
+    - Activation requires ``_ACTIVATE_FRAMES`` consecutive frames with
+      P1 warm run >= ``_ACTIVATE_THRESHOLD``.
+    - Among qualifying bands, the one with the stronger P2 signal wins.
+    - Once activated, the band is locked until the next gap-based reset.
+
+    For P2, both warm (red) and cool (blue) detection are tried.
+
+    A rolling median filter smooths out 1-3 frame brightness fluctuations
+    from GGS screen dim/flash effects (supers, round transitions, hit
+    animations) that would otherwise cause false 0% or inflated readings.
     """
+
+    # x-ranges for health bar measurement (tight to avoid portraits and
+    # center HUD). At 100% health, the bar fills most of this range.
+    P1_X1, P1_X2 = 200, 700
+    P2_X1, P2_X2 = 1220, 1720
+
+    # Two Y bands — one per overlay style.
+    BAND_LOW = (73, 97)     # "sets/" overlay (bars at y~75-95)
+    BAND_HIGH = (116, 142)  # "Replay_*" overlay (bars at y~118-140)
+
+    # Band activation: P1 warm must exceed this for N consecutive frames
+    _ACTIVATE_THRESHOLD = 200
+    _ACTIVATE_FRAMES = 10
+
+    # Minimum P1 run to produce any reading at all
+    _MIN_P1_RUN = 50
+
+    # Rolling median window to smooth screen dim/flash artifacts
+    _MEDIAN_WINDOW = 7
+
+    # Non-gameplay gap (in frame numbers) that triggers partial state reset.
+    # Resets band selection and median buffers, but preserves max_w calibration.
+    _RESET_GAP = 15
 
     def __init__(self, config: HealthBarConfig | None = None):
         self.config = config or HealthBarConfig()
+        self._last_frame: int = -9999
+        # Per-band max widths: {key: (p1_max, p2_max)}
+        self._max_w: dict[str, tuple[int, int]] = {
+            "low": (0, 0),
+            "high": (0, 0),
+        }
+        # Active band key (locked once activated)
+        self._active: str | None = None
+        # Activation tracking: candidate band and consecutive frame count
+        self._activate_candidate: str | None = None
+        self._activate_count: int = 0
+        # Rolling median buffers for raw pixel measurements
+        self._p1_buf: deque[int] = deque(maxlen=self._MEDIAN_WINDOW)
+        self._p2_buf: deque[int] = deque(maxlen=self._MEDIAN_WINDOW)
 
     @property
     def required_rois(self) -> list[str]:
-        return ["p1_health_bar", "p2_health_bar"]
+        return []
 
     def extract(self, ctx: FrameContext, data: FrameData) -> None:
-        data.p1_health = self._read_bar(ctx.rois["p1_health_bar"], Side.P1)
-        data.p2_health = self._read_bar(ctx.rois["p2_health_bar"], Side.P2)
+        frame = ctx.frame_bgr
+        h, w = frame.shape[:2]
+        if h < 1080 or w < 1920:
+            return
 
-    def _read_bar(self, bar_roi: np.ndarray, side: Side) -> HealthReading:
-        if bar_roi.size == 0:
-            return HealthReading(side=side, health_pct=0.0, bar_pixels_filled=0, bar_pixels_total=0)
+        # Partial reset after a non-gameplay gap (round/set transitions).
+        # Preserves per-band max_w so calibration carries across rounds.
+        if ctx.frame_number - self._last_frame > self._RESET_GAP:
+            self._active = None
+            self._activate_candidate = None
+            self._activate_count = 0
+            self._p1_buf.clear()
+            self._p2_buf.clear()
+        self._last_frame = ctx.frame_number
 
-        hsv = cv2.cvtColor(bar_roi, cv2.COLOR_BGR2HSV)
-        value_channel = hsv[:, :, 2]
+        # Measure both bands
+        measurements: dict[str, tuple[int, int]] = {}
+        for key, (y1, y2) in [("low", self.BAND_LOW), ("high", self.BAND_HIGH)]:
+            strip = frame[y1:y2]
+            hsv = cv2.cvtColor(strip, cv2.COLOR_BGR2HSV)
 
-        # A column is "filled" if >50% of its vertical pixels are brighter
-        # than the background threshold.
-        filled_mask = value_channel > self.config.background_threshold
-        col_fill_ratio = np.mean(filled_mask, axis=0)
-        col_filled = col_fill_ratio > 0.5
+            p1_w = self._measure_warm_fill(hsv, self.P1_X1, self.P1_X2)
+            if p1_w < self._MIN_P1_RUN:
+                continue
 
-        total_cols = len(col_filled)
-        filled_cols = int(np.sum(col_filled))
-        health_pct = filled_cols / total_cols if total_cols > 0 else 0.0
+            # P2: try both warm and cool detection
+            p2_w = max(
+                self._measure_warm_fill(hsv, self.P2_X1, self.P2_X2),
+                self._measure_cool_fill(hsv, self.P2_X1, self.P2_X2),
+            )
 
-        return HealthReading(
-            side=side,
-            health_pct=health_pct,
-            bar_pixels_filled=filled_cols,
-            bar_pixels_total=total_cols,
+            measurements[key] = (p1_w, p2_w)
+
+        if not measurements:
+            return
+
+        # ── Band activation (only when no band is locked) ────────────────
+        if self._active is None:
+            # Find bands that pass the P1 threshold
+            qualifying = {
+                k: v for k, v in measurements.items()
+                if v[0] >= self._ACTIVATE_THRESHOLD
+            }
+            if qualifying:
+                # Among qualifying bands, prefer the one with stronger P2
+                best = max(qualifying, key=lambda k: qualifying[k][1])
+                if best == self._activate_candidate:
+                    self._activate_count += 1
+                    if self._activate_count >= self._ACTIVATE_FRAMES:
+                        self._active = best
+                else:
+                    self._activate_candidate = best
+                    self._activate_count = 1
+
+        # Select which band to use for this frame's output
+        if self._active and self._active in measurements:
+            key = self._active
+        elif self._active:
+            # Active band didn't produce a valid reading — skip this frame
+            # (likely screen dim affecting the active band)
+            return
+        else:
+            # No band activated yet — use best available but don't output
+            # readings until activation is confirmed (avoids false readings
+            # from transition frames)
+            return
+
+        p1_w, p2_w = measurements[key]
+
+        # Update per-band max widths (use raw values for calibration)
+        p1_max, p2_max = self._max_w[key]
+        if p1_w > p1_max:
+            p1_max = p1_w
+        if p2_w > p2_max:
+            p2_max = p2_w
+        self._max_w[key] = (p1_max, p2_max)
+
+        # Rolling median to smooth screen dim/flash artifacts
+        self._p1_buf.append(p1_w)
+        self._p2_buf.append(p2_w)
+        p1_smooth = int(np.median(list(self._p1_buf)))
+        p2_smooth = int(np.median(list(self._p2_buf)))
+
+        p1_pct = p1_smooth / p1_max if p1_max > 0 else 0.0
+        p2_pct = p2_smooth / p2_max if p2_max > 0 else 0.0
+
+        data.p1_health = HealthReading(
+            side=Side.P1,
+            health_pct=min(1.0, p1_pct),
+            bar_pixels_filled=p1_smooth,
+            bar_pixels_total=p1_max,
         )
+        data.p2_health = HealthReading(
+            side=Side.P2,
+            health_pct=min(1.0, p2_pct),
+            bar_pixels_filled=p2_smooth,
+            bar_pixels_total=p2_max,
+        )
+
+    # ── Fill width measurement ───────────────────────────────────────────
+
+    def _measure_warm_fill(self, hsv: np.ndarray, x1: int, x2: int) -> int:
+        """Measure fill width using warm pixel detection (red/pink/orange bars).
+
+        Warm pixels: H < 30 or H > 150, S > 30, V > 80.
+        A column counts as "filled" if >35% of its vertical pixels are warm.
+        Returns the longest continuous run of filled columns.
+        """
+        h_ch = hsv[:, x1:x2, 0]
+        s_ch = hsv[:, x1:x2, 1]
+        v_ch = hsv[:, x1:x2, 2]
+
+        warm = ((h_ch < 30) | (h_ch > 150)) & (s_ch > 30) & (v_ch > 80)
+        col_ratio = np.mean(warm, axis=0)
+        is_filled = col_ratio > 0.35
+
+        return self._longest_run(is_filled)
+
+    def _measure_cool_fill(self, hsv: np.ndarray, x1: int, x2: int) -> int:
+        """Measure fill width for blue/purple bars.
+
+        In some tournament overlays, the P2 health bar is rendered in blue/purple
+        (H approx 90-145). The filled portion has S > 40, V > 80 while the depleted
+        portion is dark (V < 50). Wider hue range and lower V threshold make this
+        more robust to video compression artifacts.
+        """
+        h_ch = hsv[:, x1:x2, 0]
+        s_ch = hsv[:, x1:x2, 1]
+        v_ch = hsv[:, x1:x2, 2]
+
+        is_blue = (h_ch >= 90) & (h_ch <= 145) & (s_ch > 40)
+        filled = is_blue & (v_ch > 80)
+
+        col_ratio = np.mean(filled, axis=0)
+        is_filled = col_ratio > 0.35
+
+        return self._longest_run(is_filled)
+
+    @staticmethod
+    def _longest_run(is_filled: np.ndarray) -> int:
+        """Find longest continuous run of True values."""
+        best = 0
+        current = 0
+        for val in is_filled:
+            if val:
+                current += 1
+                if current > best:
+                    best = current
+            else:
+                current = 0
+        return best
+
+    def reset_calibration(self) -> None:
+        """Reset all state (call between replays)."""
+        self._max_w = {"low": (0, 0), "high": (0, 0)}
+        self._active = None
+        self._activate_candidate = None
+        self._activate_count = 0
+        self._p1_buf.clear()
+        self._p2_buf.clear()
+        self._last_frame = -9999

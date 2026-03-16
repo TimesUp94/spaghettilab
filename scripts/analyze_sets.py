@@ -17,7 +17,9 @@ sys.path.insert(0, str(ROOT))
 from replanal.aggregator import HealthAggregator
 from replanal.config import PipelineConfig
 from replanal.extractors.health import HealthBarExtractor
+from replanal.extractors.round_counter import RoundCounterExtractor
 from replanal.extractors.scene import SceneDetector
+from replanal.extractors.timer import TimerExtractor
 from replanal.pipeline import ReplayPipeline
 from replanal.storage import init_db, write_damage_events, write_frame_data, write_frame_parquet, write_replay
 from replanal.video import get_video_info
@@ -36,7 +38,9 @@ def analyze_one(video_path: str, config: PipelineConfig, output_dir: Path, db_co
     # Pipeline will skip remaining extractors on non-gameplay frames
     scene_det = SceneDetector()
     health_ext = HealthBarExtractor(config.health_bar)
-    pipeline = ReplayPipeline(config, [scene_det, health_ext])
+    timer_ext = TimerExtractor()
+    heart_ext = RoundCounterExtractor()
+    pipeline = ReplayPipeline(config, [scene_det, health_ext, timer_ext, heart_ext])
 
     t0 = time.time()
     frames = pipeline.process_video(video_path)
@@ -75,7 +79,7 @@ def main():
     parser = argparse.ArgumentParser(description="Batch-analyze tournament sets")
     parser.add_argument("sets_dir", help="Directory containing set MP4 files")
     parser.add_argument("--config", default=str(ROOT / "config" / "default.yaml"))
-    parser.add_argument("--output", default=str(ROOT / "output" / "sets"))
+    parser.add_argument("--output", default=str(ROOT / "output"))
     parser.add_argument("--sample-every", type=int, default=2,
                         help="Process every Nth frame (default: 2 = 15fps)")
     args = parser.parse_args()
@@ -92,7 +96,7 @@ def main():
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    db_path = output_dir / "sets_analysis.db"
+    db_path = output_dir / "analysis.db"
     conn = init_db(db_path)
 
     print(f"Analyzing {len(videos)} sets (sample every {args.sample_every} frames)")

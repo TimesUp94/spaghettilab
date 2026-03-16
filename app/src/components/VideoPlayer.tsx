@@ -10,6 +10,7 @@ interface Props {
   damageEvents: DamageEvent[];
   selectedMatch: Match | null;
   onClearSelection: () => void;
+  onLocateVideo?: () => void;
 }
 
 function formatTime(s: number): string {
@@ -27,6 +28,7 @@ export function VideoPlayer({
   damageEvents,
   selectedMatch,
   onClearSelection,
+  onLocateVideo,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
@@ -213,6 +215,14 @@ export function VideoPlayer({
             <div className="text-[10px] text-text-muted/60">
               Statistics are still available below
             </div>
+            {onLocateVideo && (
+              <button
+                onClick={onLocateVideo}
+                className="btn-primary !py-1.5 !px-3 !text-xs mt-1"
+              >
+                Locate File
+              </button>
+            )}
           </div>
         )}
       </div>

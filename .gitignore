@@ -17,6 +17,10 @@ venv/
 
 # Rust / Tauri build
 app/src-tauri/target/
+app/src-tauri/gen/
+
+# Vite build output
+app/dist/
 
 # Node
 app/node_modules/

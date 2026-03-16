@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
   Replay,
@@ -17,6 +17,7 @@ import {
   getRounds,
   getMatchStats,
   getHighlights,
+  getDefaultDbPath,
   resolveVideoPath,
 } from "./api";
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -31,6 +32,7 @@ import { DamageLog } from "./components/DamageLog";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ExportModal } from "./components/ExportModal";
 import { AnalysisProgress } from "./components/AnalysisProgress";
+import { SplitVodView } from "./components/SplitVodView";
 
 /** Group rounds into matches (first-to-2 round wins). */
 function groupRoundsIntoMatches(rounds: RoundResult[]): Match[] {
@@ -76,7 +78,7 @@ function groupRoundsIntoMatches(rounds: RoundResult[]): Match[] {
   return matches;
 }
 
-type AppView = "welcome" | "analyze" | "dashboard";
+type AppView = "welcome" | "analyze" | "split" | "dashboard";
 
 export default function App() {
   const [view, setView] = useState<AppView>("welcome");
@@ -179,6 +181,15 @@ export default function App() {
     }
   }, []);
 
+  // Auto-open the default DB on startup if it exists
+  useEffect(() => {
+    getDefaultDbPath()
+      .then((path) => openDatabase(path))
+      .catch(() => {
+        // No default DB yet — stay on welcome screen
+      });
+  }, [openDatabase]);
+
   const handleOpenDb = useCallback(async () => {
     const selected = await open({
       multiple: false,
@@ -257,6 +268,22 @@ export default function App() {
     setExportTarget({ startMs, endMs });
   }, []);
 
+  const handleLocateVideo = useCallback(async () => {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Video Files", extensions: ["mp4", "mkv", "avi"] }],
+    });
+    if (selected) {
+      const path = selected as string;
+      setVideoPath(path);
+      try {
+        setVideoSrc(convertFileSrc(path));
+      } catch {
+        setVideoSrc(null);
+      }
+    }
+  }, []);
+
   const handleAnalysisComplete = useCallback(
     async (resultDbPath: string) => {
       await openDatabase(resultDbPath);
@@ -270,6 +297,7 @@ export default function App() {
       <WelcomeScreen
         onOpenDb={handleOpenDb}
         onAnalyze={() => setView("analyze")}
+        onSplitVod={() => setView("split")}
       />
     );
   }
@@ -279,6 +307,19 @@ export default function App() {
     return (
       <AnalysisProgress
         onComplete={handleAnalysisComplete}
+        onCancel={() => setView("welcome")}
+      />
+    );
+  }
+
+  // VOD splitter view
+  if (view === "split") {
+    return (
+      <SplitVodView
+        onComplete={(outputDir) => {
+          console.log("VOD split complete:", outputDir);
+          setView("welcome");
+        }}
         onCancel={() => setView("welcome")}
       />
     );
@@ -295,9 +336,16 @@ export default function App() {
               setDbPath(null);
               setView("welcome");
             }}
-            className="text-accent-purple font-semibold text-sm tracking-wide hover:text-accent-purple/80 transition-colors cursor-pointer"
+            className="flex items-center gap-2 hover:opacity-80 transition-opacity cursor-pointer"
           >
-            SPAGHETTI LAB
+            <img
+              src="/spaghetti-showdown-logo.png"
+              alt="Spaghetti Showdown"
+              className="h-7"
+            />
+            <span className="text-accent-purple font-semibold text-sm tracking-wide">
+              SPAGHETTI LAB
+            </span>
           </button>
           <span className="text-text-muted text-xs">|</span>
           <span className="text-text-secondary text-xs truncate max-w-[400px]">
@@ -351,6 +399,7 @@ export default function App() {
                     damageEvents={damageEvents}
                     selectedMatch={selectedMatch}
                     onClearSelection={() => setSelectedMatchIndex(null)}
+                    onLocateVideo={handleLocateVideo}
                   />
                 </div>
                 <div className="w-[320px] shrink-0">

@@ -76,3 +76,33 @@ export interface Match {
 }
 
 export type ActiveTab = "matches" | "rounds" | "highlights" | "damage";
+
+// VOD Splitter types
+
+export interface RoiRect {
+  y1: number;
+  y2: number;
+  x1: number;
+  x2: number;
+}
+
+export interface VodRoiConfig {
+  p1_tension: RoiRect;
+  p2_tension: RoiRect;
+  timer: RoiRect;
+  banner: RoiRect;
+}
+
+export interface DetectedSetInfo {
+  index: number;
+  start_secs: number;
+  end_secs: number;
+  gameplay_duration_secs: number;
+  game_count: number;
+}
+
+export interface CutSetRequest {
+  index: number;
+  start_secs: number;
+  end_secs: number;
+}

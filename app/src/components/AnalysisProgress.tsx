@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { open } from "@tauri-apps/plugin-dialog";
 import { analyzeVideo } from "../api";
 
 interface Props {
@@ -12,7 +12,6 @@ export function AnalysisProgress({ onComplete, onCancel }: Props) {
     "select" | "running" | "done" | "error"
   >("select");
   const [videoPath, setVideoPath] = useState<string | null>(null);
-  const [outputDir, setOutputDir] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleSelectVideo = useCallback(async () => {
@@ -25,28 +24,19 @@ export function AnalysisProgress({ onComplete, onCancel }: Props) {
     }
   }, []);
 
-  const handleSelectOutput = useCallback(async () => {
-    const selected = await open({
-      directory: true,
-    });
-    if (selected) {
-      setOutputDir(selected as string);
-    }
-  }, []);
-
   const handleAnalyze = useCallback(async () => {
-    if (!videoPath || !outputDir) return;
+    if (!videoPath) return;
     setStatus("running");
     setError(null);
     try {
-      const dbPath = await analyzeVideo(videoPath, outputDir);
+      const dbPath = await analyzeVideo(videoPath);
       setStatus("done");
       onComplete(dbPath);
     } catch (err) {
       setError(String(err));
       setStatus("error");
     }
-  }, [videoPath, outputDir, onComplete]);
+  }, [videoPath, onComplete]);
 
   return (
     <div className="h-screen flex items-center justify-center bg-surface-0">
@@ -117,28 +107,10 @@ export function AnalysisProgress({ onComplete, onCancel }: Props) {
                 </div>
               </div>
 
-              {/* Output directory */}
-              <div>
-                <label className="text-xs text-text-muted block mb-1.5">
-                  Output Directory
-                </label>
-                <div className="flex gap-2">
-                  <div className="flex-1 bg-surface-3 border border-surface-4 rounded-lg px-3 py-2 text-xs text-text-secondary truncate">
-                    {outputDir || "No directory selected"}
-                  </div>
-                  <button
-                    onClick={handleSelectOutput}
-                    className="btn-primary !py-2"
-                  >
-                    Browse
-                  </button>
-                </div>
-              </div>
-
               <div className="text-[10px] text-text-muted">
                 The analysis will extract health data, detect damage events,
-                and identify round boundaries. Results are saved to a SQLite
-                database in the output directory.
+                and identify round boundaries. Results are saved to the
+                project's analysis database.
               </div>
 
               <div className="flex justify-end gap-2 pt-2">
@@ -147,7 +119,7 @@ export function AnalysisProgress({ onComplete, onCancel }: Props) {
                 </button>
                 <button
                   onClick={handleAnalyze}
-                  disabled={!videoPath || !outputDir}
+                  disabled={!videoPath}
                   className="btn-primary disabled:opacity-30 disabled:cursor-not-allowed"
                 >
                   Start Analysis

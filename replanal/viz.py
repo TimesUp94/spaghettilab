@@ -42,12 +42,28 @@ def save_health_timeline(
     import matplotlib.pyplot as plt
 
     timestamps = [f.timestamp_ms / 1000 for f in frames]
-    p1_health = [f.p1_health.health_pct if f.p1_health else None for f in frames]
-    p2_health = [f.p2_health.health_pct if f.p2_health else None for f in frames]
+    p1_health = [f.p1_health.health_pct if f.p1_health else float('nan') for f in frames]
+    p2_health = [f.p2_health.health_pct if f.p2_health else float('nan') for f in frames]
+
+    # Rolling median smooth (31-frame window, matching Rust round detection)
+    def _rolling_median(data: list[float], window: int) -> list[float]:
+        n = len(data)
+        out = [float('nan')] * n
+        half = window // 2
+        for i in range(n):
+            start = max(0, i - half)
+            end = min(n, i + half + 1)
+            vals = [v for v in data[start:end] if not np.isnan(v)]
+            if vals:
+                out[i] = float(np.median(vals))
+        return out
+
+    p1_smooth = _rolling_median(p1_health, 31)
+    p2_smooth = _rolling_median(p2_health, 31)
 
     fig, ax = plt.subplots(figsize=(14, 4))
-    ax.plot(timestamps, p1_health, label="P1 Health", color="blue", linewidth=0.8)
-    ax.plot(timestamps, p2_health, label="P2 Health", color="red", linewidth=0.8)
+    ax.plot(timestamps, p1_smooth, label="P1 Health", color="blue", linewidth=0.8)
+    ax.plot(timestamps, p2_smooth, label="P2 Health", color="red", linewidth=0.8)
 
     for e in events:
         color = "blue" if e.target_side == Side.P1 else "red"

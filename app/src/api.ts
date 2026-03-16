@@ -6,6 +6,9 @@ import type {
   RoundResult,
   MatchStats,
   Highlight,
+  VodRoiConfig,
+  DetectedSetInfo,
+  CutSetRequest,
 } from "./types";
 
 export async function getReplays(dbPath: string): Promise<Replay[]> {
@@ -49,10 +52,13 @@ export async function getHighlights(
 
 export async function analyzeVideo(
   videoPath: string,
-  outputDir: string,
   sampleEvery?: number
 ): Promise<string> {
-  return invoke("analyze_video", { videoPath, outputDir, sampleEvery });
+  return invoke("analyze_video", { videoPath, sampleEvery });
+}
+
+export async function getDefaultDbPath(): Promise<string> {
+  return invoke("get_default_db_path");
 }
 
 export async function exportClip(
@@ -69,4 +75,28 @@ export async function resolveVideoPath(
   replayId: string
 ): Promise<string> {
   return invoke("resolve_video_path", { dbPath, replayId });
+}
+
+// VOD Splitter
+
+export async function extractPreviewFrame(
+  videoPath: string,
+  timestampSecs: number
+): Promise<string> {
+  return invoke("extract_preview_frame", { videoPath, timestampSecs });
+}
+
+export async function scanVod(
+  videoPath: string,
+  roiConfig: VodRoiConfig
+): Promise<DetectedSetInfo[]> {
+  return invoke("scan_vod", { videoPath, roiConfig });
+}
+
+export async function cutVodSets(
+  videoPath: string,
+  sets: CutSetRequest[],
+  outputDir: string
+): Promise<string[]> {
+  return invoke("cut_vod_sets", { videoPath, sets, outputDir });
 }
