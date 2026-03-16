@@ -1,5 +1,6 @@
-import { useState, useCallback, useMemo, useEffect } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { useState, useCallback, useMemo, useEffect, useRef } from "react";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 import type {
   Replay,
   FrameDataPoint,
@@ -9,6 +10,7 @@ import type {
   MatchStats,
   Highlight,
   Note,
+  SpagSession,
   ActiveTab,
 } from "./types";
 import {
@@ -24,6 +26,9 @@ import {
   deleteNote,
   getDefaultDbPath,
   resolveVideoPath,
+  exportSpag,
+  openSpag,
+  saveSpag,
 } from "./api";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Sidebar } from "./components/Sidebar";
@@ -119,6 +124,40 @@ export default function App() {
   const [selectedMatchIndex, setSelectedMatchIndex] = useState<number | null>(
     null
   );
+  const [spagSession, setSpagSession] = useState<SpagSession | null>(null);
+  const [savingSpag, setSavingSpag] = useState(false);
+  const [exportingSpag, setExportingSpag] = useState(false);
+
+  // Resizable split between top (video/timeline) and bottom (tabs)
+  const [topHeight, setTopHeight] = useState<number | string>("55%");
+  const resizeRef = useRef<{ startY: number; startH: number } | null>(null);
+
+  const handleResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const container = (e.target as HTMLElement).parentElement;
+    const topEl = container?.querySelector<HTMLElement>("[style*='height']");
+    if (!topEl) return;
+    const startH = topEl.getBoundingClientRect().height;
+    resizeRef.current = { startY: e.clientY, startH };
+
+    const onMove = (ev: MouseEvent) => {
+      if (!resizeRef.current) return;
+      const delta = ev.clientY - resizeRef.current.startY;
+      const newH = Math.max(150, resizeRef.current.startH + delta);
+      setTopHeight(newH);
+    };
+    const onUp = () => {
+      resizeRef.current = null;
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, []);
 
   // Derived: group rounds into matches
   const matches = useMemo(() => groupRoundsIntoMatches(rounds), [rounds]);
@@ -328,13 +367,111 @@ export default function App() {
     [dbPath]
   );
 
+  // .spag file support
+  const openSpagFile = useCallback(async (path: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const session = await openSpag(path);
+      setSpagSession(session);
+      setDbPath(session.db_path);
+
+      const reps = await getReplays(session.db_path);
+      setReplays(reps);
+      setView("dashboard");
+
+      // Load the replay (there's only one in a .spag)
+      const replay = reps.find(r => r.replay_id === session.replay_id) || reps[0];
+      if (replay) {
+        setSelectedReplay(replay);
+        setSelectedMatchIndex(null);
+        const [fd, de, rn, st, hl, nt] = await Promise.all([
+          getFrameData(session.db_path, replay.replay_id),
+          getDamageEvents(session.db_path, replay.replay_id),
+          getRounds(session.db_path, replay.replay_id),
+          getMatchStats(session.db_path, replay.replay_id),
+          getHighlights(session.db_path, replay.replay_id),
+          getNotes(session.db_path, replay.replay_id).catch(() => [] as Note[]),
+        ]);
+        setFrameData(fd);
+        setDamageEvents(de);
+        setRounds(rn);
+        setStats(st);
+        setHighlights(hl);
+        setNotes(nt);
+
+        // Use the extracted video from the .spag session
+        setVideoPath(session.video_path);
+        try {
+          setVideoSrc(convertFileSrc(session.video_path));
+        } catch {
+          setVideoSrc(null);
+        }
+        setActiveTab("matches");
+      }
+    } catch (err) {
+      console.error("Failed to open .spag:", err);
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const handleOpenSpag = useCallback(async () => {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Spaghetti Lab Analysis", extensions: ["spag"] }],
+    });
+    if (!selected) return;
+    await openSpagFile(selected as string);
+  }, [openSpagFile]);
+
+  const handleExportSpag = useCallback(async () => {
+    if (!dbPath || !selectedReplay) return;
+    const dest = await save({
+      filters: [{ name: "Spaghetti Lab Analysis", extensions: ["spag"] }],
+      defaultPath: `${selectedReplay.replay_id}.spag`,
+    });
+    if (!dest) return;
+    setExportingSpag(true);
+    try {
+      await exportSpag(dbPath, selectedReplay.replay_id, dest);
+    } catch (err) {
+      console.error("Failed to export .spag:", err);
+      setError(String(err));
+    } finally {
+      setExportingSpag(false);
+    }
+  }, [dbPath, selectedReplay]);
+
+  const handleSaveSpag = useCallback(async () => {
+    if (!spagSession) return;
+    setSavingSpag(true);
+    try {
+      await saveSpag(spagSession.spag_path, spagSession.db_path);
+    } catch (err) {
+      console.error("Failed to save .spag:", err);
+      setError(String(err));
+    } finally {
+      setSavingSpag(false);
+    }
+  }, [spagSession]);
+
+  // Listen for .spag file association (app launched with .spag argument)
+  useEffect(() => {
+    const unlisten = listen<string>("open-spag-file", (event) => {
+      openSpagFile(event.payload);
+    });
+    return () => { unlisten.then(fn => fn()); };
+  }, [openSpagFile]);
+
   // Welcome screen
   if (view === "welcome") {
     return (
       <WelcomeScreen
-        onOpenDb={handleOpenDb}
         onAnalyze={() => setView("analyze")}
         onSplitVod={() => setView("split")}
+        onOpenSpag={handleOpenSpag}
       />
     );
   }
@@ -371,6 +508,7 @@ export default function App() {
           <button
             onClick={() => {
               setDbPath(null);
+              setSpagSession(null);
               setView("welcome");
             }}
             className="flex items-center gap-2 hover:opacity-80 transition-opacity cursor-pointer"
@@ -386,15 +524,39 @@ export default function App() {
           </button>
           <span className="text-text-muted text-xs">|</span>
           <span className="text-text-secondary text-xs truncate max-w-[400px]">
-            {dbPath?.split(/[/\\]/).pop()}
+            {spagSession
+              ? spagSession.spag_path.split(/[/\\]/).pop()
+              : dbPath?.split(/[/\\]/).pop()}
           </span>
-          <span className="text-text-muted text-[10px]">
-            {replays.length} sets
-          </span>
+          {spagSession ? (
+            <span className="text-p2 text-[10px] font-medium">.spag</span>
+          ) : (
+            <span className="text-text-muted text-[10px]">
+              {replays.length} sets
+            </span>
+          )}
         </div>
         <div className="ml-auto flex items-center gap-2">
           {error && (
             <span className="text-p1 text-xs mr-2">{error}</span>
+          )}
+          {spagSession && (
+            <button
+              onClick={handleSaveSpag}
+              disabled={savingSpag}
+              className="btn-ghost text-xs text-accent-green border-accent-green/30 hover:bg-accent-green/10"
+            >
+              {savingSpag ? "Saving..." : "Save .spag"}
+            </button>
+          )}
+          {selectedReplay && !spagSession && (
+            <button
+              onClick={handleExportSpag}
+              disabled={exportingSpag}
+              className="btn-ghost text-xs text-p2 border-p2/30 hover:bg-p2/10"
+            >
+              {exportingSpag ? "Exporting..." : "Export .spag"}
+            </button>
           )}
           <button onClick={handleOpenDb} className="btn-ghost text-xs">
             Open Database
@@ -424,49 +586,63 @@ export default function App() {
             </div>
           ) : selectedReplay && stats ? (
             <>
-              {/* Video + Overview row */}
-              <div className="flex gap-4 p-4 pb-0 shrink-0">
-                <div className="flex-1 min-w-0">
-                  <VideoPlayer
-                    src={videoSrc}
-                    seekToMs={seekToMs}
-                    onSeeked={() => setSeekToMs(null)}
-                    durationMs={selectedReplay.duration_ms}
+              {/* Top section: video + overview + timeline (resizable) */}
+              <div
+                className="shrink-0 overflow-y-auto"
+                style={{ height: topHeight }}
+              >
+                {/* Video + Overview row */}
+                <div className="flex gap-4 p-4 pb-0">
+                  <div className="flex-1 min-w-0">
+                    <VideoPlayer
+                      src={videoSrc}
+                      seekToMs={seekToMs}
+                      onSeeked={() => setSeekToMs(null)}
+                      durationMs={selectedReplay.duration_ms}
+                      rounds={rounds}
+                      damageEvents={damageEvents}
+                      selectedMatch={selectedMatch}
+                      onClearSelection={() => setSelectedMatchIndex(null)}
+                      onLocateVideo={handleLocateVideo}
+                      onTimeUpdate={setCurrentTimeMs}
+                      notes={notes}
+                    />
+                  </div>
+                  <div className="w-[320px] shrink-0">
+                    <MatchOverview
+                      stats={displayStats!}
+                      replay={selectedReplay}
+                      selectedMatch={selectedMatch}
+                      onClearSelection={() => setSelectedMatchIndex(null)}
+                    />
+                  </div>
+                </div>
+
+                {/* Health timeline */}
+                <div className="px-4 pt-3">
+                  <HealthTimeline
+                    frameData={frameData}
                     rounds={rounds}
                     damageEvents={damageEvents}
-                    selectedMatch={selectedMatch}
-                    onClearSelection={() => setSelectedMatchIndex(null)}
-                    onLocateVideo={handleLocateVideo}
-                    onTimeUpdate={setCurrentTimeMs}
+                    highlights={highlights}
                     notes={notes}
-                  />
-                </div>
-                <div className="w-[320px] shrink-0">
-                  <MatchOverview
-                    stats={displayStats!}
-                    replay={selectedReplay}
+                    onSeek={handleSeek}
                     selectedMatch={selectedMatch}
                     onClearSelection={() => setSelectedMatchIndex(null)}
                   />
                 </div>
               </div>
 
-              {/* Health timeline */}
-              <div className="px-4 pt-3 shrink-0">
-                <HealthTimeline
-                  frameData={frameData}
-                  rounds={rounds}
-                  damageEvents={damageEvents}
-                  highlights={highlights}
-                  notes={notes}
-                  onSeek={handleSeek}
-                  selectedMatch={selectedMatch}
-                  onClearSelection={() => setSelectedMatchIndex(null)}
-                />
+              {/* Resize handle */}
+              <div
+                className="h-1.5 shrink-0 cursor-row-resize group flex items-center justify-center hover:bg-accent-purple/10 transition-colors"
+                onMouseDown={handleResizeStart}
+              >
+                <div className="w-10 h-0.5 rounded-full bg-surface-4 group-hover:bg-accent-purple/50 transition-colors" />
               </div>
 
               {/* Tab section */}
-              <div className="flex-1 flex flex-col overflow-hidden px-4 pt-2 pb-4">
+              <div className="flex-1 flex flex-col overflow-hidden px-4 pt-1 pb-4">
                 <div className="flex border-b border-surface-4/50 shrink-0">
                   {(
                     [

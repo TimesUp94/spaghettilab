@@ -10,6 +10,7 @@ import type {
   DetectedSetInfo,
   CutSetRequest,
   Note,
+  SpagSession,
 } from "./types";
 
 export async function getReplays(dbPath: string): Promise<Replay[]> {
@@ -118,4 +119,18 @@ export async function updateNote(dbPath: string, noteId: number, text: string, t
 
 export async function deleteNote(dbPath: string, noteId: number): Promise<void> {
   return invoke("delete_note", { dbPath, noteId });
+}
+
+// .spag file format
+
+export async function exportSpag(dbPath: string, replayId: string, outputPath: string): Promise<void> {
+  return invoke("export_spag", { dbPath, replayId, outputPath });
+}
+
+export async function openSpag(spagPath: string): Promise<SpagSession> {
+  return invoke("open_spag", { spagPath });
+}
+
+export async function saveSpag(spagPath: string, dbPath: string): Promise<void> {
+  return invoke("save_spag", { spagPath, dbPath });
 }

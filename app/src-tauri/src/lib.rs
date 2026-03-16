@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::io::BufRead;
+use std::io::{BufRead, Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use tauri::Emitter;
@@ -1232,12 +1232,13 @@ fn get_highlights(db_path: String, replay_id: String) -> Result<Vec<Highlight>, 
 fn find_project_root() -> Result<PathBuf, String> {
     let marker = |d: &PathBuf| d.join("scripts").join("analyze_replay.py").exists();
 
-    // 1. Dev: relative to Cargo manifest
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    if let Some(p) = manifest.parent().map(|p| p.to_path_buf()) {
-        if marker(&p) {
-            return Ok(p);
+    // 1. Dev: walk up from Cargo manifest dir (app/src-tauri -> app -> repo root)
+    let mut manifest_dir: Option<PathBuf> = Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    while let Some(d) = manifest_dir {
+        if marker(&d) {
+            return Ok(d);
         }
+        manifest_dir = d.parent().map(|p| p.to_path_buf());
     }
 
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -1672,12 +1673,270 @@ async fn cut_vod_sets(
     Ok(paths)
 }
 
+// ── .spag file format ────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SpagSession {
+    pub db_path: String,
+    pub video_path: String,
+    pub spag_path: String,
+    pub replay_id: String,
+}
+
+/// Resolve the video path for a replay (reusable helper).
+fn resolve_video_for_replay(conn: &Connection, replay_id: &str) -> Result<PathBuf, String> {
+    let raw_path: String = conn
+        .query_row(
+            "SELECT video_path FROM replays WHERE replay_id = ?",
+            [replay_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let p = PathBuf::from(&raw_path);
+    if p.is_absolute() && p.exists() {
+        return Ok(p);
+    }
+    if let Ok(root) = find_project_root() {
+        let resolved = root.join(&p);
+        if resolved.exists() {
+            return Ok(resolved);
+        }
+    }
+    Err(format!("Video file not found: {}", raw_path))
+}
+
+#[tauri::command]
+async fn export_spag(
+    db_path: String,
+    replay_id: String,
+    output_path: String,
+) -> Result<(), String> {
+    let src_conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+
+    // Resolve the video file
+    let video_path = resolve_video_for_replay(&src_conn, &replay_id)?;
+
+    // Create temp DB with just this replay's data using ATTACH DATABASE
+    let tmp_db = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
+    let tmp_db_path = tmp_db.path().to_path_buf();
+    {
+        // Use the source connection and attach the destination
+        let tmp_str = tmp_db_path.to_string_lossy().replace('\\', "/");
+        src_conn.execute(&format!("ATTACH DATABASE '{}' AS dst", tmp_str), [])
+            .map_err(|e| e.to_string())?;
+
+        // Create tables in destination
+        src_conn.execute_batch(
+            "CREATE TABLE dst.replays (
+                replay_id TEXT PRIMARY KEY,
+                video_path TEXT,
+                duration_ms REAL,
+                frame_count INTEGER
+            );
+            CREATE TABLE dst.frame_data (
+                replay_id TEXT,
+                frame_number INTEGER,
+                timestamp_ms REAL,
+                p1_health_pct REAL,
+                p2_health_pct REAL,
+                timer_value INTEGER,
+                p1_rounds_won INTEGER,
+                p2_rounds_won INTEGER
+            );
+            CREATE TABLE dst.damage_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                replay_id TEXT,
+                timestamp_ms REAL,
+                frame_start INTEGER,
+                frame_end INTEGER,
+                target_side INTEGER,
+                damage_pct REAL,
+                pre_health_pct REAL,
+                post_health_pct REAL
+            );
+            CREATE TABLE dst.notes (
+                note_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                replay_id TEXT NOT NULL,
+                timestamp_ms REAL NOT NULL,
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );"
+        ).map_err(|e| e.to_string())?;
+
+        // Copy data with video_path rewritten
+        src_conn.execute(
+            "INSERT INTO dst.replays SELECT replay_id, 'video.mp4', duration_ms, frame_count FROM main.replays WHERE replay_id = ?",
+            [&replay_id],
+        ).map_err(|e| e.to_string())?;
+
+        src_conn.execute(
+            "INSERT INTO dst.frame_data SELECT * FROM main.frame_data WHERE replay_id = ?",
+            [&replay_id],
+        ).map_err(|e| e.to_string())?;
+
+        src_conn.execute(
+            "INSERT INTO dst.damage_events SELECT * FROM main.damage_events WHERE replay_id = ?",
+            [&replay_id],
+        ).map_err(|e| e.to_string())?;
+
+        ensure_notes_table(&src_conn)?;
+        src_conn.execute(
+            "INSERT INTO dst.notes SELECT * FROM main.notes WHERE replay_id = ?",
+            [&replay_id],
+        ).map_err(|e| e.to_string())?;
+
+        src_conn.execute("DETACH DATABASE dst", []).map_err(|e| e.to_string())?;
+    }
+
+    // Build the ZIP
+    let out_file = std::fs::File::create(&output_path)
+        .map_err(|e| format!("Cannot create {}: {}", output_path, e))?;
+    let mut zip = zip::ZipWriter::new(out_file);
+
+    // Add replay.db (compressed)
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    zip.start_file("replay.db", options).map_err(|e| e.to_string())?;
+    let db_bytes = std::fs::read(&tmp_db_path).map_err(|e| e.to_string())?;
+    zip.write_all(&db_bytes).map_err(|e| e.to_string())?;
+
+    // Add video.mp4 (stored, no re-compression)
+    let stored = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored);
+    zip.start_file("video.mp4", stored).map_err(|e| e.to_string())?;
+    let mut vf = std::fs::File::open(&video_path)
+        .map_err(|e| format!("Cannot open video: {}", e))?;
+    let mut buf = vec![0u8; 8 * 1024 * 1024]; // 8MB buffer
+    loop {
+        let n = vf.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 { break; }
+        zip.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+    }
+
+    zip.finish().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn open_spag(spag_path: String) -> Result<SpagSession, String> {
+    let spag = PathBuf::from(&spag_path);
+    if !spag.exists() {
+        return Err(format!("File not found: {}", spag_path));
+    }
+
+    // Deterministic extraction dir based on file path
+    let app_data = std::env::var("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| dirs_fallback());
+    let hash = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        spag_path.hash(&mut h);
+        h.finish()
+    };
+    let session_dir = app_data.join("SpaghettiLab").join("spag_sessions").join(format!("{:016x}", hash));
+    std::fs::create_dir_all(&session_dir).map_err(|e| e.to_string())?;
+
+    let db_dest = session_dir.join("replay.db");
+    let video_dest = session_dir.join("video.mp4");
+
+    // Extract (always re-extract to get fresh data)
+    let file = std::fs::File::open(&spag).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+
+    // Extract replay.db
+    {
+        let mut entry = archive.by_name("replay.db").map_err(|e| e.to_string())?;
+        let mut out = std::fs::File::create(&db_dest).map_err(|e| e.to_string())?;
+        std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+    }
+
+    // Extract video.mp4
+    {
+        let mut entry = archive.by_name("video.mp4").map_err(|e| e.to_string())?;
+        let mut out = std::fs::File::create(&video_dest).map_err(|e| e.to_string())?;
+        std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+    }
+
+    // Get replay_id from extracted DB
+    let conn = Connection::open(&db_dest).map_err(|e| e.to_string())?;
+    let replay_id: String = conn
+        .query_row("SELECT replay_id FROM replays LIMIT 1", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+
+    Ok(SpagSession {
+        db_path: db_dest.to_string_lossy().to_string(),
+        video_path: video_dest.to_string_lossy().to_string(),
+        spag_path,
+        replay_id,
+    })
+}
+
+#[tauri::command]
+async fn save_spag(spag_path: String, db_path: String) -> Result<(), String> {
+    let spag = PathBuf::from(&spag_path);
+
+    // Read the original .spag to get the video
+    let orig_file = std::fs::File::open(&spag).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(orig_file).map_err(|e| e.to_string())?;
+
+    // Write to a temp file next to the original, then rename
+    let tmp_path = spag.with_extension("spag.tmp");
+    {
+        let out_file = std::fs::File::create(&tmp_path).map_err(|e| e.to_string())?;
+        let mut zip = zip::ZipWriter::new(out_file);
+
+        // Write updated DB
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file("replay.db", options).map_err(|e| e.to_string())?;
+        let db_bytes = std::fs::read(&db_path).map_err(|e| e.to_string())?;
+        zip.write_all(&db_bytes).map_err(|e| e.to_string())?;
+
+        // Copy video from original archive
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("video.mp4", stored).map_err(|e| e.to_string())?;
+        let mut video_entry = archive.by_name("video.mp4").map_err(|e| e.to_string())?;
+        let mut buf = vec![0u8; 8 * 1024 * 1024];
+        loop {
+            let n = video_entry.read(&mut buf).map_err(|e| e.to_string())?;
+            if n == 0 { break; }
+            zip.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        }
+
+        zip.finish().map_err(|e| e.to_string())?;
+    }
+
+    // Atomic rename
+    std::fs::rename(&tmp_path, &spag).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ── App setup ────────────────────────────────────────────────────────────────
 
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        .setup(|app| {
+            // Check if launched with a .spag file argument (file association)
+            let args: Vec<String> = std::env::args().collect();
+            if let Some(path) = args.get(1) {
+                if path.ends_with(".spag") {
+                    let path = path.clone();
+                    let handle = app.handle().clone();
+                    // Emit after a short delay so frontend is ready
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        let _ = handle.emit("open-spag-file", &path);
+                    });
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_replays,
             get_frame_data,
@@ -1696,6 +1955,9 @@ pub fn run() {
             add_note,
             update_note,
             delete_note,
+            export_spag,
+            open_spag,
+            save_spag,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

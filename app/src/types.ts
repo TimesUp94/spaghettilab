@@ -83,6 +83,13 @@ export interface Note {
   created_at: string;
 }
 
+export interface SpagSession {
+  db_path: string;
+  video_path: string;
+  spag_path: string;
+  replay_id: string;
+}
+
 export type ActiveTab = "matches" | "rounds" | "highlights" | "damage" | "notes";
 
 // VOD Splitter types

@@ -1,10 +1,10 @@
 interface Props {
-  onOpenDb: () => void;
   onAnalyze: () => void;
   onSplitVod: () => void;
+  onOpenSpag: () => void;
 }
 
-export function WelcomeScreen({ onOpenDb, onAnalyze, onSplitVod }: Props) {
+export function WelcomeScreen({ onAnalyze, onSplitVod, onOpenSpag }: Props) {
   return (
     <div className="h-screen flex items-center justify-center bg-surface-0">
       <div className="text-center max-w-lg">
@@ -29,20 +29,6 @@ export function WelcomeScreen({ onOpenDb, onAnalyze, onSplitVod }: Props) {
 
         {/* Actions */}
         <div className="grid grid-cols-3 gap-3 max-w-md mx-auto">
-          <button
-            onClick={onOpenDb}
-            className="px-5 py-4 bg-accent-purple/12 text-accent-purple border border-accent-purple/20
-                       rounded-xl hover:bg-accent-purple/20 hover:border-accent-purple/35
-                       transition-all duration-300 cursor-pointer group"
-          >
-            <div className="text-lg mb-1 opacity-70 group-hover:opacity-100 transition-opacity">
-              &#128194;
-            </div>
-            <div className="font-medium text-sm">Open Database</div>
-            <div className="text-[10px] text-text-muted mt-1">
-              Browse existing analysis
-            </div>
-          </button>
           <button
             onClick={onAnalyze}
             className="px-5 py-4 bg-accent-green/12 text-accent-green border border-accent-green/20
@@ -69,6 +55,20 @@ export function WelcomeScreen({ onOpenDb, onAnalyze, onSplitVod }: Props) {
             <div className="font-medium text-sm">Split VOD</div>
             <div className="text-[10px] text-text-muted mt-1">
               Cut a VOD into sets
+            </div>
+          </button>
+          <button
+            onClick={onOpenSpag}
+            className="px-5 py-4 bg-p2/12 text-p2 border border-p2/20
+                       rounded-xl hover:bg-p2/20 hover:border-p2/35
+                       transition-all duration-300 cursor-pointer group"
+          >
+            <div className="text-lg mb-1 opacity-70 group-hover:opacity-100 transition-opacity">
+              &#128230;
+            </div>
+            <div className="font-medium text-sm">Open .spag</div>
+            <div className="text-[10px] text-text-muted mt-1">
+              Open exported analysis
             </div>
           </button>
         </div>
