@@ -46,6 +46,7 @@ import { ExportModal } from "./components/ExportModal";
 import { AnalysisProgress } from "./components/AnalysisProgress";
 import { SplitVodView } from "./components/SplitVodView";
 import { NotesPanel } from "./components/NotesPanel";
+import { UpdateBanner } from "./components/UpdateBanner";
 
 /** Group rounds into matches (first-to-2 round wins). */
 function groupRoundsIntoMatches(rounds: RoundResult[]): Match[] {
@@ -621,6 +622,8 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      <UpdateBanner />
 
       <div className="flex flex-1 overflow-hidden">
         {/* Sidebar */}

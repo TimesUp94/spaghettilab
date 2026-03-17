@@ -88,6 +88,16 @@ for f in "$TAURI_DIR/tauri.conf.json" "$TAURI_DIR/Cargo.toml" "$APP_DIR/package.
 done
 echo "[OK] Version updated"
 
+# --- Signing key ---
+SIGNING_KEY_PATH="$HOME/.tauri/spaghettilab.key"
+if [[ -f "$SIGNING_KEY_PATH" ]]; then
+    export TAURI_SIGNING_PRIVATE_KEY="$(cat "$SIGNING_KEY_PATH")"
+    export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+    echo "[OK] Signing key loaded"
+else
+    echo "Warning: No signing key at $SIGNING_KEY_PATH — updater signatures will NOT be generated" >&2
+fi
+
 # --- Build ---
 if [[ "$SKIP_BUILD" == false ]]; then
     echo ""
@@ -107,6 +117,8 @@ fi
 
 # --- Verify artifacts ---
 NSIS_EXE="$TAURI_DIR/target/release/bundle/nsis/Spaghetti Lab_${VERSION}_x64-setup.exe"
+NSIS_ZIP="${NSIS_EXE}.zip"
+NSIS_SIG="${NSIS_ZIP}.sig"
 STANDALONE_EXE="$TAURI_DIR/target/release/spaghetti-lab.exe"
 
 if [[ ! -f "$NSIS_EXE" ]]; then
@@ -121,6 +133,31 @@ fi
 NSIS_SIZE=$(du -h "$NSIS_EXE" | cut -f1)
 EXE_SIZE=$(du -h "$STANDALONE_EXE" | cut -f1)
 echo "Installer: $NSIS_SIZE  |  Standalone: $EXE_SIZE"
+
+# --- Generate latest.json for auto-updater ---
+NSIS_ZIP_NAME="$(basename "$NSIS_ZIP")"
+DOWNLOAD_URL="https://github.com/TimesUp94/spaghettilab/releases/download/v${VERSION}/${NSIS_ZIP_NAME}"
+LATEST_JSON="$TAURI_DIR/target/release/bundle/nsis/latest.json"
+
+if [[ -f "$NSIS_SIG" ]]; then
+    SIGNATURE="$(cat "$NSIS_SIG")"
+    cat > "$LATEST_JSON" <<EJSON
+{
+  "version": "v${VERSION}",
+  "notes": "Update to v${VERSION}",
+  "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "${SIGNATURE}",
+      "url": "${DOWNLOAD_URL}"
+    }
+  }
+}
+EJSON
+    echo "[OK] latest.json generated"
+else
+    echo "Warning: No .sig file found — latest.json NOT generated (updater won't work)" >&2
+fi
 
 # --- Git commit and push ---
 if [[ "$SKIP_PUSH" == false ]]; then
@@ -147,13 +184,17 @@ NOTES="$(cat <<EOF
 - **Spaghetti Lab_${VERSION}_x64-setup.exe** -- Windows installer (recommended, registers .spag file association)
 - **spaghetti-lab.exe** -- Standalone executable
 
-> This is a preview release. Expect bugs.
+> This is a preview release. Expect bugs. The app will check for updates automatically.
 EOF
 )"
 
+# Collect upload files
+UPLOAD_FILES=("$NSIS_EXE" "$STANDALONE_EXE")
+[[ -f "$NSIS_ZIP" ]] && UPLOAD_FILES+=("$NSIS_ZIP")
+[[ -f "$LATEST_JSON" ]] && UPLOAD_FILES+=("$LATEST_JSON")
+
 "$GH" release create "v${VERSION}" \
-    "$NSIS_EXE" \
-    "$STANDALONE_EXE" \
+    "${UPLOAD_FILES[@]}" \
     --title "v${VERSION}" \
     --prerelease \
     --notes "$NOTES"

@@ -37,6 +37,12 @@ interface ChartPoint {
   t2: number | null;
 }
 
+interface TensionSpend {
+  time_s: number;
+  side: "p1" | "p2";
+  drop: number; // how much tension was spent (0-1)
+}
+
 function formatTimeAxis(s: number): string {
   const m = Math.floor(s / 60);
   const sec = Math.floor(s % 60);
@@ -94,6 +100,30 @@ export function HealthTimeline({
     }
     return points;
   }, [frameData, selectedMatch]);
+
+  // Detect tension spend events: significant drops between consecutive points
+  const tensionSpends = useMemo(() => {
+    if (chartData.length < 2) return [];
+    const spends: TensionSpend[] = [];
+    const MIN_DROP = 0.12; // ignore tiny jitter
+    for (let i = 1; i < chartData.length; i++) {
+      const prev = chartData[i - 1];
+      const cur = chartData[i];
+      if (prev.t1 !== null && cur.t1 !== null) {
+        const drop = prev.t1 - cur.t1;
+        if (drop >= MIN_DROP) {
+          spends.push({ time_s: cur.time_s, side: "p1", drop });
+        }
+      }
+      if (prev.t2 !== null && cur.t2 !== null) {
+        const drop = prev.t2 - cur.t2;
+        if (drop >= MIN_DROP) {
+          spends.push({ time_s: cur.time_s, side: "p2", drop });
+        }
+      }
+    }
+    return spends;
+  }, [chartData]);
 
   const handleClick = useCallback(
     (data: any) => {
@@ -277,8 +307,17 @@ export function HealthTimeline({
         </AreaChart>
       </ResponsiveContainer>
 
-      {/* Tension gauge chart */}
-      <ResponsiveContainer width="100%" height={60}>
+      {/* P1 Tension gauge chart */}
+      <div className="flex items-center gap-1 px-2 mt-1">
+        <span className="w-1.5 h-1.5 rounded-full bg-p1" />
+        <span className="text-[9px] text-text-muted">P1 Tension</span>
+        {tensionSpends.filter(s => s.side === "p1").length > 0 && (
+          <span className="text-[9px] text-text-muted ml-1">
+            <span className="text-p1">▼</span> = spend
+          </span>
+        )}
+      </div>
+      <ResponsiveContainer width="100%" height={44}>
         <AreaChart
           data={chartData}
           onClick={handleClick}
@@ -286,12 +325,8 @@ export function HealthTimeline({
         >
           <defs>
             <linearGradient id="t1Gradient" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#e84040" stopOpacity={0.25} />
-              <stop offset="100%" stopColor="#e84040" stopOpacity={0.02} />
-            </linearGradient>
-            <linearGradient id="t2Gradient" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#4088e8" stopOpacity={0.25} />
-              <stop offset="100%" stopColor="#4088e8" stopOpacity={0.02} />
+              <stop offset="0%" stopColor="#e84040" stopOpacity={0.3} />
+              <stop offset="100%" stopColor="#e84040" stopOpacity={0.03} />
             </linearGradient>
           </defs>
           <XAxis dataKey="time_s" hide />
@@ -305,11 +340,33 @@ export function HealthTimeline({
               padding: "6px 8px",
             }}
             labelFormatter={(v: number) => formatTimeAxis(v)}
-            formatter={(value: any, name: string) => {
+            formatter={(value: any) => {
               const pct = ((value as number) * 100).toFixed(0);
-              return [`${pct}%`, name === "t1" ? "P1 Tension" : "P2 Tension"];
+              return [`${pct}%`, "P1 Tension"];
             }}
           />
+          {/* Tension spend markers for P1 */}
+          {tensionSpends
+            .filter((s) => s.side === "p1")
+            .map((s, i) => (
+              <ReferenceLine
+                key={`ts1-${i}`}
+                x={s.time_s}
+                stroke="#e84040"
+                strokeWidth={1.5}
+                strokeOpacity={0.7}
+              />
+            ))}
+          {/* Round boundary lines */}
+          {visibleRounds.map((r, i) => (
+            <ReferenceLine
+              key={`t1rb-${i}`}
+              x={r.round_end_ms / 1000}
+              stroke="#555570"
+              strokeDasharray="2 2"
+              strokeOpacity={0.3}
+            />
+          ))}
           <Area
             type="monotone"
             dataKey="t1"
@@ -320,6 +377,69 @@ export function HealthTimeline({
             connectNulls={false}
             isAnimationActive={false}
           />
+        </AreaChart>
+      </ResponsiveContainer>
+
+      {/* P2 Tension gauge chart */}
+      <div className="flex items-center gap-1 px-2">
+        <span className="w-1.5 h-1.5 rounded-full bg-p2" />
+        <span className="text-[9px] text-text-muted">P2 Tension</span>
+        {tensionSpends.filter(s => s.side === "p2").length > 0 && (
+          <span className="text-[9px] text-text-muted ml-1">
+            <span className="text-p2">▼</span> = spend
+          </span>
+        )}
+      </div>
+      <ResponsiveContainer width="100%" height={44}>
+        <AreaChart
+          data={chartData}
+          onClick={handleClick}
+          margin={{ top: 2, right: 4, bottom: 0, left: 4 }}
+        >
+          <defs>
+            <linearGradient id="t2Gradient" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#4088e8" stopOpacity={0.3} />
+              <stop offset="100%" stopColor="#4088e8" stopOpacity={0.03} />
+            </linearGradient>
+          </defs>
+          <XAxis dataKey="time_s" hide />
+          <YAxis domain={[0, 1]} hide width={32} />
+          <Tooltip
+            contentStyle={{
+              background: "#14141f",
+              border: "1px solid #222233",
+              borderRadius: "6px",
+              fontSize: "11px",
+              padding: "6px 8px",
+            }}
+            labelFormatter={(v: number) => formatTimeAxis(v)}
+            formatter={(value: any) => {
+              const pct = ((value as number) * 100).toFixed(0);
+              return [`${pct}%`, "P2 Tension"];
+            }}
+          />
+          {/* Tension spend markers for P2 */}
+          {tensionSpends
+            .filter((s) => s.side === "p2")
+            .map((s, i) => (
+              <ReferenceLine
+                key={`ts2-${i}`}
+                x={s.time_s}
+                stroke="#4088e8"
+                strokeWidth={1.5}
+                strokeOpacity={0.7}
+              />
+            ))}
+          {/* Round boundary lines */}
+          {visibleRounds.map((r, i) => (
+            <ReferenceLine
+              key={`t2rb-${i}`}
+              x={r.round_end_ms / 1000}
+              stroke="#555570"
+              strokeDasharray="2 2"
+              strokeOpacity={0.3}
+            />
+          ))}
           <Area
             type="monotone"
             dataKey="t2"
@@ -332,7 +452,6 @@ export function HealthTimeline({
           />
         </AreaChart>
       </ResponsiveContainer>
-      <div className="text-[9px] text-text-muted text-center -mt-1">Tension</div>
     </div>
   );
 }
