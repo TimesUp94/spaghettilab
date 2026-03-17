@@ -117,8 +117,7 @@ fi
 
 # --- Verify artifacts ---
 NSIS_EXE="$TAURI_DIR/target/release/bundle/nsis/Spaghetti Lab_${VERSION}_x64-setup.exe"
-NSIS_ZIP="${NSIS_EXE}.zip"
-NSIS_SIG="${NSIS_ZIP}.sig"
+NSIS_SIG="${NSIS_EXE}.sig"
 STANDALONE_EXE="$TAURI_DIR/target/release/spaghetti-lab.exe"
 
 if [[ ! -f "$NSIS_EXE" ]]; then
@@ -135,8 +134,8 @@ EXE_SIZE=$(du -h "$STANDALONE_EXE" | cut -f1)
 echo "Installer: $NSIS_SIZE  |  Standalone: $EXE_SIZE"
 
 # --- Generate latest.json for auto-updater ---
-NSIS_ZIP_NAME="$(basename "$NSIS_ZIP")"
-DOWNLOAD_URL="https://github.com/TimesUp94/spaghettilab/releases/download/v${VERSION}/${NSIS_ZIP_NAME}"
+NSIS_EXE_NAME="$(basename "$NSIS_EXE")"
+DOWNLOAD_URL="https://github.com/TimesUp94/spaghettilab/releases/download/v${VERSION}/${NSIS_EXE_NAME}"
 LATEST_JSON="$TAURI_DIR/target/release/bundle/nsis/latest.json"
 
 if [[ -f "$NSIS_SIG" ]]; then
@@ -190,7 +189,6 @@ EOF
 
 # Collect upload files
 UPLOAD_FILES=("$NSIS_EXE" "$STANDALONE_EXE")
-[[ -f "$NSIS_ZIP" ]] && UPLOAD_FILES+=("$NSIS_ZIP")
 [[ -f "$LATEST_JSON" ]] && UPLOAD_FILES+=("$LATEST_JSON")
 
 "$GH" release create "v${VERSION}" \
