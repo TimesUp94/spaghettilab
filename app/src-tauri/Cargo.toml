@@ -1,6 +1,6 @@
 [package]
 name = "spaghetti-lab"
-version = "2026.3.17-preview.1"
+version = "2026.3.17-preview.2"
 edition = "2021"
 
 [lib]

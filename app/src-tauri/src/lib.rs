@@ -402,16 +402,30 @@ fn detect_rounds_for_replay(
                 if let Some(prev) = last_both_valid_idx {
                     let gap_frames = i - prev;
                     // Gap >= 30 frames (~1s), at least one player was low before,
-                    // and both are high now → round reset
+                    // and both are high now → round reset.
+                    // For short gaps (< 60 frames / ~2s), require at least one player
+                    // to be near-KO (< 0.25) before the gap. This filters wallbreaks
+                    // where both players have moderate health (e.g. P1=0.40, P2=0.75)
+                    // and the brief stage-transition VFX causes a short NaN gap + 100%
+                    // flash, but the round continues.
+                    let pre_gap_min = last_p1_val.min(last_p2_val);
                     if gap_frames >= 30
                         && (last_p1_val < 0.50 || last_p2_val < 0.50)
                         && p1_norm[i] > 0.85 && p2_norm[i] > 0.85
+                        && (gap_frames >= 60 || pre_gap_min < 0.25)
                     {
                         if gap_hp_resets.last().map_or(true, |&last| i - last > MIN_ROUND_FRAMES) {
                             eprintln!("[ROUND-DBG] gap_hp_reset at i={} t={:.1}s (gap={}f, pre_p1={:.3}, pre_p2={:.3})",
                                 i, ts[i]/1000.0, gap_frames, last_p1_val, last_p2_val);
                             gap_hp_resets.push(i);
                         }
+                    } else if gap_frames >= 30 && gap_frames < 60
+                        && (last_p1_val < 0.50 || last_p2_val < 0.50)
+                        && p1_norm[i] > 0.85 && p2_norm[i] > 0.85
+                        && pre_gap_min >= 0.25
+                    {
+                        eprintln!("[ROUND-DBG] gap_hp_reset REJECTED (wallbreak, short gap + moderate pre-HP) at i={} t={:.1}s (gap={}f, pre_p1={:.3}, pre_p2={:.3}, min={:.3})",
+                            i, ts[i]/1000.0, gap_frames, last_p1_val, last_p2_val, pre_gap_min);
                     }
                 }
                 last_both_valid_idx = Some(i);
@@ -555,22 +569,78 @@ fn detect_rounds_for_replay(
         let span = e - s;
         let search_start = s + (span as f64 * 0.4) as usize;
 
+        // Detect mid-round wallbreaks: find the last frame where both players
+        // reset to high HP after at least one was low (wallbreak stage transition).
+        // Post-wallbreak, both bars flash ~1.0 — pre-wallbreak low-HP frames
+        // must NOT contaminate KO detection or min-HP calculations.
+        //
+        // IMPORTANT: Round-end KO animations can also briefly flash both bars
+        // to ~1.0 before transitioning. To distinguish real wallbreaks from
+        // KO animations, require substantial valid data AFTER the reset
+        // (real wallbreaks have continued combat; KO animations go to NaN quickly).
+        let effective_search_start = {
+            let mut eff = search_start;
+            let mut saw_low_hp = false;
+            for j in search_start..e {
+                if !p1_norm[j].is_nan() && !p2_norm[j].is_nan() {
+                    if p1_norm[j] < 0.50 || p2_norm[j] < 0.50 {
+                        saw_low_hp = true;
+                    }
+                    if saw_low_hp && p1_norm[j] > 0.85 && p2_norm[j] > 0.85 {
+                        // Before accepting as wallbreak, check if either player
+                        // was truly dead (< 0.02) in the recent ~6s (180 frames).
+                        // A dead player's "recovery" during KO animation is NOT
+                        // a wallbreak — it's a post-KO artifact.
+                        let look_back = 180.min(j.saturating_sub(search_start));
+                        let had_ko = (j.saturating_sub(look_back)..j).any(|k|
+                            (!p1_norm[k].is_nan() && p1_norm[k] < 0.02) ||
+                            (!p2_norm[k].is_nan() && p2_norm[k] < 0.02)
+                        );
+                        if had_ko {
+                            eprintln!("[WINNER-DBG] wallbreak candidate REJECTED at frame {} t={:.1}s (s={}, e={}): player was near-dead recently (KO animation)",
+                                j, j as f64 / 30.0, s, e);
+                        } else {
+                            // Also verify there's enough valid data after the
+                            // reset (real wallbreaks have continued gameplay).
+                            let post_valid = (j+1..e)
+                                .filter(|&k| !p1_norm[k].is_nan() || !p2_norm[k].is_nan())
+                                .count();
+                            if post_valid >= 20 {
+                                eprintln!("[WINNER-DBG] mid-round wallbreak detected at frame {} t={:.1}s (s={}, e={}), {} post-valid frames, advancing search start",
+                                    j, j as f64 / 30.0, s, e, post_valid);
+                                eff = j;
+                                saw_low_hp = false;
+                            } else {
+                                eprintln!("[WINNER-DBG] wallbreak candidate REJECTED at frame {} t={:.1}s (s={}, e={}): only {} post-valid frames",
+                                    j, j as f64 / 30.0, s, e, post_valid);
+                            }
+                        }
+                    }
+                }
+            }
+            eff
+        };
+
         // Early check: count raw frames with HP < 0.15 in last 60%.
         // Filter post-KO garbage: only count if the OTHER player is NOT at full HP.
         // After a KO, the winning player's bar resets to ~1.0 while the loser's
         // shows residual low values — these aren't real combat frames.
-        let p1_ko_count = (search_start..e)
+        let p1_ko_count = (effective_search_start..e)
             .filter(|&j| !p1_norm[j].is_nan() && p1_norm[j] < 0.15
                       && !p2_norm[j].is_nan() && p2_norm[j] < 0.90)
             .count();
-        let p2_ko_count = (search_start..e)
+        let p2_ko_count = (effective_search_start..e)
             .filter(|&j| !p2_norm[j].is_nan() && p2_norm[j] < 0.15
                       && !p1_norm[j].is_nan() && p1_norm[j] < 0.90)
             .count();
+        eprintln!("[WINNER-DBG] {} find_winner_ko s={} e={} t={:.1}s-{:.1}s eff_start={} p1_ko={} p2_ko={}",
+            replay_id, s, e, s as f64 / 30.0, e as f64 / 30.0, effective_search_start, p1_ko_count, p2_ko_count);
         if p1_ko_count >= 3 && p1_ko_count >= p2_ko_count * 3 + 1 {
+            eprintln!("[WINNER-DBG]   → P2 wins via p1_ko_count");
             return Some(("P2".to_string(), 0.0, 1.0));
         }
         if p2_ko_count >= 3 && p2_ko_count >= p1_ko_count * 3 + 1 {
+            eprintln!("[WINNER-DBG]   → P1 wins via p2_ko_count");
             return Some(("P1".to_string(), 1.0, 0.0));
         }
         // Both players have KO frames but neither dominates — could be KO
@@ -579,8 +649,8 @@ fn detect_rounds_for_replay(
         // first player to reach zero is the real loser. When far apart (>90),
         // it's a wallbreak/comeback — let the KO clustering handle it.
         if p1_ko_count >= 3 && p2_ko_count >= 3 {
-            let first_p1 = (search_start..e).find(|&j| !p1_norm[j].is_nan() && p1_norm[j] < 0.05);
-            let first_p2 = (search_start..e).find(|&j| !p2_norm[j].is_nan() && p2_norm[j] < 0.05);
+            let first_p1 = (effective_search_start..e).find(|&j| !p1_norm[j].is_nan() && p1_norm[j] < 0.05);
+            let first_p2 = (effective_search_start..e).find(|&j| !p2_norm[j].is_nan() && p2_norm[j] < 0.05);
             if let (Some(fp1), Some(fp2)) = (first_p1, first_p2) {
                 let gap = if fp1 > fp2 { fp1 - fp2 } else { fp2 - fp1 };
                 if gap <= 90 {
@@ -613,13 +683,13 @@ fn detect_rounds_for_replay(
             }
         }
 
-        // Search last 60% of the round for the frame where min(p1, p2) is lowest
+        // Search post-wallbreak portion of the round for the frame where min(p1, p2) is lowest
         let mut best_min_hp: f64 = 2.0;
         let mut best_p1: f64 = 0.5;
         let mut best_p2: f64 = 0.5;
         let mut valid_frames: Vec<(usize, f64, f64)> = Vec::new();  // (frame_idx, p1, p2)
 
-        for j in search_start..e {
+        for j in effective_search_start..e {
             if !p1_smooth[j].is_nan() && !p2_smooth[j].is_nan() {
                 valid_frames.push((j, p1_smooth[j], p2_smooth[j]));
                 let min_hp = p1_smooth[j].min(p2_smooth[j]);
@@ -671,9 +741,11 @@ fn detect_rounds_for_replay(
 
         let hp_diff = (ep1 - ep2).abs();
 
+        eprintln!("[WINNER-DBG]   cluster: ep1={:.3} ep2={:.3} hp_diff={:.3}", ep1, ep2, hp_diff);
         // If KO moment is clear (large HP gap), use it directly
         if hp_diff >= 0.15 {
             let winner = if ep1 >= ep2 { "P1".to_string() } else { "P2".to_string() };
+            eprintln!("[WINNER-DBG]   → {} wins via cluster hp_diff", winner);
             return Some((winner, ep1, ep2));
         }
 
@@ -681,7 +753,7 @@ fn detect_rounds_for_replay(
 
         // Strategy A: Find last valid HP readings before data gaps out
         // (handles last-round-of-match where bars disappear)
-        let last_quarter_start = s + (span as f64 * 0.75) as usize;
+        let last_quarter_start = (s + (span as f64 * 0.75) as usize).max(effective_search_start);
         let mut last_valid_p1: Option<f64> = None;
         let mut last_valid_p2: Option<f64> = None;
         for j in (last_quarter_start..e).rev() {
@@ -696,10 +768,10 @@ fn detect_rounds_for_replay(
             }
         }
 
-        // Find minimum HP each player reaches in the last 40% (smoothed)
+        // Find minimum HP each player reaches post-wallbreak (smoothed)
         let mut p1_min_last = 2.0f64;
         let mut p2_min_last = 2.0f64;
-        for j in search_start..e {
+        for j in effective_search_start..e {
             if !p1_smooth[j].is_nan() { p1_min_last = p1_min_last.min(p1_smooth[j]); }
             if !p2_smooth[j].is_nan() { p2_min_last = p2_min_last.min(p2_smooth[j]); }
         }
@@ -747,7 +819,27 @@ fn detect_rounds_for_replay(
         let hp_range = (p1_min_last - p2_min_last).abs();
         let min_weight = (hp_range / 0.20).min(0.8);
         let avg_weight = 1.0 - min_weight;
-        let combined = min_signal * min_weight + avg_signal * avg_weight;
+        let mut combined = min_signal * min_weight + avg_signal * avg_weight;
+        eprintln!("[WINNER-DBG]   fallback: p1_min={:.3} p2_min={:.3} min_sig={:.3} avg_sig={:.3} combined={:.3}",
+            p1_min_last, p2_min_last, min_signal, avg_signal, combined);
+
+        // Tiebreaker for ambiguous results: check asymmetric data presence
+        // beyond round end. In GGS, the winner's HP bar stays visible on the
+        // result screen while the loser's disappears. If one player has many
+        // more visible frames after the round ends, they're the winner.
+        if combined.abs() < 0.10 {
+            let scan_end = (e + 300).min(n);
+            let p1_post = (e..scan_end).filter(|&k| !p1_norm[k].is_nan()).count();
+            let p2_post = (e..scan_end).filter(|&k| !p2_norm[k].is_nan()).count();
+            if p2_post > p1_post + 10 {
+                eprintln!("[WINNER-DBG]   tiebreaker: P2 visible {} frames vs P1 {} after round end → P2 wins", p2_post, p1_post);
+                combined = 0.10;  // tip toward P2
+            } else if p1_post > p2_post + 10 {
+                eprintln!("[WINNER-DBG]   tiebreaker: P1 visible {} frames vs P2 {} after round end → P1 wins", p1_post, p2_post);
+                combined = -0.10;  // tip toward P1
+            }
+        }
+
         let (winner, _fp1, _fp2) = if combined > 0.0 {
             ("P2".to_string(), p1_min_last.min(2.0), p2_min_last.min(2.0))
         } else {
@@ -1128,27 +1220,35 @@ fn detect_rounds_for_replay(
             let p1_gained = post1 > pre1;
             let p2_gained = post2 > pre2;
 
+            eprintln!("[HEARTS-DBG] round {} t={:.1}s-{:.1}s: pre=({},{}) post=({},{}) p1_gained={} p2_gained={} hp_winner={} match_start={}",
+                ri, results[ri].round_start_ms / 1000.0, results[ri].round_end_ms / 1000.0,
+                pre1, pre2, post1, post2, p1_gained, p2_gained, results[ri].winner, results[ri].is_match_start);
+
             // Match start: hearts reset to 0/0, so compare with 0
             if results[ri].is_match_start {
                 let p1_gained = post1 > 0;
                 let p2_gained = post2 > 0;
                 if p1_gained && !p2_gained && results[ri].winner != "P1" {
+                    eprintln!("[HEARTS-DBG]   → OVERRIDE round {} winner {} → P1 (match_start hearts)", ri, results[ri].winner);
                     results[ri].winner = "P1".to_string();
                     let tmp = results[ri].winner_final_hp;
                     results[ri].winner_final_hp = results[ri].loser_final_hp;
                     results[ri].loser_final_hp = tmp;
                 } else if p2_gained && !p1_gained && results[ri].winner != "P2" {
+                    eprintln!("[HEARTS-DBG]   → OVERRIDE round {} winner {} → P2 (match_start hearts)", ri, results[ri].winner);
                     results[ri].winner = "P2".to_string();
                     let tmp = results[ri].winner_final_hp;
                     results[ri].winner_final_hp = results[ri].loser_final_hp;
                     results[ri].loser_final_hp = tmp;
                 }
             } else if p1_gained && !p2_gained && results[ri].winner != "P1" {
+                eprintln!("[HEARTS-DBG]   → OVERRIDE round {} winner {} → P1 (hearts)", ri, results[ri].winner);
                 results[ri].winner = "P1".to_string();
                 let tmp = results[ri].winner_final_hp;
                 results[ri].winner_final_hp = results[ri].loser_final_hp;
                 results[ri].loser_final_hp = tmp;
             } else if p2_gained && !p1_gained && results[ri].winner != "P2" {
+                eprintln!("[HEARTS-DBG]   → OVERRIDE round {} winner {} → P2 (hearts)", ri, results[ri].winner);
                 results[ri].winner = "P2".to_string();
                 let tmp = results[ri].winner_final_hp;
                 results[ri].winner_final_hp = results[ri].loser_final_hp;
@@ -2330,4 +2430,47 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_slaythatdude_rounds() {
+        let db_path = std::path::Path::new("C:/Projects/replanal/output/analysis.db");
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        let rounds = detect_rounds_for_replay(&conn, "03_UF_SlayThatDude_vs_Salkazko").unwrap();
+        for r in &rounds {
+            eprintln!(
+                "Round {} t={:.1}s-{:.1}s winner={} w_hp={:.3} l_hp={:.3} match_start={}",
+                r.round_index,
+                r.round_start_ms / 1000.0,
+                r.round_end_ms / 1000.0,
+                r.winner,
+                r.winner_final_hp,
+                r.loser_final_hp,
+                r.is_match_start,
+            );
+        }
+    }
+
+    #[test]
+    fn test_slycoops_rounds() {
+        let db_path = std::path::Path::new("C:/Projects/replanal/output/analysis.db");
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        let rounds = detect_rounds_for_replay(&conn, "01_WRI_Slycoops_vs_Leftover").unwrap();
+        for r in &rounds {
+            eprintln!(
+                "Round {} t={:.1}s-{:.1}s winner={} w_hp={:.3} l_hp={:.3} match_start={}",
+                r.round_index,
+                r.round_start_ms / 1000.0,
+                r.round_end_ms / 1000.0,
+                r.winner,
+                r.winner_final_hp,
+                r.loser_final_hp,
+                r.is_match_start,
+            );
+        }
+    }
 }
