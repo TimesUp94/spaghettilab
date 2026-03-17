@@ -52,9 +52,12 @@ class SceneDetector(BaseExtractor):
         p1_warm = float(
             np.mean(warm[:, self.P1_HEALTH_X[0] : self.P1_HEALTH_X[1]])
         )
+        p2_warm = float(
+            np.mean(warm[:, self.P2_HEALTH_X[0] : self.P2_HEALTH_X[1]])
+        )
 
-        # P1 bar is always warm — sufficient to detect gameplay
-        health_ok = p1_warm > 0.10
+        # Either player's bar visible is sufficient to detect gameplay
+        health_ok = p1_warm > 0.10 or p2_warm > 0.10
 
         # Signal 2: Timer region brightness
         timer = frame[self.TIMER_Y1 : self.TIMER_Y2, self.TIMER_X1 : self.TIMER_X2]
@@ -67,7 +70,7 @@ class SceneDetector(BaseExtractor):
         # Require health bars visible; timer is a secondary signal
         if health_ok:
             return True
-        if timer_ok and p1_warm > 0.03:
+        if timer_ok and max(p1_warm, p2_warm) > 0.03:
             return True
 
         return False

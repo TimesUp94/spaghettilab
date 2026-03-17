@@ -36,7 +36,7 @@ def save_health_timeline(
     replay_id: str,
     output_path: Path,
 ) -> Path:
-    """Generate and save a health-over-time chart. Returns the saved path."""
+    """Generate and save health + tension timeline charts. Returns the saved path."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -44,6 +44,8 @@ def save_health_timeline(
     timestamps = [f.timestamp_ms / 1000 for f in frames]
     p1_health = [f.p1_health.health_pct if f.p1_health else float('nan') for f in frames]
     p2_health = [f.p2_health.health_pct if f.p2_health else float('nan') for f in frames]
+    p1_tension = [f.p1_tension_pct if f.p1_tension_pct is not None else float('nan') for f in frames]
+    p2_tension = [f.p2_tension_pct if f.p2_tension_pct is not None else float('nan') for f in frames]
 
     # Rolling median smooth (31-frame window, matching Rust round detection)
     def _rolling_median(data: list[float], window: int) -> list[float]:
@@ -60,21 +62,44 @@ def save_health_timeline(
 
     p1_smooth = _rolling_median(p1_health, 31)
     p2_smooth = _rolling_median(p2_health, 31)
+    p1_tension_smooth = _rolling_median(p1_tension, 15)
+    p2_tension_smooth = _rolling_median(p2_tension, 15)
 
-    fig, ax = plt.subplots(figsize=(14, 4))
-    ax.plot(timestamps, p1_smooth, label="P1 Health", color="blue", linewidth=0.8)
-    ax.plot(timestamps, p2_smooth, label="P2 Health", color="red", linewidth=0.8)
+    # Check if tension data exists
+    has_tension = any(not np.isnan(v) for v in p1_tension_smooth) or \
+                  any(not np.isnan(v) for v in p2_tension_smooth)
+
+    if has_tension:
+        fig, (ax_hp, ax_tension) = plt.subplots(2, 1, figsize=(14, 7), sharex=True,
+                                                 height_ratios=[3, 2])
+    else:
+        fig, ax_hp = plt.subplots(figsize=(14, 4))
+
+    # Health subplot
+    ax_hp.plot(timestamps, p1_smooth, label="P1 Health", color="blue", linewidth=0.8)
+    ax_hp.plot(timestamps, p2_smooth, label="P2 Health", color="red", linewidth=0.8)
 
     for e in events:
         color = "blue" if e.target_side == Side.P1 else "red"
-        ax.axvline(e.timestamp_ms / 1000, color=color, alpha=0.3, linewidth=0.5)
+        ax_hp.axvline(e.timestamp_ms / 1000, color=color, alpha=0.3, linewidth=0.5)
 
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Health %")
-    ax.set_ylim(-0.05, 1.05)
-    ax.set_title(f"Health Timeline — {replay_id}")
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+    ax_hp.set_ylabel("Health %")
+    ax_hp.set_ylim(-0.05, 1.05)
+    ax_hp.set_title(f"Health Timeline — {replay_id}")
+    ax_hp.legend()
+    ax_hp.grid(True, alpha=0.3)
+
+    # Tension subplot
+    if has_tension:
+        ax_tension.plot(timestamps, p1_tension_smooth, label="P1 Tension", color="blue", linewidth=0.8)
+        ax_tension.plot(timestamps, p2_tension_smooth, label="P2 Tension", color="red", linewidth=0.8)
+        ax_tension.set_xlabel("Time (s)")
+        ax_tension.set_ylabel("Tension %")
+        ax_tension.set_ylim(-0.05, 1.05)
+        ax_tension.legend()
+        ax_tension.grid(True, alpha=0.3)
+    else:
+        ax_hp.set_xlabel("Time (s)")
 
     chart_path = output_path / f"{replay_id}_health.png"
     chart_path.parent.mkdir(parents=True, exist_ok=True)

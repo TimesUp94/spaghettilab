@@ -9,6 +9,8 @@ interface Props {
   reloading?: boolean;
   onReanalyze?: () => void;
   reanalyzing?: boolean;
+  onReanalyzeAll?: () => void;
+  reanalyzingAll?: boolean;
   onAnalyzeNew?: () => void;
 }
 
@@ -38,7 +40,7 @@ function extractSetInfo(replayId: string): {
   return { number: "", players: replayId, bracket: "" };
 }
 
-export function Sidebar({ replays, selectedReplay, onSelect, onReload, reloading, onReanalyze, reanalyzing, onAnalyzeNew }: Props) {
+export function Sidebar({ replays, selectedReplay, onSelect, onReload, reloading, onReanalyze, reanalyzing, onReanalyzeAll, reanalyzingAll, onAnalyzeNew }: Props) {
   return (
     <aside className="w-[260px] bg-surface-1 border-r border-surface-4/50 flex flex-col shrink-0">
       <div className="p-3 border-b border-surface-4/50 flex items-center justify-between">
@@ -46,10 +48,20 @@ export function Sidebar({ replays, selectedReplay, onSelect, onReload, reloading
           Sets ({replays.length})
         </h2>
         <div className="flex items-center gap-2">
+          {onReanalyzeAll && (
+            <button
+              onClick={onReanalyzeAll}
+              disabled={reanalyzingAll || reanalyzing || reloading}
+              className="text-[10px] text-text-muted hover:text-accent-green transition-colors cursor-pointer disabled:opacity-50"
+              title="Re-run full CV analysis on all sets"
+            >
+              {reanalyzingAll ? "Analyzing..." : "Reanalyze All"}
+            </button>
+          )}
           {onReanalyze && (
             <button
               onClick={onReanalyze}
-              disabled={reanalyzing || reloading}
+              disabled={reanalyzing || reanalyzingAll || reloading}
               className="text-[10px] text-text-muted hover:text-accent-green transition-colors cursor-pointer disabled:opacity-50"
               title="Re-run full CV analysis (Python + round detection)"
             >

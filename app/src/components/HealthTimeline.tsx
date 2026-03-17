@@ -33,6 +33,8 @@ interface ChartPoint {
   time_s: number;
   p1: number | null;
   p2: number | null;
+  t1: number | null;
+  t2: number | null;
 }
 
 function formatTimeAxis(s: number): string {
@@ -67,18 +69,27 @@ export function HealthTimeline({
     }
     const step = Math.max(1, Math.floor(data.length / 800));
     const points: ChartPoint[] = [];
+    let lastP1: number | null = null;
+    let lastP2: number | null = null;
     for (let i = 0; i < data.length; i += step) {
       const f = data[i];
+      const p1 =
+        f.p1_health_pct !== null
+          ? Math.min(f.p1_health_pct / 0.875, 1.0)
+          : null;
+      const p2 =
+        f.p2_health_pct !== null
+          ? Math.min(f.p2_health_pct / 0.875, 1.0)
+          : null;
+      // Forward-fill: hold last valid health value through gaps
+      if (p1 !== null) lastP1 = p1;
+      if (p2 !== null) lastP2 = p2;
       points.push({
         time_s: f.timestamp_ms / 1000,
-        p1:
-          f.p1_health_pct !== null
-            ? Math.min(f.p1_health_pct / 0.875, 1.0)
-            : null,
-        p2:
-          f.p2_health_pct !== null
-            ? Math.min(f.p2_health_pct / 0.875, 1.0)
-            : null,
+        p1: p1 ?? lastP1,
+        p2: p2 ?? lastP2,
+        t1: f.p1_tension_pct,
+        t2: f.p2_tension_pct,
       });
     }
     return points;
@@ -119,7 +130,7 @@ export function HealthTimeline({
       <div className="flex items-center justify-between px-2 mb-1">
         <div className="flex items-center gap-2">
           <span className="text-[10px] text-text-muted uppercase tracking-wider font-medium">
-            Health Timeline
+            Health & Tension
           </span>
           {selectedMatch && (
             <>
@@ -250,7 +261,7 @@ export function HealthTimeline({
             strokeWidth={1.5}
             fill="url(#p1Gradient)"
             dot={false}
-            connectNulls={false}
+            connectNulls={true}
             isAnimationActive={false}
           />
           <Area
@@ -260,11 +271,68 @@ export function HealthTimeline({
             strokeWidth={1.5}
             fill="url(#p2Gradient)"
             dot={false}
+            connectNulls={true}
+            isAnimationActive={false}
+          />
+        </AreaChart>
+      </ResponsiveContainer>
+
+      {/* Tension gauge chart */}
+      <ResponsiveContainer width="100%" height={60}>
+        <AreaChart
+          data={chartData}
+          onClick={handleClick}
+          margin={{ top: 2, right: 4, bottom: 0, left: 4 }}
+        >
+          <defs>
+            <linearGradient id="t1Gradient" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#e84040" stopOpacity={0.25} />
+              <stop offset="100%" stopColor="#e84040" stopOpacity={0.02} />
+            </linearGradient>
+            <linearGradient id="t2Gradient" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor="#4088e8" stopOpacity={0.25} />
+              <stop offset="100%" stopColor="#4088e8" stopOpacity={0.02} />
+            </linearGradient>
+          </defs>
+          <XAxis dataKey="time_s" hide />
+          <YAxis domain={[0, 1]} hide width={32} />
+          <Tooltip
+            contentStyle={{
+              background: "#14141f",
+              border: "1px solid #222233",
+              borderRadius: "6px",
+              fontSize: "11px",
+              padding: "6px 8px",
+            }}
+            labelFormatter={(v: number) => formatTimeAxis(v)}
+            formatter={(value: any, name: string) => {
+              const pct = ((value as number) * 100).toFixed(0);
+              return [`${pct}%`, name === "t1" ? "P1 Tension" : "P2 Tension"];
+            }}
+          />
+          <Area
+            type="monotone"
+            dataKey="t1"
+            stroke="#e84040"
+            strokeWidth={1}
+            fill="url(#t1Gradient)"
+            dot={false}
+            connectNulls={false}
+            isAnimationActive={false}
+          />
+          <Area
+            type="monotone"
+            dataKey="t2"
+            stroke="#4088e8"
+            strokeWidth={1}
+            fill="url(#t2Gradient)"
+            dot={false}
             connectNulls={false}
             isAnimationActive={false}
           />
         </AreaChart>
       </ResponsiveContainer>
+      <div className="text-[9px] text-text-muted text-center -mt-1">Tension</div>
     </div>
   );
 }

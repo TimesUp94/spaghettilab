@@ -63,6 +63,10 @@ export async function reanalyzeReplay(dbPath: string, replayId: string): Promise
   return invoke("reanalyze_replay", { dbPath, replayId });
 }
 
+export async function reanalyzeAll(dbPath: string): Promise<void> {
+  return invoke("reanalyze_all", { dbPath });
+}
+
 export async function getDefaultDbPath(): Promise<string> {
   return invoke("get_default_db_path");
 }

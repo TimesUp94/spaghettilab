@@ -9,6 +9,8 @@ export interface FrameDataPoint {
   timestamp_ms: number;
   p1_health_pct: number | null;
   p2_health_pct: number | null;
+  p1_tension_pct: number | null;
+  p2_tension_pct: number | null;
 }
 
 export interface DamageEvent {

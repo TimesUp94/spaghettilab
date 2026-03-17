@@ -20,6 +20,8 @@ pub struct FrameDataPoint {
     pub timestamp_ms: f64,
     pub p1_health_pct: Option<f64>,
     pub p2_health_pct: Option<f64>,
+    pub p1_tension_pct: Option<f64>,
+    pub p2_tension_pct: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -289,10 +291,13 @@ fn detect_rounds_for_replay(
         .collect();
 
     // ── Data cleaning: filter junk HP from non-gameplay screens ──
-    // If both players' HP stays below 0.35 for > 5 seconds (150 frames),
+    // If both players' HP stays below 0.15 for > 5 seconds (150 frames),
     // it's a lobby/menu screen misidentified as gameplay. Null out those frames.
+    // Threshold is intentionally low (0.15) because both players CAN legitimately
+    // be at low health in close GGS rounds. Only catch clear non-gameplay.
+    let mut junk_count = 0usize;
     {
-        let junk_thresh = 0.35;
+        let junk_thresh = 0.15;
         let junk_window = 150usize; // ~5 seconds at 30fps
         let p1_junk = rolling_median(&p1_norm, junk_window);
         let p2_junk = rolling_median(&p2_norm, junk_window);
@@ -300,10 +305,19 @@ fn detect_rounds_for_replay(
             if !p1_junk[i].is_nan() && !p2_junk[i].is_nan()
                 && p1_junk[i] < junk_thresh && p2_junk[i] < junk_thresh
             {
+                // Debug: log first few junk regions
+                if junk_count < 5 || (junk_count % 200 == 0) {
+                    eprintln!("[JUNK-DBG] {} NaN-ing i={} t={:.1}s p1_junk={:.3} p2_junk={:.3} p1_raw={:.3} p2_raw={:.3}",
+                        replay_id, i, ts[i]/1000.0, p1_junk[i], p2_junk[i], p1_norm[i], p2_norm[i]);
+                }
+                junk_count += 1;
                 p1_norm[i] = f64::NAN;
                 p2_norm[i] = f64::NAN;
             }
         }
+    }
+    if junk_count > 0 {
+        eprintln!("[JUNK-DBG] {} total junk frames NaN-ed: {}", replay_id, junk_count);
     }
 
     // Smooth HP for round metrics and winner detection (window=31 ≈ 1s)
@@ -329,16 +343,21 @@ fn detect_rounds_for_replay(
             // Timer jumped from low (<=70) to high (>=88) = potential new round
             if t >= 88 && lowest_since_start <= 70 {
                 if timer_starts.last().map_or(true, |&last| i - last > MIN_ROUND_FRAMES) {
-                    // Validate: smoothed timer must reach ≥93 within 90 frames.
-                    // Filters wallbreak/super flash OCR noise (peaks at ~88-90).
-                    // Real round starts reach 99 quickly. Without this check, a false
-                    // boundary blocks detection of the real one via MIN_ROUND_FRAMES.
+                    // Validate: smoothed timer must reach ≥90 within 90 frames.
+                    // Filters wallbreak/super flash OCR noise (peaks briefly at ~88).
+                    // Real round starts show timer ≥90 consistently (OCR reads 90-96
+                    // for the "99" display depending on overlay font).
                     let check_end = (i + 90).min(n);
                     let confirmed = (i..check_end)
-                        .any(|j| timer_smooth[j].map_or(false, |tv| tv >= 93));
+                        .any(|j| timer_smooth[j].map_or(false, |tv| tv >= 90));
                     if confirmed {
+                        eprintln!("[ROUND-DBG] timer_start at i={} t={:.1}s (smooth_timer={}, lowest={})",
+                            i, ts[i]/1000.0, t, lowest_since_start);
                         timer_starts.push(i);
                         lowest_since_start = t;
+                    } else {
+                        eprintln!("[ROUND-DBG] timer_start REJECTED (no >=90 confirm) at i={} t={:.1}s (smooth_timer={}, lowest={})",
+                            i, ts[i]/1000.0, t, lowest_since_start);
                     }
                     // else: false timer jump — don't push, don't reset lowest
                 }
@@ -359,6 +378,8 @@ fn detect_rounds_for_replay(
             min_hp_since_reset = min_hp_since_reset.min(current_min);
             if p1_rm[i] > 0.85 && p2_rm[i] > 0.85 && min_hp_since_reset < 0.50 {
                 if hp_resets.last().map_or(true, |&last| i - last > MIN_ROUND_FRAMES) {
+                    eprintln!("[ROUND-DBG] hp_reset at i={} t={:.1}s (p1_rm={:.3}, p2_rm={:.3}, min_since={:.3})",
+                        i, ts[i]/1000.0, p1_rm[i], p2_rm[i], min_hp_since_reset);
                     hp_resets.push(i);
                     min_hp_since_reset = current_min;
                 }
@@ -366,14 +387,53 @@ fn detect_rounds_for_replay(
         }
     }
 
+    // ── Signal 2b: Gap-based HP reset detection ──
+    // Detects round resets across NaN gaps that the rolling-median HP reset
+    // misses.  When both players' health drops to low values, then a NaN gap
+    // occurs (KO animation / round transition), and health returns to high
+    // (both > 0.85), that's unambiguously a new round.
+    let mut gap_hp_resets: Vec<usize> = Vec::new();
+    {
+        let mut last_both_valid_idx: Option<usize> = None;
+        let mut last_p1_val: f64 = f64::NAN;
+        let mut last_p2_val: f64 = f64::NAN;
+        for i in 0..n {
+            if !p1_norm[i].is_nan() && !p2_norm[i].is_nan() {
+                if let Some(prev) = last_both_valid_idx {
+                    let gap_frames = i - prev;
+                    // Gap >= 30 frames (~1s), at least one player was low before,
+                    // and both are high now → round reset
+                    if gap_frames >= 30
+                        && (last_p1_val < 0.50 || last_p2_val < 0.50)
+                        && p1_norm[i] > 0.85 && p2_norm[i] > 0.85
+                    {
+                        if gap_hp_resets.last().map_or(true, |&last| i - last > MIN_ROUND_FRAMES) {
+                            eprintln!("[ROUND-DBG] gap_hp_reset at i={} t={:.1}s (gap={}f, pre_p1={:.3}, pre_p2={:.3})",
+                                i, ts[i]/1000.0, gap_frames, last_p1_val, last_p2_val);
+                            gap_hp_resets.push(i);
+                        }
+                    }
+                }
+                last_both_valid_idx = Some(i);
+                last_p1_val = p1_norm[i];
+                last_p2_val = p2_norm[i];
+            }
+        }
+    }
+
     // ── Signal 3: Game break detection (gaps > 5s) ──
+    // Track gaps in health data for EITHER player.  When one player is at
+    // very low health (bar too small to read), the other player's bar is
+    // still valid and prevents false game breaks mid-round.
     let mut game_breaks: Vec<usize> = Vec::new();
     let mut prev_valid_idx: Option<usize> = None;
     for i in 0..n {
-        if !p1_norm[i].is_nan() {
+        if !p1_norm[i].is_nan() || !p2_norm[i].is_nan() {
             if let Some(pv) = prev_valid_idx {
                 let gap_ms = ts[i] - ts[pv];
                 if gap_ms > 5000.0 {
+                    eprintln!("[ROUND-DBG] game_break at i={} t={:.1}s (gap={:.1}s)",
+                        i, ts[i]/1000.0, gap_ms/1000.0);
                     game_breaks.push(i);
                 }
             }
@@ -410,20 +470,43 @@ fn detect_rounds_for_replay(
     }
 
     // ── Merge all boundary signals ──
+    // Game breaks (large data gaps) are exempt from the wallbreak timer filter
+    // because a multi-second gap is unambiguously a round/game boundary regardless
+    // of timer state (post-KO transition screens don't show readable timers).
+    let game_break_set: std::collections::HashSet<usize> = game_breaks.iter()
+        .chain(gap_hp_resets.iter())
+        .copied().collect();
+
     let mut all_indices: Vec<usize> = Vec::new();
     all_indices.extend_from_slice(&timer_starts);
     all_indices.extend_from_slice(&hp_resets);
+    all_indices.extend_from_slice(&gap_hp_resets);
     all_indices.extend_from_slice(&game_breaks);
     all_indices.extend_from_slice(&match_boundaries);
     all_indices.sort();
     all_indices.dedup();
 
-    // ── Wallbreak filter: real round starts always have timer ≈99 ──
+    eprintln!("[ROUND-DBG] {} — pre-filter: {} timer_starts, {} hp_resets, {} gap_hp_resets, {} game_breaks, {} match_bounds",
+        replay_id, timer_starts.len(), hp_resets.len(), gap_hp_resets.len(), game_breaks.len(), match_boundaries.len());
+    eprintln!("[ROUND-DBG] all_indices before wallbreak filter: {:?}",
+        all_indices.iter().map(|&i| format!("{}({:.1}s)", i, ts[i]/1000.0)).collect::<Vec<_>>());
+
+    // ── Wallbreak filter: real round starts always have timer ≈90+ ──
     // Apply BEFORE dedup so that false boundaries (wallbreak/super flash) don't
     // shadow valid nearby boundaries during the 10-second dedup window.
+    // Game breaks are exempt — large data gaps are unambiguous boundaries.
     all_indices.retain(|&b| {
+        if game_break_set.contains(&b) {
+            return true; // game breaks always pass
+        }
         let check_end = (b + 90).min(n);
-        (b..check_end).any(|j| timer_smooth[j].map_or(false, |t| t >= 93))
+        let pass = (b..check_end).any(|j| timer_smooth[j].map_or(false, |t| t >= 90));
+        if !pass {
+            eprintln!("[ROUND-DBG] wallbreak filter REMOVED i={} t={:.1}s (max smooth timer in 90 frames: {:?})",
+                b, ts[b]/1000.0,
+                (b..check_end).filter_map(|j| timer_smooth[j]).max());
+        }
+        pass
     });
 
     // Deduplicate within 10 seconds
@@ -436,12 +519,15 @@ fn detect_rounds_for_replay(
 
     // Add first valid data frame as start if needed
     // (first-valid doesn't need timer validation — could be mid-round)
-    let first_valid = (0..n).find(|&i| !p1_norm[i].is_nan());
+    let first_valid = (0..n).find(|&i| !p1_norm[i].is_nan() || !p2_norm[i].is_nan());
     if let Some(fv) = first_valid {
-        if deduped.is_empty() || deduped[0] - fv > MIN_ROUND_FRAMES {
+        if deduped.is_empty() || (deduped[0] > fv && deduped[0] - fv > MIN_ROUND_FRAMES) {
             deduped.insert(0, fv);
         }
     }
+
+    eprintln!("[ROUND-DBG] {} — final boundaries: {:?}",
+        replay_id, deduped.iter().map(|&i| format!("{}({:.1}s)", i, ts[i]/1000.0)).collect::<Vec<_>>());
 
     // Track which boundary indices are match starts
     let match_boundary_set: std::collections::HashSet<usize> = match_boundaries.iter().copied().collect();
@@ -693,10 +779,10 @@ fn detect_rounds_for_replay(
             return vec![(s_idx, e_idx)];
         }
 
-        // Timer confirmation: smoothed timer must reach ≥93 within 210 frames (7s).
+        // Timer confirmation: smoothed timer must reach ≥90 within 210 frames (7s).
         let timer_ok = |idx: usize| -> bool {
             let check_end = (idx + 210).min(n);
-            (idx..check_end).any(|j| timer_smooth[j].map_or(false, |t| t >= 93))
+            (idx..check_end).any(|j| timer_smooth[j].map_or(false, |t| t >= 90))
         };
 
         // Alternative confirmation for wallbreak transitions: KO evidence before
@@ -830,17 +916,41 @@ fn detect_rounds_for_replay(
 
         let total_frames = e_idx - s_idx;
         if total_frames < MIN_ROUND_FRAMES {
+            eprintln!("[ROUND-DBG] span {:.1}s-{:.1}s DROPPED: too short ({} < {})",
+                ts[s_idx]/1000.0, ts[e_idx.min(n-1)]/1000.0, total_frames, MIN_ROUND_FRAMES);
             continue;
         }
 
-        // Valid data ratio check
+        // Valid data ratio check — accept frames where at least one player
+        // has health data.  When one player is at very low health (<50 pixels),
+        // their bar is too small to read but the other player's bar is still valid.
         let valid_count = (s_idx..e_idx)
-            .filter(|&j| !p1_norm[j].is_nan() && !p2_norm[j].is_nan())
+            .filter(|&j| !p1_norm[j].is_nan() || !p2_norm[j].is_nan())
             .count();
+        // Diagnostic: count NaN breakdown for dropped spans
         if total_frames > 0 && (valid_count as f64) / (total_frames as f64) < 0.30 {
+            let p1_nan = (s_idx..e_idx).filter(|&j| p1_norm[j].is_nan()).count();
+            let p2_nan = (s_idx..e_idx).filter(|&j| p2_norm[j].is_nan()).count();
+            let both_nan = (s_idx..e_idx).filter(|&j| p1_norm[j].is_nan() && p2_norm[j].is_nan()).count();
+            let p1_raw_nan = (s_idx..e_idx).filter(|&j| p1_raw[j].is_nan()).count();
+            let p2_raw_nan = (s_idx..e_idx).filter(|&j| p2_raw[j].is_nan()).count();
+            // Sample values at 25%, 50%, 75% through span
+            let samples: Vec<String> = [0.25, 0.50, 0.75].iter().map(|&frac| {
+                let si = s_idx + (total_frames as f64 * frac) as usize;
+                format!("{:.1}s:p1={:.3}/p2={:.3}", ts[si]/1000.0,
+                    p1_norm[si], p2_norm[si])
+            }).collect();
+            eprintln!("[ROUND-DBG] span {:.1}s-{:.1}s DROPPED: low valid ratio ({}/{} = {:.2}) \
+                p1_nan={} p2_nan={} both_nan={} p1_raw_nan={} p2_raw_nan={} samples=[{}]",
+                ts[s_idx]/1000.0, ts[e_idx.min(n-1)]/1000.0, valid_count, total_frames,
+                valid_count as f64 / total_frames as f64,
+                p1_nan, p2_nan, both_nan, p1_raw_nan, p2_raw_nan,
+                samples.join(", "));
             continue;
         }
 
+        eprintln!("[ROUND-DBG] span KEPT: {:.1}s-{:.1}s ({} frames, {}/{} valid, match_start={})",
+            ts[s_idx]/1000.0, ts[e_idx.min(n-1)]/1000.0, total_frames, valid_count, total_frames, is_ms);
         initial_spans.push(RoundSpan { s_idx, e_idx, is_match_start: is_ms });
     }
 
@@ -960,6 +1070,90 @@ fn detect_rounds_for_replay(
                 is_match_start,
             });
             round_counter += 1;
+        }
+    }
+
+    // ── Hearts-based winner override ──────────────────────────────────────
+    // GGS pending combo damage appears as a lighter bar segment that our warm
+    // pixel detection still counts as health. This causes the health-based
+    // winner detection to misidentify the winner when a lethal combo kills a
+    // player who appeared to have more health. The round counter hearts are
+    // ground truth — use them to override when they disagree.
+    let p1_rw_smooth = rolling_median_i32(&p1_rw_ff, 121);
+    let p2_rw_smooth = rolling_median_i32(&p2_rw_ff, 121);
+
+    // Helper: find the MODE (most common value) of hearts in a frame window.
+    let hearts_mode = |arr: &[Option<i32>], start: usize, end: usize| -> Option<i32> {
+        let clamped_end = end.min(arr.len());
+        if start >= clamped_end { return None; }
+        let mut counts: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
+        for j in start..clamped_end {
+            if let Some(v) = arr[j] {
+                *counts.entry(v).or_insert(0) += 1;
+            }
+        }
+        counts.into_iter().max_by_key(|&(_, c)| c).map(|(v, _)| v)
+    };
+
+    // For each round, check hearts after it ends to determine the true winner.
+    // Compare with hearts at the start of this round to see who gained a point.
+    for ri in 0..results.len() {
+        // Find frame indices for this round's start and the next round's start
+        let round_end_idx = ts.iter().position(|&t| t >= results[ri].round_end_ms).unwrap_or(0);
+        let next_round_start_idx = if ri + 1 < results.len() {
+            ts.iter().position(|&t| t >= results[ri + 1].round_start_ms).unwrap_or(n)
+        } else {
+            n
+        };
+
+        // Hearts at round start (look back 300 frames / 10s before this round)
+        let round_start_idx = ts.iter().position(|&t| t >= results[ri].round_start_ms).unwrap_or(0);
+
+        // Hearts BEFORE this round (from previous round end to this round start)
+        let pre_p1 = hearts_mode(&p1_rw_smooth, if round_start_idx >= 150 { round_start_idx - 150 } else { 0 }, round_start_idx);
+        let pre_p2 = hearts_mode(&p2_rw_smooth, if round_start_idx >= 150 { round_start_idx - 150 } else { 0 }, round_start_idx);
+
+        // Hearts AFTER this round ends (between round end and next round start)
+        // Use a generous window but don't go past next round start
+        let post_window_end = if next_round_start_idx > round_end_idx {
+            next_round_start_idx
+        } else {
+            (round_end_idx + 600).min(n)
+        };
+        let post_p1 = hearts_mode(&p1_rw_smooth, round_end_idx, post_window_end);
+        let post_p2 = hearts_mode(&p2_rw_smooth, round_end_idx, post_window_end);
+
+        // If we have hearts before and after, check who gained a point
+        if let (Some(pre1), Some(pre2), Some(post1), Some(post2)) = (pre_p1, pre_p2, post_p1, post_p2) {
+            let p1_gained = post1 > pre1;
+            let p2_gained = post2 > pre2;
+
+            // Match start: hearts reset to 0/0, so compare with 0
+            if results[ri].is_match_start {
+                let p1_gained = post1 > 0;
+                let p2_gained = post2 > 0;
+                if p1_gained && !p2_gained && results[ri].winner != "P1" {
+                    results[ri].winner = "P1".to_string();
+                    let tmp = results[ri].winner_final_hp;
+                    results[ri].winner_final_hp = results[ri].loser_final_hp;
+                    results[ri].loser_final_hp = tmp;
+                } else if p2_gained && !p1_gained && results[ri].winner != "P2" {
+                    results[ri].winner = "P2".to_string();
+                    let tmp = results[ri].winner_final_hp;
+                    results[ri].winner_final_hp = results[ri].loser_final_hp;
+                    results[ri].loser_final_hp = tmp;
+                }
+            } else if p1_gained && !p2_gained && results[ri].winner != "P1" {
+                results[ri].winner = "P1".to_string();
+                let tmp = results[ri].winner_final_hp;
+                results[ri].winner_final_hp = results[ri].loser_final_hp;
+                results[ri].loser_final_hp = tmp;
+            } else if p2_gained && !p1_gained && results[ri].winner != "P2" {
+                results[ri].winner = "P2".to_string();
+                let tmp = results[ri].winner_final_hp;
+                results[ri].winner_final_hp = results[ri].loser_final_hp;
+                results[ri].loser_final_hp = tmp;
+            }
         }
     }
 
@@ -1165,26 +1359,53 @@ fn get_replays(db_path: String) -> Result<Vec<Replay>, String> {
 #[tauri::command]
 fn get_frame_data(db_path: String, replay_id: String) -> Result<Vec<FrameDataPoint>, String> {
     let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT timestamp_ms, p1_health_pct, p2_health_pct
-             FROM frame_data
-             WHERE replay_id = ?
-             ORDER BY timestamp_ms",
-        )
-        .map_err(|e| e.to_string())?;
 
-    let points: Vec<FrameDataPoint> = stmt
-        .query_map([&replay_id], |row| {
-            Ok(FrameDataPoint {
-                timestamp_ms: row.get(0)?,
-                p1_health_pct: row.get(1)?,
-                p2_health_pct: row.get(2)?,
+    // Check if tension columns exist
+    let has_tension = conn
+        .prepare("SELECT p1_tension_pct FROM frame_data LIMIT 1")
+        .is_ok();
+
+    let points: Vec<FrameDataPoint> = if has_tension {
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp_ms, p1_health_pct, p2_health_pct, p1_tension_pct, p2_tension_pct
+                 FROM frame_data
+                 WHERE replay_id = ?
+                 ORDER BY timestamp_ms",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([&replay_id], |row| {
+                Ok(FrameDataPoint {
+                    timestamp_ms: row.get(0)?,
+                    p1_health_pct: row.get(1)?,
+                    p2_health_pct: row.get(2)?,
+                    p1_tension_pct: row.get(3)?,
+                    p2_tension_pct: row.get(4)?,
+                })
             })
-        })
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(|r| r.ok()).collect()
+    } else {
+        let mut stmt = conn
+            .prepare(
+                "SELECT timestamp_ms, p1_health_pct, p2_health_pct
+                 FROM frame_data
+                 WHERE replay_id = ?
+                 ORDER BY timestamp_ms",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([&replay_id], |row| {
+                Ok(FrameDataPoint {
+                    timestamp_ms: row.get(0)?,
+                    p1_health_pct: row.get(1)?,
+                    p2_health_pct: row.get(2)?,
+                    p1_tension_pct: None,
+                    p2_tension_pct: None,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
 
     Ok(points)
 }
@@ -2040,6 +2261,27 @@ async fn save_spag(spag_path: String, db_path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn reanalyze_all(db_path: String) -> Result<(), String> {
+    let ids: Vec<String> = {
+        let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare("SELECT replay_id FROM replays ORDER BY replay_id")
+            .map_err(|e| e.to_string())?;
+        let result: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| e.to_string())?
+            .filter_map(|r| r.ok())
+            .collect();
+        result
+    };
+
+    for id in &ids {
+        reanalyze_replay(db_path.clone(), id.clone()).await?;
+    }
+    Ok(())
+}
+
 // ── App setup ────────────────────────────────────────────────────────────────
 
 pub fn run() {
@@ -2072,6 +2314,7 @@ pub fn run() {
             get_default_db_path,
             analyze_video,
             reanalyze_replay,
+            reanalyze_all,
             export_clip,
             resolve_video_path,
             extract_preview_frame,

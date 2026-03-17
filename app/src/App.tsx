@@ -27,6 +27,7 @@ import {
   getDefaultDbPath,
   resolveVideoPath,
   reanalyzeReplay,
+  reanalyzeAll,
   exportSpag,
   openSpag,
   saveSpag,
@@ -386,6 +387,33 @@ export default function App() {
     }
   }, [dbPath, selectedReplay, loadReplayData]);
 
+  // Reanalyze all: re-run Python CV pipeline on every replay then reload
+  const [reanalyzingAll, setReanalyzingAll] = useState(false);
+  const handleReanalyzeAll = useCallback(async () => {
+    if (!dbPath) return;
+    setReanalyzingAll(true);
+    setError(null);
+    try {
+      await reanalyzeAll(dbPath);
+      // Refresh replay list (metadata may have changed)
+      const reps = await getReplays(dbPath);
+      setReplays(reps);
+      // Reload the currently selected replay if any
+      const current = selectedReplay
+        ? reps.find((r) => r.replay_id === selectedReplay.replay_id)
+        : null;
+      if (current) {
+        setSelectedReplay(current);
+        await loadReplayData(dbPath, current);
+      }
+    } catch (err) {
+      console.error("Reanalyze all failed:", err);
+      setError(String(err));
+    } finally {
+      setReanalyzingAll(false);
+    }
+  }, [dbPath, selectedReplay, loadReplayData]);
+
   // .spag file support
   const openSpagFile = useCallback(async (path: string) => {
     setLoading(true);
@@ -605,6 +633,8 @@ export default function App() {
           reloading={loading}
           onReanalyze={selectedReplay && dbPath ? handleReanalyze : undefined}
           reanalyzing={reanalyzing}
+          onReanalyzeAll={dbPath ? handleReanalyzeAll : undefined}
+          reanalyzingAll={reanalyzingAll}
           onAnalyzeNew={() => setView("analyze")}
         />
 
