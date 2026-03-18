@@ -31,6 +31,7 @@ export function SplitVodView({ onComplete, onCancel }: Props) {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [cutPaths, setCutPaths] = useState<string[]>([]);
   const [outputDir, setOutputDir] = useState<string | null>(null);
+  const [videoDuration, setVideoDuration] = useState<number>(0);
 
   // Video dimensions (assume 1920x1080 for now — could probe)
   const videoWidth = 1920;
@@ -53,9 +54,22 @@ export function SplitVodView({ onComplete, onCancel }: Props) {
       // Extract a frame at 30s in (likely gameplay)
       const framePath = await extractPreviewFrame(videoPath, 30);
       setPreviewSrc(convertFileSrc(framePath));
+      // Get video duration via ffprobe (invoke through extract at 0 is a workaround;
+      // for now estimate from the scan or use a generous default)
       setStep("roi");
     } catch (err) {
       setError(String(err));
+    }
+  }, [videoPath]);
+
+  const handleSeekPreview = useCallback(async (timestampSecs: number) => {
+    if (!videoPath) return;
+    try {
+      const framePath = await extractPreviewFrame(videoPath, timestampSecs);
+      // Append cache-buster to force browser to reload the image
+      setPreviewSrc(convertFileSrc(framePath) + "?t=" + Date.now());
+    } catch (err) {
+      // Silently ignore seek errors (e.g. past end of video)
     }
   }, [videoPath]);
 
@@ -85,7 +99,8 @@ export function SplitVodView({ onComplete, onCancel }: Props) {
     try {
       const detected = await scanVod(videoPath, roiConfig);
       setSets(detected);
-      setSelected(new Set(detected.map((s) => s.index)));
+      // Auto-select only sets with detected player names
+      setSelected(new Set(detected.filter((s) => s.p1_name && s.p2_name).map((s) => s.index)));
       setStep("results");
     } catch (err) {
       setError(String(err));
@@ -111,6 +126,8 @@ export function SplitVodView({ onComplete, onCancel }: Props) {
           index: s.index,
           start_secs: s.start_secs,
           end_secs: s.end_secs,
+          p1_name: s.p1_name || null,
+          p2_name: s.p2_name || null,
         }));
       const paths = await cutVodSets(videoPath, tocut, outputDir);
       setCutPaths(paths);
@@ -138,6 +155,8 @@ export function SplitVodView({ onComplete, onCancel }: Props) {
         imageSrc={previewSrc}
         videoWidth={videoWidth}
         videoHeight={videoHeight}
+        videoDurationSecs={videoDuration || 7200}
+        onSeekPreview={handleSeekPreview}
         onConfirm={handleStartScan}
         onBack={() => setStep("select")}
       />
@@ -197,11 +216,17 @@ export function SplitVodView({ onComplete, onCancel }: Props) {
           ) : step === "error" ? (
             <div className="space-y-4">
               <div className="text-p1 text-sm text-center">Error</div>
-              <div className="bg-surface-3 rounded-lg p-3 text-xs text-text-muted overflow-auto max-h-40 font-mono">
+              <div className="bg-surface-3 rounded-lg p-3 text-xs text-text-muted overflow-auto max-h-40 font-mono select-text">
                 {error}
               </div>
               <div className="flex justify-center gap-2">
                 <button onClick={onCancel} className="btn-ghost">Cancel</button>
+                <button
+                  onClick={() => error && navigator.clipboard.writeText(error)}
+                  className="btn-ghost"
+                >
+                  Copy Error
+                </button>
                 <button onClick={() => setStep("select")} className="btn-primary">
                   Try Again
                 </button>
@@ -230,7 +255,7 @@ export function SplitVodView({ onComplete, onCancel }: Props) {
                     />
                     <div className="flex-1">
                       <div className="text-xs text-text-primary font-medium">
-                        Set {s.index}
+                        {s.p1_name && s.p2_name ? `${s.p1_name} vs ${s.p2_name}` : `Set ${s.index}`}
                       </div>
                       <div className="text-[10px] text-text-muted">
                         {formatTime(s.start_secs)} - {formatTime(s.end_secs)}

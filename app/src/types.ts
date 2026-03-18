@@ -109,7 +109,8 @@ export interface VodRoiConfig {
   p1_tension: RoiRect;
   p2_tension: RoiRect;
   timer: RoiRect;
-  banner: RoiRect;
+  p1_name: RoiRect;
+  p2_name: RoiRect;
 }
 
 export interface DetectedSetInfo {
@@ -118,10 +119,14 @@ export interface DetectedSetInfo {
   end_secs: number;
   gameplay_duration_secs: number;
   game_count: number;
+  p1_name: string;
+  p2_name: string;
 }
 
 export interface CutSetRequest {
   index: number;
   start_secs: number;
   end_secs: number;
+  p1_name: string | null;
+  p2_name: string | null;
 }

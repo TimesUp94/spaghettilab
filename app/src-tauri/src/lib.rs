@@ -2108,7 +2108,8 @@ pub struct VodRoiConfig {
     pub p1_tension: RoiRect,
     pub p2_tension: RoiRect,
     pub timer: RoiRect,
-    pub banner: RoiRect,
+    pub p1_name: RoiRect,
+    pub p2_name: RoiRect,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -2118,6 +2119,8 @@ pub struct DetectedSetInfo {
     pub end_secs: f64,
     pub gameplay_duration_secs: f64,
     pub game_count: u32,
+    pub p1_name: String,
+    pub p2_name: String,
 }
 
 #[tauri::command]
@@ -2168,14 +2171,29 @@ async fn scan_vod(
         .arg("--p1-tension").arg(roi_config.p1_tension.to_arg())
         .arg("--p2-tension").arg(roi_config.p2_tension.to_arg())
         .arg("--timer-roi").arg(roi_config.timer.to_arg())
-        .arg("--banner-roi").arg(roi_config.banner.to_arg())
+        .arg("--p1-name").arg(roi_config.p1_name.to_arg())
+        .arg("--p2-name").arg(roi_config.p2_name.to_arg())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn: {}", e))?;
+    eprintln!("[VOD-SCAN] Spawning: python {} {} --preview --json-output ...", script.display(), &video_path);
+
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn python: {}", e))?;
 
     let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+
+    // Read stderr in a separate thread to avoid deadlock
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = String::new();
+        use std::io::Read;
+        let mut reader = std::io::BufReader::new(stderr);
+        let _ = reader.read_to_string(&mut buf);
+        buf
+    });
+
     let mut json_result: Option<String> = None;
+    let mut all_stdout = Vec::new();
 
     for line in std::io::BufReader::new(stdout).lines() {
         let line = line.map_err(|e| e.to_string())?;
@@ -2184,11 +2202,21 @@ async fn scan_vod(
         } else if line.starts_with("JSON_RESULT:") {
             json_result = Some(line["JSON_RESULT:".len()..].to_string());
         }
+        all_stdout.push(line);
     }
 
     let status = child.wait().map_err(|e| e.to_string())?;
+    let stderr_output = stderr_thread.join().unwrap_or_default();
+
+    if !stderr_output.is_empty() {
+        eprintln!("[VOD-SCAN] Python stderr:\n{}", stderr_output);
+    }
+
     if !status.success() {
-        return Err("VOD scan failed".into());
+        let last_err = stderr_output.lines().rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("unknown error");
+        return Err(format!("VOD scan failed: {}", last_err));
     }
 
     let json_str = json_result.ok_or("No JSON result from split_vod.py")?;
@@ -2205,6 +2233,8 @@ async fn scan_vod(
             end_secs: s["end_secs"].as_f64().unwrap_or(0.0),
             gameplay_duration_secs: s["gameplay_duration_secs"].as_f64().unwrap_or(0.0),
             game_count: s["game_count"].as_u64().unwrap_or(0) as u32,
+            p1_name: s["p1_name"].as_str().unwrap_or("").to_string(),
+            p2_name: s["p2_name"].as_str().unwrap_or("").to_string(),
         })
         .collect();
 
@@ -2216,6 +2246,8 @@ pub struct CutSetRequest {
     pub index: u32,
     pub start_secs: f64,
     pub end_secs: f64,
+    pub p1_name: Option<String>,
+    pub p2_name: Option<String>,
 }
 
 #[tauri::command]
@@ -2233,8 +2265,16 @@ async fn cut_vod_sets(
     for (i, set) in sets.iter().enumerate() {
         let start = (set.start_secs - padding_before).max(0.0);
         let duration = (set.end_secs + padding_after) - start;
-        let out_path = PathBuf::from(&output_dir)
-            .join(format!("set_{:02}.mp4", set.index));
+        let filename = match (&set.p1_name, &set.p2_name) {
+            (Some(p1), Some(p2)) if !p1.is_empty() && !p2.is_empty() => {
+                let safe = |s: &str| -> String {
+                    s.chars().filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-').collect()
+                };
+                format!("{:02}_{}_vs_{}.mp4", set.index, safe(p1), safe(p2))
+            }
+            _ => format!("set_{:02}.mp4", set.index),
+        };
+        let out_path = PathBuf::from(&output_dir).join(&filename);
 
         let output = Command::new("ffmpeg")
             .args([

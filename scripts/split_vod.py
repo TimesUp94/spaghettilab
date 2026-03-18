@@ -1,8 +1,8 @@
 """Split a GGS tournament VOD into individual sets.
 
 Detects gameplay segments via tension bar + timer presence, then
-identifies set boundaries by comparing the tournament overlay banner
-between segments. Cuts are done with ffmpeg stream copy (no re-encode).
+identifies set boundaries by comparing player name tags under the
+health bars. Cuts are done with ffmpeg stream copy (no re-encode).
 
 Usage:
     python scripts/split_vod.py <vod_path> [--output <dir>] [--preview]
@@ -11,7 +11,7 @@ Examples:
     python scripts/split_vod.py "my_tournament.mp4"
     python scripts/split_vod.py "my_tournament.mp4" --preview   # detect only, don't cut
     python scripts/split_vod.py "my_tournament.mp4" --output data/my_sets
-    python scripts/split_vod.py "my_tournament.mp4" --banner-threshold 20
+    python scripts/split_vod.py "my_tournament.mp4" --name-threshold 20
 """
 from __future__ import annotations
 
@@ -35,12 +35,16 @@ import numpy as np
 P1_TENSION = (1040, 1058, 50, 440)
 P2_TENSION = (1040, 1058, 1480, 1870)
 TIMER_ROI = (30, 100, 910, 1010)
-BANNER_ROI = (2, 20, 100, 1820)  # tournament overlay at the top
+# Player name tags: diagonal black boxes with white text under health bars
+P1_NAME_ROI = (145, 178, 45, 370)   # left side name tag
+P2_NAME_ROI = (145, 178, 1555, 1880) # right side name tag
+# Legacy banner ROI kept for backwards compatibility
+BANNER_ROI = (2, 20, 100, 1820)
 
 GAMEPLAY_MERGE_GAP = 12    # merge gameplay segments with < N second gaps
 MIN_SEGMENT_DURATION = 25  # discard segments shorter than this
 SET_GAP_THRESHOLD = 45     # gaps > N seconds are always set boundaries
-BANNER_DIST_THRESHOLD = 15 # banner distance above this = different players
+NAME_DIST_THRESHOLD = 12   # name tag distance above this = different players
 PADDING_BEFORE = 10
 PADDING_AFTER = 5
 
@@ -63,6 +67,8 @@ class Segment:
 class DetectedSet:
     segments: list[Segment] = field(default_factory=list)
     index: int = 0
+    p1_name: str = ""
+    p2_name: str = ""
 
     @property
     def start(self) -> float:
@@ -97,9 +103,10 @@ def get_video_duration(path: str) -> float:
 
 
 def extract_frame_ffmpeg(vod_path: str, timestamp: float, w: int, h: int) -> np.ndarray | None:
-    """Extract a single frame at a given timestamp using ffmpeg."""
+    """Extract a single frame at a given timestamp using ffmpeg, scaled to w x h."""
     cmd = [
         "ffmpeg", "-ss", str(timestamp), "-i", vod_path,
+        "-vf", f"scale={w}:{h}",
         "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "bgr24",
         "-v", "quiet", "pipe:1",
     ]
@@ -133,7 +140,7 @@ def scan_gameplay(
     """Scan the VOD at 1fps, return (second, is_gameplay) pairs."""
     cmd = [
         "ffmpeg", "-i", vod_path,
-        "-vf", "fps=1",
+        "-vf", f"fps=1,scale={w}:{h}",
         "-f", "rawvideo", "-pix_fmt", "bgr24",
         "-v", "quiet", "pipe:1",
     ]
@@ -151,9 +158,20 @@ def scan_gameplay(
             break
         frame = np.frombuffer(raw, dtype=np.uint8).reshape((h, w, 3))
 
+        # Verify frame shape
+        if frame.shape != (h, w, 3):
+            print(f"WARNING: frame shape {frame.shape} != expected ({h},{w},3) at sec {sec}", flush=True, file=sys.stderr)
+            results.append((sec, False))
+            sec += 1
+            continue
+
         # Tension bars: colored (high saturation) + visible (some brightness)
         t1 = frame[p1_tension[0]:p1_tension[1], p1_tension[2]:p1_tension[3]]
         t2 = frame[p2_tension[0]:p2_tension[1], p2_tension[2]:p2_tension[3]]
+        if t1.size == 0 or t2.size == 0:
+            results.append((sec, False))
+            sec += 1
+            continue
         hsv1 = cv2.cvtColor(t1, cv2.COLOR_BGR2HSV)
         hsv2 = cv2.cvtColor(t2, cv2.COLOR_BGR2HSV)
         t1_score = float(np.mean((hsv1[:, :, 1] > 40) & (hsv1[:, :, 2] > 30)))
@@ -161,14 +179,18 @@ def scan_gameplay(
 
         # Timer region: bright white digits present during gameplay
         tr = frame[timer_roi[0]:timer_roi[1], timer_roi[2]:timer_roi[3]]
+        if tr.size == 0:
+            results.append((sec, False))
+            sec += 1
+            continue
         timer_bright = float(np.mean(cv2.cvtColor(tr, cv2.COLOR_BGR2HSV)[:, :, 2] > 180))
 
         is_gameplay = bool((t1_score > 0.15 or t2_score > 0.15) and timer_bright > 0.02)
         results.append((sec, is_gameplay))
         sec += 1
 
-        # Machine-readable progress every 10 seconds
-        if sec % 10 == 0:
+        # Machine-readable progress: first frame then every 10 seconds
+        if sec == 1 or sec % 10 == 0:
             total_str = f"/{total_secs}" if total_secs else ""
             print(f"PROGRESS:{sec}{total_str}", flush=True)
 
@@ -217,18 +239,84 @@ def build_segments(
 
 
 # ---------------------------------------------------------------------------
-# Step 3: Detect set boundaries via banner comparison
+# OCR via EasyOCR — lazy-loaded, GPU-accelerated
 # ---------------------------------------------------------------------------
 
-def get_banner_signature(frame: np.ndarray, banner_roi: tuple = BANNER_ROI) -> np.ndarray:
-    """Extract a compact grayscale signature of the tournament banner."""
-    banner = frame[banner_roi[0]:banner_roi[1], banner_roi[2]:banner_roi[3]]
-    gray = cv2.cvtColor(banner, cv2.COLOR_BGR2GRAY)
-    small = cv2.resize(gray, (172, 2), interpolation=cv2.INTER_AREA)
-    return small.flatten().astype(np.float32)
+_ocr_reader = None
+
+def _get_ocr_reader():
+    global _ocr_reader
+    if _ocr_reader is None:
+        import easyocr
+        _ocr_reader = easyocr.Reader(["en"], gpu=True, verbose=False)
+    return _ocr_reader
 
 
-def banner_distance(sig1: np.ndarray, sig2: np.ndarray) -> float:
+def ocr_name_region(region: np.ndarray) -> str:
+    """OCR a name tag region. Returns the recognized text or empty string.
+
+    Picks the result with the largest bounding box area, which is typically
+    the player name (the most prominent text in the ROI).
+    """
+    if region.size == 0:
+        return ""
+    reader = _get_ocr_reader()
+    # detail=1 returns (bbox, text, confidence) tuples
+    results = reader.readtext(region, detail=1)
+    if not results:
+        return ""
+    # Pick the result with the largest bounding box (most prominent text)
+    best = max(results, key=lambda r: (
+        (max(p[0] for p in r[0]) - min(p[0] for p in r[0])) *
+        (max(p[1] for p in r[0]) - min(p[1] for p in r[0]))
+    ))
+    return best[1].strip()
+
+
+def read_player_names(
+    frame: np.ndarray,
+    p1_name_roi: tuple = P1_NAME_ROI,
+    p2_name_roi: tuple = P2_NAME_ROI,
+) -> tuple[str, str]:
+    """Read P1 and P2 player names from a frame. Returns (p1_name, p2_name)."""
+    fh, fw = frame.shape[:2]
+    p1 = frame[max(0,p1_name_roi[0]):min(fh,p1_name_roi[1]), max(0,p1_name_roi[2]):min(fw,p1_name_roi[3])]
+    p2 = frame[max(0,p2_name_roi[0]):min(fh,p2_name_roi[1]), max(0,p2_name_roi[2]):min(fw,p2_name_roi[3])]
+    return ocr_name_region(p1), ocr_name_region(p2)
+
+
+# ---------------------------------------------------------------------------
+# Step 3: Detect set boundaries via player name comparison
+# ---------------------------------------------------------------------------
+
+def get_name_signature(
+    frame: np.ndarray,
+    p1_name_roi: tuple = P1_NAME_ROI,
+    p2_name_roi: tuple = P2_NAME_ROI,
+) -> np.ndarray | None:
+    """Extract a compact signature from both player name tags."""
+    fh, fw = frame.shape[:2]
+    p1 = frame[max(0,p1_name_roi[0]):min(fh,p1_name_roi[1]), max(0,p1_name_roi[2]):min(fw,p1_name_roi[3])]
+    p2 = frame[max(0,p2_name_roi[0]):min(fh,p2_name_roi[1]), max(0,p2_name_roi[2]):min(fw,p2_name_roi[3])]
+
+    if p1.size == 0 or p2.size == 0:
+        return None
+
+    g1 = cv2.cvtColor(p1, cv2.COLOR_BGR2GRAY)
+    g2 = cv2.cvtColor(p2, cv2.COLOR_BGR2GRAY)
+    _, b1 = cv2.threshold(g1, 160, 255, cv2.THRESH_BINARY)
+    _, b2 = cv2.threshold(g2, 160, 255, cv2.THRESH_BINARY)
+
+    s1 = cv2.resize(b1, (80, 4), interpolation=cv2.INTER_AREA)
+    s2 = cv2.resize(b2, (80, 4), interpolation=cv2.INTER_AREA)
+
+    sig = np.concatenate([s1.flatten(), s2.flatten()]).astype(np.float32)
+    if np.mean(sig) < 5.0:
+        return None
+    return sig
+
+
+def name_distance(sig1: np.ndarray, sig2: np.ndarray) -> float:
     return float(np.mean(np.abs(sig1 - sig2)))
 
 
@@ -238,28 +326,44 @@ def detect_set_boundaries(
     w: int,
     h: int,
     gap_threshold: float = SET_GAP_THRESHOLD,
-    dist_threshold: float = BANNER_DIST_THRESHOLD,
-    banner_roi: tuple = BANNER_ROI,
+    dist_threshold: float = NAME_DIST_THRESHOLD,
+    p1_name_roi: tuple = P1_NAME_ROI,
+    p2_name_roi: tuple = P2_NAME_ROI,
 ) -> list[int]:
-    """Return indices into *segments* where a new set begins."""
+    """Return indices into *segments* where a new set begins.
+
+    Compares player name tag fingerprints between consecutive gameplay
+    segments. A boundary is detected when:
+      - The gap between segments exceeds the gap threshold, OR
+      - The name tag signature distance exceeds the distance threshold
+    """
     if not segments:
         return []
 
-    print("Detecting set boundaries via banner comparison...", flush=True)
+    print("Detecting set boundaries via player name comparison...", flush=True)
 
+    # For each segment, sample a frame from mid-gameplay and extract name sigs.
+    # Sample multiple frames and pick the best (most text visible) to handle
+    # transient occlusion during supers/burst.
     sigs: list[np.ndarray | None] = []
     for i, seg in enumerate(segments):
-        if i == 0:
-            t = seg.start + min(8, seg.duration / 2)
-        else:
-            gap = seg.start - segments[i - 1].end
-            if gap > 25:
-                t = segments[i - 1].end + min(5, gap / 2)
-            else:
-                t = seg.start + min(8, seg.duration / 2)
+        # Sample 3 frames across the segment to find one with clear names
+        candidates = []
+        for frac in (0.2, 0.5, 0.8):
+            t = seg.start + seg.duration * frac
+            frame = extract_frame_ffmpeg(vod_path, t, w, h)
+            if frame is not None:
+                sig = get_name_signature(frame, p1_name_roi, p2_name_roi)
+                if sig is not None:
+                    # Score by amount of visible text (higher = more text)
+                    candidates.append((sig, float(np.mean(sig))))
 
-        frame = extract_frame_ffmpeg(vod_path, t, w, h)
-        sigs.append(get_banner_signature(frame, banner_roi) if frame is not None else None)
+        if candidates:
+            # Pick the signature with the most visible text
+            best = max(candidates, key=lambda x: x[1])
+            sigs.append(best[0])
+        else:
+            sigs.append(None)
 
     boundaries = [0]
     for i in range(1, len(segments)):
@@ -268,15 +372,15 @@ def detect_set_boundaries(
         if gap > gap_threshold:
             if i not in boundaries:
                 boundaries.append(i)
+                print(f"  Set break before seg {i} (gap={gap:.0f}s > {gap_threshold}s)", flush=True)
             continue
 
         if sigs[i] is not None and sigs[i - 1] is not None:
-            dist = banner_distance(sigs[i], sigs[i - 1])
+            dist = name_distance(sigs[i], sigs[i - 1])
             if dist > dist_threshold:
                 if i not in boundaries:
                     boundaries.append(i)
-                label = "gap" if gap > 25 else "gameplay"
-                print(f"  Set break before seg {i} (dist={dist:.1f}, sampled from {label})", flush=True)
+                print(f"  Set break before seg {i} (name dist={dist:.1f} > {dist_threshold})", flush=True)
 
     boundaries.sort()
     return boundaries
@@ -317,7 +421,13 @@ def cut_sets(
             cut_end = min(cut_end, total_duration)
         duration = cut_end - cut_start
 
-        label = f"set_{ds.index:02d}"
+        if ds.p1_name and ds.p2_name:
+            # Sanitize names for filenames
+            safe_p1 = "".join(c for c in ds.p1_name if c.isalnum() or c in "_-")
+            safe_p2 = "".join(c for c in ds.p2_name if c.isalnum() or c in "_-")
+            label = f"{ds.index:02d}_{safe_p1}_vs_{safe_p2}"
+        else:
+            label = f"set_{ds.index:02d}"
         out_path = output_dir / f"{label}.mp4"
 
         print(f"  {label}: {fmt(cut_start)} -> {fmt(cut_end)} ({duration / 60:.1f} min)", flush=True)
@@ -358,7 +468,9 @@ def main():
     parser.add_argument("--merge-gap", type=int, default=GAMEPLAY_MERGE_GAP)
     parser.add_argument("--min-duration", type=int, default=MIN_SEGMENT_DURATION)
     parser.add_argument("--set-gap", type=float, default=SET_GAP_THRESHOLD)
-    parser.add_argument("--banner-threshold", type=float, default=BANNER_DIST_THRESHOLD)
+    parser.add_argument("--name-threshold", type=float, default=NAME_DIST_THRESHOLD)
+    parser.add_argument("--banner-threshold", type=float, default=NAME_DIST_THRESHOLD,
+                        help="(deprecated, use --name-threshold)")
     parser.add_argument("--padding-before", type=int, default=PADDING_BEFORE)
     parser.add_argument("--padding-after", type=int, default=PADDING_AFTER)
     # ROI overrides
@@ -369,14 +481,21 @@ def main():
     parser.add_argument("--timer-roi", type=str, default=None,
                         help="Timer ROI as y1,y2,x1,x2")
     parser.add_argument("--banner-roi", type=str, default=None,
-                        help="Banner ROI as y1,y2,x1,x2")
+                        help="(deprecated, use --p1-name / --p2-name)")
+    parser.add_argument("--p1-name", type=str, default=None,
+                        help="P1 name tag ROI as y1,y2,x1,x2")
+    parser.add_argument("--p2-name", type=str, default=None,
+                        help="P2 name tag ROI as y1,y2,x1,x2")
     args = parser.parse_args()
 
     # Apply ROI overrides
     p1_tension = parse_roi(args.p1_tension) if args.p1_tension else P1_TENSION
     p2_tension = parse_roi(args.p2_tension) if args.p2_tension else P2_TENSION
     timer_roi = parse_roi(args.timer_roi) if args.timer_roi else TIMER_ROI
-    banner_roi = parse_roi(args.banner_roi) if args.banner_roi else BANNER_ROI
+    p1_name_roi = parse_roi(args.p1_name) if args.p1_name else P1_NAME_ROI
+    p2_name_roi = parse_roi(args.p2_name) if args.p2_name else P2_NAME_ROI
+    # Use --name-threshold if specified, fall back to --banner-threshold for compat
+    name_threshold = args.name_threshold if args.name_threshold != NAME_DIST_THRESHOLD else args.banner_threshold
 
     vod_path = str(Path(args.vod).resolve())
     if not Path(vod_path).exists():
@@ -403,7 +522,12 @@ def main():
         sys.exit(1)
 
     print(f"VOD: {Path(vod_path).name}", flush=True)
-    print(f"  Resolution: {w}x{h}, Duration: {fmt(total_duration)} ({total_duration / 60:.0f} min)", flush=True)
+    print(f"  Native resolution: {w}x{h}, Duration: {fmt(total_duration)} ({total_duration / 60:.0f} min)", flush=True)
+
+    # Force 1920x1080 for processing — ROIs are defined at this resolution
+    if w != 1920 or h != 1080:
+        print(f"  Scaling to 1920x1080 for processing", flush=True)
+    w, h = 1920, 1080
     print(flush=True)
 
     # Step 1: Scan
@@ -418,17 +542,39 @@ def main():
         print(f"  {i:2d}: {fmt(s.start)} - {fmt(s.end)}  ({s.duration / 60:.1f} min)  gap={gap:.0f}s", flush=True)
     print(flush=True)
 
-    # Step 3: Detect set boundaries
+    # Step 3: Detect set boundaries via player name tags
     boundaries = detect_set_boundaries(
         segments, vod_path, w, h,
         gap_threshold=args.set_gap,
-        dist_threshold=args.banner_threshold,
-        banner_roi=banner_roi,
+        dist_threshold=name_threshold,
+        p1_name_roi=p1_name_roi,
+        p2_name_roi=p2_name_roi,
     )
     print(flush=True)
 
     # Step 4: Group into sets
     sets = group_sets(segments, boundaries)
+
+    # Step 4b: OCR player names for each set
+    print("Reading player names...", flush=True)
+    for ds in sets:
+        # Sample multiple frames from the first segment to get a clear read
+        best_p1, best_p2 = "", ""
+        best_len = 0
+        seg = ds.segments[0]
+        for frac in (0.2, 0.4, 0.6):
+            t = seg.start + seg.duration * frac
+            frame = extract_frame_ffmpeg(vod_path, t, w, h)
+            if frame is not None:
+                p1, p2 = read_player_names(frame, p1_name_roi, p2_name_roi)
+                total_len = len(p1) + len(p2)
+                if total_len > best_len:
+                    best_p1, best_p2, best_len = p1, p2, total_len
+        ds.p1_name = best_p1
+        ds.p2_name = best_p2
+        label = f"{ds.p1_name} vs {ds.p2_name}" if ds.p1_name and ds.p2_name else f"Set {ds.index}"
+        print(f"  Set {ds.index}: {label}", flush=True)
+    print(flush=True)
 
     if args.json_output:
         # Machine-readable output for GUI
@@ -440,6 +586,8 @@ def main():
                     "end_secs": ds.end,
                     "gameplay_duration_secs": ds.gameplay_duration,
                     "game_count": len(ds.segments),
+                    "p1_name": ds.p1_name,
+                    "p2_name": ds.p2_name,
                 }
                 for ds in sets
             ]
@@ -465,4 +613,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(1)
