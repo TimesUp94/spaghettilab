@@ -320,6 +320,60 @@ fn detect_rounds_for_replay(
         eprintln!("[JUNK-DBG] {} total junk frames NaN-ed: {}", replay_id, junk_count);
     }
 
+    // ── Non-gameplay detection: no timer for 20+ seconds ──
+    // The round timer is the most reliable gameplay indicator. Round counter
+    // hearts can produce false positives (lobby UI has similar shapes that
+    // read as 0/0). If the timer is absent for 20+ seconds, we're not in
+    // gameplay (character select, lobby, replay browser, loading, etc.).
+    // NaN-out HP data in these regions so they don't contaminate round
+    // detection, and let the game-break detector handle boundaries.
+    let nongame_threshold = 600usize; // ~20 seconds at 30fps
+    let mut nongame_regions: Vec<(usize, usize)> = Vec::new();
+    {
+        let mut run_start: Option<usize> = None;
+        for i in 0..n {
+            let has_timer = timer_raw[i].is_some();
+
+            if !has_timer {
+                if run_start.is_none() {
+                    run_start = Some(i);
+                }
+            } else {
+                if let Some(rs) = run_start {
+                    let run_len = i - rs;
+                    if run_len >= nongame_threshold {
+                        nongame_regions.push((rs, i));
+                    }
+                    run_start = None;
+                }
+            }
+        }
+        // Handle run extending to end of data
+        if let Some(rs) = run_start {
+            let run_len = n - rs;
+            if run_len >= nongame_threshold {
+                nongame_regions.push((rs, n));
+            }
+        }
+    }
+    if !nongame_regions.is_empty() {
+        let mut nongame_nulled = 0usize;
+        for &(start, end) in &nongame_regions {
+            eprintln!("[NONGAME-DBG] {} non-gameplay region: frames {}-{} t={:.1}s-{:.1}s ({:.1}s)",
+                replay_id, start, end, ts[start]/1000.0, ts[end.min(n-1)]/1000.0,
+                (ts[end.min(n-1)] - ts[start])/1000.0);
+            for j in start..end {
+                if !p1_norm[j].is_nan() || !p2_norm[j].is_nan() {
+                    p1_norm[j] = f64::NAN;
+                    p2_norm[j] = f64::NAN;
+                    nongame_nulled += 1;
+                }
+            }
+        }
+        eprintln!("[NONGAME-DBG] {} total non-gameplay frames NaN-ed: {} across {} regions",
+            replay_id, nongame_nulled, nongame_regions.len());
+    }
+
     // Smooth HP for round metrics and winner detection (window=31 ≈ 1s)
     // Must be wide enough to filter OCR/scene-detection noise spikes
     let p1_smooth = rolling_median(&p1_norm, 31);
@@ -2455,6 +2509,29 @@ mod tests {
                 r.is_match_start,
             );
         }
+    }
+
+    #[test]
+    fn test_wfinal_guessinggame_vs_jason() {
+        let db_path = std::path::Path::new("C:/Projects/replanal/output/analysis.db");
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        let rounds = detect_rounds_for_replay(&conn, "11_WFinal_GuessingGame_vs_Jason").unwrap();
+        for r in &rounds {
+            eprintln!(
+                "Round {} t={:.1}s-{:.1}s winner={} w_hp={:.3} l_hp={:.3} match_start={}",
+                r.round_index,
+                r.round_start_ms / 1000.0,
+                r.round_end_ms / 1000.0,
+                r.winner,
+                r.winner_final_hp,
+                r.loser_final_hp,
+                r.is_match_start,
+            );
+        }
+        // First round should NOT start before ~120s (lobby ends around there)
+        assert!(rounds[0].round_start_ms > 100_000.0,
+            "First round starts too early at {:.1}s — lobby not filtered",
+            rounds[0].round_start_ms / 1000.0);
     }
 
     #[test]
