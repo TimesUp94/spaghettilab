@@ -51,6 +51,7 @@ pub struct RoundResult {
     pub deficit_timestamp_ms: f64,
     pub is_comeback: bool,
     pub is_match_start: bool,
+    pub winner_confident: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -619,7 +620,7 @@ fn detect_rounds_for_replay(
     //   1. Last round of match: bars disappear (HP goes NaN before KO visible)
     //   2. Wallbreak: HP shows combo damage but doesn't visually reach zero
     // Strategy: KO moment detection → fallback to average HP in last 25% if ambiguous
-    let find_winner_ko = |s: usize, e: usize| -> Option<(String, f64, f64)> {
+    let find_winner_ko = |s: usize, e: usize| -> Option<(String, f64, f64, bool)> {
         let span = e - s;
         let search_start = s + (span as f64 * 0.4) as usize;
 
@@ -691,11 +692,11 @@ fn detect_rounds_for_replay(
             replay_id, s, e, s as f64 / 30.0, e as f64 / 30.0, effective_search_start, p1_ko_count, p2_ko_count);
         if p1_ko_count >= 3 && p1_ko_count >= p2_ko_count * 3 + 1 {
             eprintln!("[WINNER-DBG]   → P2 wins via p1_ko_count");
-            return Some(("P2".to_string(), 0.0, 1.0));
+            return Some(("P2".to_string(), 0.0, 1.0, true));
         }
         if p2_ko_count >= 3 && p2_ko_count >= p1_ko_count * 3 + 1 {
             eprintln!("[WINNER-DBG]   → P1 wins via p2_ko_count");
-            return Some(("P1".to_string(), 1.0, 0.0));
+            return Some(("P1".to_string(), 1.0, 0.0, true));
         }
         // Both players have KO frames but neither dominates — could be KO
         // animation artifact OR wallbreak/comeback. When the two KO moments
@@ -721,16 +722,16 @@ fn detect_rounds_for_replay(
                     if other_at_earlier > 0.15 {
                         // Earlier zero is one-sided — earlier player died
                         if earlier_is_p1 {
-                            return Some(("P2".to_string(), 0.0, 1.0));
+                            return Some(("P2".to_string(), 0.0, 1.0, true));
                         } else {
-                            return Some(("P1".to_string(), 1.0, 0.0));
+                            return Some(("P1".to_string(), 1.0, 0.0, true));
                         }
                     } else if other_at_later > 0.15 {
                         // Later zero is one-sided — later player died
                         if earlier_is_p1 {
-                            return Some(("P1".to_string(), 1.0, 0.0));
+                            return Some(("P1".to_string(), 1.0, 0.0, true));
                         } else {
-                            return Some(("P2".to_string(), 0.0, 1.0));
+                            return Some(("P2".to_string(), 0.0, 1.0, true));
                         }
                     }
                 }
@@ -800,7 +801,7 @@ fn detect_rounds_for_replay(
         if hp_diff >= 0.15 {
             let winner = if ep1 >= ep2 { "P1".to_string() } else { "P2".to_string() };
             eprintln!("[WINNER-DBG]   → {} wins via cluster hp_diff", winner);
-            return Some((winner, ep1, ep2));
+            return Some((winner, ep1, ep2, true));
         }
 
         // Ambiguous KO moment — fallback strategies:
@@ -877,33 +878,42 @@ fn detect_rounds_for_replay(
         eprintln!("[WINNER-DBG]   fallback: p1_min={:.3} p2_min={:.3} min_sig={:.3} avg_sig={:.3} combined={:.3}",
             p1_min_last, p2_min_last, min_signal, avg_signal, combined);
 
-        // Tiebreaker for ambiguous results: check asymmetric data presence
-        // beyond round end. In GGS, the winner's HP bar stays visible on the
-        // result screen while the loser's disappears. If one player has many
-        // more visible frames after the round ends, they're the winner.
+        // Track confidence before tiebreaker — if the signal was already clear
+        // (>= 0.10), we're confident. Tiebreaker is a best-guess for display
+        // but should NOT be marked as confident since it can be wrong
+        // (e.g. next round starting quickly pollutes post-round visibility).
+        let confident = combined.abs() >= 0.10;
+
+        // Tiebreaker: asymmetric data presence beyond round end.
+        // In GGS, the winner's HP bar stays visible on the result screen while
+        // the loser's disappears. If one player has many more visible frames
+        // after the round ends, they're likely the winner. This is a best-guess
+        // for ambiguous rounds — the user can override via the UI.
         if combined.abs() < 0.10 {
             let scan_end = (e + 300).min(n);
             let p1_post = (e..scan_end).filter(|&k| !p1_norm[k].is_nan()).count();
             let p2_post = (e..scan_end).filter(|&k| !p2_norm[k].is_nan()).count();
             if p2_post > p1_post + 10 {
-                eprintln!("[WINNER-DBG]   tiebreaker: P2 visible {} frames vs P1 {} after round end → P2 wins", p2_post, p1_post);
-                combined = 0.10;  // tip toward P2
+                eprintln!("[WINNER-DBG]   tiebreaker(post-round): P2 visible {} frames vs P1 {} after round end → P2 (uncertain)", p2_post, p1_post);
+                combined = 0.10;
             } else if p1_post > p2_post + 10 {
-                eprintln!("[WINNER-DBG]   tiebreaker: P1 visible {} frames vs P2 {} after round end → P1 wins", p1_post, p2_post);
-                combined = -0.10;  // tip toward P1
+                eprintln!("[WINNER-DBG]   tiebreaker(post-round): P1 visible {} frames vs P2 {} after round end → P1 (uncertain)", p1_post, p2_post);
+                combined = -0.10;
             }
         }
-
         let (winner, _fp1, _fp2) = if combined > 0.0 {
             ("P2".to_string(), p1_min_last.min(2.0), p2_min_last.min(2.0))
         } else {
             ("P1".to_string(), p1_min_last.min(2.0), p2_min_last.min(2.0))
         };
+        if !confident {
+            eprintln!("[WINNER-DBG]   ⚠ UNCERTAIN winner={} combined={:.3}", winner, combined);
+        }
 
         // Use the better HP values for reporting
         let report_p1 = if p1_min_last < 2.0 { p1_min_last } else { ep1 };
         let report_p2 = if p2_min_last < 2.0 { p2_min_last } else { ep2 };
-        Some((winner, report_p1, report_p2))
+        Some((winner, report_p1, report_p2, confident))
     };
 
     // Helper: recursively split long rounds at gaps or HP resets.
@@ -1146,7 +1156,7 @@ fn detect_rounds_for_replay(
             }
 
             // Determine winner using KO-moment approach
-            let (winner, ep1, ep2) = match find_winner_ko(s_idx, e_idx) {
+            let (winner, ep1, ep2, winner_confident) = match find_winner_ko(s_idx, e_idx) {
                 Some(v) => v,
                 None => continue,
             };
@@ -1214,6 +1224,7 @@ fn detect_rounds_for_replay(
                 deficit_timestamp_ms: deficit_ts,
                 is_comeback,
                 is_match_start,
+                winner_confident,
             });
             round_counter += 1;
         }
@@ -1225,20 +1236,30 @@ fn detect_rounds_for_replay(
     // winner detection to misidentify the winner when a lethal combo kills a
     // player who appeared to have more health. The round counter hearts are
     // ground truth — use them to override when they disagree.
-    let p1_rw_smooth = rolling_median_i32(&p1_rw_ff, 121);
-    let p2_rw_smooth = rolling_median_i32(&p2_rw_ff, 121);
+    // Use raw round-counter data (not forward-filled or smoothed) for hearts
+    // override. The mode calculation handles noise; forward-fill + rolling median
+    // propagates sparse noisy spikes (e.g. lobby UI reading as p1rw=1) into
+    // large contiguous regions that create false overrides.
+    let p1_rw_raw = &p1_rounds_won;
+    let p2_rw_raw = &p2_rounds_won;
 
     // Helper: find the MODE (most common value) of hearts in a frame window.
-    let hearts_mode = |arr: &[Option<i32>], start: usize, end: usize| -> Option<i32> {
+    // Returns (mode_value, count_of_mode, total_valid_frames).
+    // The caller uses the count to decide confidence.
+    let hearts_mode = |arr: &[Option<i32>], start: usize, end: usize| -> Option<(i32, usize, usize)> {
         let clamped_end = end.min(arr.len());
         if start >= clamped_end { return None; }
         let mut counts: std::collections::HashMap<i32, usize> = std::collections::HashMap::new();
+        let mut total_valid = 0usize;
         for j in start..clamped_end {
             if let Some(v) = arr[j] {
                 *counts.entry(v).or_insert(0) += 1;
+                total_valid += 1;
             }
         }
-        counts.into_iter().max_by_key(|&(_, c)| c).map(|(v, _)| v)
+        if total_valid == 0 { return None; }
+        let (best_val, best_count) = counts.into_iter().max_by_key(|&(_, c)| c)?;
+        Some((best_val, best_count, total_valid))
     };
 
     // For each round, check hearts after it ends to determine the true winner.
@@ -1256,8 +1277,8 @@ fn detect_rounds_for_replay(
         let round_start_idx = ts.iter().position(|&t| t >= results[ri].round_start_ms).unwrap_or(0);
 
         // Hearts BEFORE this round (from previous round end to this round start)
-        let pre_p1 = hearts_mode(&p1_rw_smooth, if round_start_idx >= 150 { round_start_idx - 150 } else { 0 }, round_start_idx);
-        let pre_p2 = hearts_mode(&p2_rw_smooth, if round_start_idx >= 150 { round_start_idx - 150 } else { 0 }, round_start_idx);
+        let pre_p1_data = hearts_mode(p1_rw_raw, if round_start_idx >= 150 { round_start_idx - 150 } else { 0 }, round_start_idx);
+        let pre_p2_data = hearts_mode(p2_rw_raw, if round_start_idx >= 150 { round_start_idx - 150 } else { 0 }, round_start_idx);
 
         // Hearts AFTER this round ends (between round end and next round start)
         // Use a generous window but don't go past next round start
@@ -1266,8 +1287,25 @@ fn detect_rounds_for_replay(
         } else {
             (round_end_idx + 600).min(n)
         };
-        let post_p1 = hearts_mode(&p1_rw_smooth, round_end_idx, post_window_end);
-        let post_p2 = hearts_mode(&p2_rw_smooth, round_end_idx, post_window_end);
+        let post_p1_data = hearts_mode(p1_rw_raw, round_end_idx, post_window_end);
+        let post_p2_data = hearts_mode(p2_rw_raw, round_end_idx, post_window_end);
+
+        // Extract values; require mode to account for >= 40% of valid frames
+        // to filter noisy OCR spikes from lobby/transition screens
+        let min_confidence_pct = 40usize;
+        let confident = |data: Option<(i32, usize, usize)>| -> Option<i32> {
+            data.and_then(|(val, count, total)| {
+                if total > 0 && count * 100 / total >= min_confidence_pct {
+                    Some(val)
+                } else {
+                    None
+                }
+            })
+        };
+        let pre_p1 = confident(pre_p1_data);
+        let pre_p2 = confident(pre_p2_data);
+        let post_p1 = confident(post_p1_data);
+        let post_p2 = confident(post_p2_data);
 
         // If we have hearts before and after, check who gained a point
         if let (Some(pre1), Some(pre2), Some(post1), Some(post2)) = (pre_p1, pre_p2, post_p1, post_p2) {
@@ -1308,6 +1346,10 @@ fn detect_rounds_for_replay(
                 results[ri].winner_final_hp = results[ri].loser_final_hp;
                 results[ri].loser_final_hp = tmp;
             }
+        } else {
+            eprintln!("[HEARTS-DBG] round {} t={:.1}s-{:.1}s: insufficient confidence (pre={:?}/{:?} post={:?}/{:?}) hp_winner={}",
+                ri, results[ri].round_start_ms / 1000.0, results[ri].round_end_ms / 1000.0,
+                pre_p1_data, pre_p2_data, post_p1_data, post_p2_data, results[ri].winner);
         }
     }
 
@@ -1601,7 +1643,30 @@ fn get_damage_events(db_path: String, replay_id: String) -> Result<Vec<DamageEve
 #[tauri::command]
 fn get_rounds(db_path: String, replay_id: String) -> Result<Vec<RoundResult>, String> {
     let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
-    detect_rounds_for_replay(&conn, &replay_id)
+    let mut rounds = detect_rounds_for_replay(&conn, &replay_id)?;
+
+    // Apply winner overrides from the database
+    ensure_winner_overrides_table(&conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT round_index, winner FROM winner_overrides WHERE replay_id = ?"
+    ).map_err(|e| e.to_string())?;
+    let overrides: Vec<(usize, String)> = stmt.query_map([&replay_id], |row| {
+        Ok((row.get::<_, i64>(0)? as usize, row.get::<_, String>(1)?))
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .collect();
+
+    for (idx, new_winner) in overrides {
+        if let Some(round) = rounds.iter_mut().find(|r| r.round_index == idx) {
+            if round.winner != new_winner {
+                std::mem::swap(&mut round.winner_final_hp, &mut round.loser_final_hp);
+                round.winner = new_winner;
+            }
+            round.winner_confident = true;
+        }
+    }
+
+    Ok(rounds)
 }
 
 #[tauri::command]
@@ -1911,6 +1976,30 @@ fn resolve_video_path(db_path: String, replay_id: String) -> Result<String, Stri
 
     // Return the raw path — frontend will handle "not found"
     Ok(path)
+}
+
+// ── Winner overrides ─────────────────────────────────────────────────────────
+
+fn ensure_winner_overrides_table(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS winner_overrides (
+            replay_id   TEXT NOT NULL,
+            round_index INTEGER NOT NULL,
+            winner      TEXT NOT NULL,
+            PRIMARY KEY (replay_id, round_index)
+        );"
+    ).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_round_winner(db_path: String, replay_id: String, round_index: usize, winner: String) -> Result<(), String> {
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    ensure_winner_overrides_table(&conn)?;
+    conn.execute(
+        "INSERT OR REPLACE INTO winner_overrides (replay_id, round_index, winner) VALUES (?, ?, ?)",
+        rusqlite::params![&replay_id, round_index as i64, &winner],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 // ── Notes ────────────────────────────────────────────────────────────────────
@@ -2483,6 +2572,7 @@ pub fn run() {
             export_spag,
             open_spag,
             save_spag,
+            set_round_winner,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

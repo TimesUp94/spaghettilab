@@ -28,6 +28,7 @@ import {
   resolveVideoPath,
   reanalyzeReplay,
   reanalyzeAll,
+  setRoundWinner,
   exportSpag,
   openSpag,
   saveSpag,
@@ -415,6 +416,22 @@ export default function App() {
     }
   }, [dbPath, selectedReplay, loadReplayData]);
 
+  // Override uncertain round winner
+  const handleOverrideWinner = useCallback(
+    async (roundIndex: number, winner: string) => {
+      if (!dbPath || !selectedReplay) return;
+      try {
+        await setRoundWinner(dbPath, selectedReplay.replay_id, roundIndex, winner);
+        const rn = await getRounds(dbPath, selectedReplay.replay_id);
+        setRounds(rn);
+      } catch (err) {
+        console.error("Failed to override winner:", err);
+        setError(String(err));
+      }
+    },
+    [dbPath, selectedReplay]
+  );
+
   // .spag file support
   const openSpagFile = useCallback(async (path: string) => {
     setLoading(true);
@@ -659,6 +676,24 @@ export default function App() {
                 className="shrink-0 overflow-y-auto"
                 style={{ height: topHeight }}
               >
+                {/* Match zoom banner */}
+                {selectedMatch && (
+                  <div className="mx-4 mt-3 mb-0 flex items-center gap-2 bg-accent-purple/10 border border-accent-purple/25 rounded-lg px-3 py-1.5">
+                    <span className="text-accent-purple font-semibold text-sm">
+                      Viewing Game {selectedMatch.match_index + 1}
+                    </span>
+                    <span className="text-text-muted text-xs">
+                      {Math.floor(selectedMatch.start_ms / 60000)}:{String(Math.floor((selectedMatch.start_ms / 1000) % 60)).padStart(2, "0")} – {Math.floor(selectedMatch.end_ms / 60000)}:{String(Math.floor((selectedMatch.end_ms / 1000) % 60)).padStart(2, "0")}
+                    </span>
+                    <button
+                      onClick={() => setSelectedMatchIndex(null)}
+                      className="ml-auto text-xs bg-accent-purple/20 hover:bg-accent-purple/30 text-accent-purple px-2.5 py-1 rounded transition-colors cursor-pointer"
+                    >
+                      Show all games
+                    </button>
+                  </div>
+                )}
+
                 {/* Video + Overview row */}
                 <div className="flex gap-4 p-4 pb-0">
                   <div className="flex-1 min-w-0">
@@ -757,6 +792,7 @@ export default function App() {
                       onSeek={handleRoundSeek}
                       onExport={handleExport}
                       selectedMatchIndex={selectedMatchIndex}
+                      onOverrideWinner={handleOverrideWinner}
                     />
                   )}
                   {activeTab === "rounds" && (

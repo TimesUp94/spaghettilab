@@ -129,6 +129,12 @@ export async function deleteNote(dbPath: string, noteId: number): Promise<void> 
   return invoke("delete_note", { dbPath, noteId });
 }
 
+// Winner overrides
+
+export async function setRoundWinner(dbPath: string, replayId: string, roundIndex: number, winner: string): Promise<void> {
+  return invoke("set_round_winner", { dbPath, replayId, roundIndex, winner });
+}
+
 // .spag file format
 
 export async function exportSpag(dbPath: string, replayId: string, outputPath: string): Promise<void> {

@@ -5,6 +5,7 @@ interface Props {
   onSeek: (ms: number) => void;
   onExport: (startMs: number, endMs: number) => void;
   selectedMatchIndex: number | null;
+  onOverrideWinner?: (roundIndex: number, winner: string) => void;
 }
 
 function formatTime(ms: number): string {
@@ -19,6 +20,7 @@ export function MatchList({
   onSeek,
   onExport,
   selectedMatchIndex,
+  onOverrideWinner,
 }: Props) {
   if (matches.length === 0) {
     return (
@@ -124,24 +126,79 @@ export function MatchList({
                 return (
                   <div
                     key={ri}
-                    className="flex items-center gap-2 py-1 px-2 rounded hover:bg-surface-3 cursor-pointer transition-colors text-xs"
+                    className="group flex items-center gap-2 py-1 px-2 rounded hover:bg-surface-3 cursor-pointer transition-colors text-xs"
                     onClick={() => onSeek(r.round_start_ms)}
                   >
                     <span className="text-text-muted text-[10px] font-mono w-6">
                       R{ri + 1}
                     </span>
-                    <div
-                      className={`w-1 h-4 rounded-full ${
-                        rIsP1 ? "bg-p1" : "bg-p2"
-                      }`}
-                    />
-                    <span
-                      className={`text-[11px] ${
-                        rIsP1 ? "text-p1-light" : "text-p2-light"
-                      }`}
-                    >
-                      {r.winner}
-                    </span>
+                    {r.winner_confident === false ? (
+                      <>
+                        <div className="w-1 h-4 rounded-full bg-amber-500/50" />
+                        <span className="text-[11px] text-amber-400 font-medium" title="Uncertain — select the correct winner">
+                          ?
+                        </span>
+                        {onOverrideWinner && (
+                          <span className="flex gap-0.5 ml-0.5">
+                            <button
+                              className={`text-[9px] px-1.5 py-0.5 rounded transition-colors cursor-pointer ${
+                                r.winner === "P1"
+                                  ? "bg-p1/25 text-p1-light ring-1 ring-p1/40"
+                                  : "bg-p1/10 text-p1-light/60 hover:bg-p1/20"
+                              }`}
+                              onClick={(e) => { e.stopPropagation(); onOverrideWinner(r.round_index, "P1"); }}
+                              title={r.winner === "P1" ? "P1 (current guess)" : "Set P1 as winner"}
+                            >
+                              P1
+                            </button>
+                            <button
+                              className={`text-[9px] px-1.5 py-0.5 rounded transition-colors cursor-pointer ${
+                                r.winner === "P2"
+                                  ? "bg-p2/25 text-p2-light ring-1 ring-p2/40"
+                                  : "bg-p2/10 text-p2-light/60 hover:bg-p2/20"
+                              }`}
+                              onClick={(e) => { e.stopPropagation(); onOverrideWinner(r.round_index, "P2"); }}
+                              title={r.winner === "P2" ? "P2 (current guess)" : "Set P2 as winner"}
+                            >
+                              P2
+                            </button>
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <div
+                          className={`w-1 h-4 rounded-full ${
+                            rIsP1 ? "bg-p1" : "bg-p2"
+                          }`}
+                        />
+                        <span
+                          className={`text-[11px] ${
+                            rIsP1 ? "text-p1-light" : "text-p2-light"
+                          }`}
+                        >
+                          {r.winner}
+                        </span>
+                        {onOverrideWinner && (
+                          <span className="flex gap-0.5 ml-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <button
+                              className="text-[9px] bg-p1/15 text-p1-light px-1.5 py-0.5 rounded hover:bg-p1/30 transition-colors cursor-pointer"
+                              onClick={(e) => { e.stopPropagation(); onOverrideWinner(r.round_index, "P1"); }}
+                              title="Set P1 as winner"
+                            >
+                              P1
+                            </button>
+                            <button
+                              className="text-[9px] bg-p2/15 text-p2-light px-1.5 py-0.5 rounded hover:bg-p2/30 transition-colors cursor-pointer"
+                              onClick={(e) => { e.stopPropagation(); onOverrideWinner(r.round_index, "P2"); }}
+                              title="Set P2 as winner"
+                            >
+                              P2
+                            </button>
+                          </span>
+                        )}
+                      </>
+                    )}
                     {r.is_comeback && (
                       <span className="text-[9px] bg-accent-gold/15 text-accent-gold px-1 py-0.5 rounded">
                         COMEBACK

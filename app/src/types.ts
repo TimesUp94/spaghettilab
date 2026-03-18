@@ -38,6 +38,7 @@ export interface RoundResult {
   deficit_timestamp_ms: number;
   is_comeback: boolean;
   is_match_start: boolean;
+  winner_confident: boolean;
 }
 
 export interface MatchStats {
