@@ -2104,12 +2104,28 @@ impl RoiRect {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct RoiQuad {
+    pub tl: [u32; 2],  // top-left [x, y]
+    pub tr: [u32; 2],  // top-right
+    pub br: [u32; 2],  // bottom-right
+    pub bl: [u32; 2],  // bottom-left
+}
+
+impl RoiQuad {
+    fn to_arg(&self) -> String {
+        format!("{},{},{},{},{},{},{},{}",
+            self.tl[0], self.tl[1], self.tr[0], self.tr[1],
+            self.br[0], self.br[1], self.bl[0], self.bl[1])
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct VodRoiConfig {
     pub p1_tension: RoiRect,
     pub p2_tension: RoiRect,
     pub timer: RoiRect,
-    pub p1_name: RoiRect,
-    pub p2_name: RoiRect,
+    pub p1_name: RoiQuad,
+    pub p2_name: RoiQuad,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -2171,8 +2187,8 @@ async fn scan_vod(
         .arg("--p1-tension").arg(roi_config.p1_tension.to_arg())
         .arg("--p2-tension").arg(roi_config.p2_tension.to_arg())
         .arg("--timer-roi").arg(roi_config.timer.to_arg())
-        .arg("--p1-name").arg(roi_config.p1_name.to_arg())
-        .arg("--p2-name").arg(roi_config.p2_name.to_arg())
+        .arg("--p1-name-quad").arg(roi_config.p1_name.to_arg())
+        .arg("--p2-name-quad").arg(roi_config.p2_name.to_arg())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 

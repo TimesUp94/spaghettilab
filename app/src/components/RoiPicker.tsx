@@ -1,13 +1,13 @@
 import { useState, useRef, useCallback, useEffect } from "react";
-import type { RoiRect, VodRoiConfig } from "../types";
+import type { RoiRect, RoiQuad, VodRoiConfig } from "../types";
 
 // Default ROIs for 1920x1080 GGS with "SHOW DOWN" overlay
 const DEFAULT_ROIS: VodRoiConfig = {
   p1_tension: { y1: 1040, y2: 1058, x1: 50, x2: 440 },
   p2_tension: { y1: 1040, y2: 1058, x1: 1480, x2: 1870 },
   timer: { y1: 30, y2: 100, x1: 910, x2: 1010 },
-  p1_name: { y1: 145, y2: 178, x1: 45, x2: 370 },
-  p2_name: { y1: 145, y2: 178, x1: 1555, x2: 1880 },
+  p1_name: { tl: [75, 150], tr: [340, 145], br: [370, 178], bl: [45, 178] },
+  p2_name: { tl: [1555, 145], tr: [1850, 150], br: [1880, 178], bl: [1580, 178] },
 };
 
 const ROI_COLORS: Record<string, string> = {
@@ -34,6 +34,11 @@ const ROI_LABELS: Record<string, string> = {
   p2_name: "P2 Name",
 };
 
+const QUAD_KEYS = ["p1_name", "p2_name"] as const;
+const RECT_KEYS = ["p1_tension", "p2_tension", "timer"] as const;
+
+type QuadCorner = "tl" | "tr" | "br" | "bl";
+
 interface Props {
   imageSrc: string;
   videoWidth: number;
@@ -44,7 +49,8 @@ interface Props {
   onBack: () => void;
 }
 
-type DragState = {
+type RectDragState = {
+  kind: "rect";
   key: string;
   type: "move" | "resize";
   corner?: "tl" | "tr" | "bl" | "br";
@@ -52,6 +58,18 @@ type DragState = {
   startY: number;
   origRoi: RoiRect;
 };
+
+type QuadDragState = {
+  kind: "quad";
+  key: string;
+  type: "corner" | "move";
+  corner?: QuadCorner;
+  startX: number;
+  startY: number;
+  origQuad: RoiQuad;
+};
+
+type DragState = RectDragState | QuadDragState;
 
 export function RoiPicker({ imageSrc, videoWidth, videoHeight, videoDurationSecs, onSeekPreview, onConfirm, onBack }: Props) {
   const [rois, setRois] = useState<VodRoiConfig>({ ...DEFAULT_ROIS });
@@ -95,14 +113,36 @@ export function RoiPicker({ imageSrc, videoWidth, videoHeight, videoDurationSecs
     [scale]
   );
 
-  const handleMouseDown = useCallback(
+  // Mouse down for rect ROIs (tension, timer)
+  const handleRectMouseDown = useCallback(
     (key: string, type: "move" | "resize", corner?: "tl" | "tr" | "bl" | "br") =>
       (e: React.MouseEvent) => {
         e.stopPropagation();
         e.preventDefault();
         const pos = getMousePos(e);
-        const roi = rois[key as keyof VodRoiConfig];
-        setDrag({ key, type, corner, startX: pos.x, startY: pos.y, origRoi: { ...roi } });
+        const roi = rois[key as keyof VodRoiConfig] as RoiRect;
+        setDrag({ kind: "rect", key, type, corner, startX: pos.x, startY: pos.y, origRoi: { ...roi } });
+      },
+    [getMousePos, rois]
+  );
+
+  // Mouse down for quad ROIs (name regions)
+  const handleQuadMouseDown = useCallback(
+    (key: string, type: "corner" | "move", corner?: QuadCorner) =>
+      (e: React.MouseEvent) => {
+        e.stopPropagation();
+        e.preventDefault();
+        const pos = getMousePos(e);
+        const quad = rois[key as keyof VodRoiConfig] as RoiQuad;
+        setDrag({
+          kind: "quad",
+          key,
+          type,
+          corner,
+          startX: pos.x,
+          startY: pos.y,
+          origQuad: { tl: [...quad.tl], tr: [...quad.tr], br: [...quad.br], bl: [...quad.bl] },
+        });
       },
     [getMousePos, rois]
   );
@@ -114,30 +154,59 @@ export function RoiPicker({ imageSrc, videoWidth, videoHeight, videoDurationSecs
       const pos = getMousePos(e);
       const dx = pos.x - drag.startX;
       const dy = pos.y - drag.startY;
-      const orig = drag.origRoi;
 
       setRois((prev) => {
         const updated = { ...prev };
-        if (drag.type === "move") {
-          const w = orig.x2 - orig.x1;
-          const h = orig.y2 - orig.y1;
-          let nx1 = Math.round(orig.x1 + dx);
-          let ny1 = Math.round(orig.y1 + dy);
-          nx1 = Math.max(0, Math.min(videoWidth - w, nx1));
-          ny1 = Math.max(0, Math.min(videoHeight - h, ny1));
-          updated[drag.key as keyof VodRoiConfig] = {
-            y1: ny1, y2: ny1 + h, x1: nx1, x2: nx1 + w,
-          };
-        } else if (drag.type === "resize" && drag.corner) {
-          let { y1, y2, x1, x2 } = orig;
-          if (drag.corner.includes("l")) x1 = Math.max(0, Math.round(orig.x1 + dx));
-          if (drag.corner.includes("r")) x2 = Math.min(videoWidth, Math.round(orig.x2 + dx));
-          if (drag.corner.includes("t")) y1 = Math.max(0, Math.round(orig.y1 + dy));
-          if (drag.corner.includes("b")) y2 = Math.min(videoHeight, Math.round(orig.y2 + dy));
-          if (x2 - x1 >= 10 && y2 - y1 >= 4) {
-            updated[drag.key as keyof VodRoiConfig] = { y1, y2, x1, x2 };
+
+        if (drag.kind === "rect") {
+          const orig = drag.origRoi;
+          if (drag.type === "move") {
+            const w = orig.x2 - orig.x1;
+            const h = orig.y2 - orig.y1;
+            let nx1 = Math.round(orig.x1 + dx);
+            let ny1 = Math.round(orig.y1 + dy);
+            nx1 = Math.max(0, Math.min(videoWidth - w, nx1));
+            ny1 = Math.max(0, Math.min(videoHeight - h, ny1));
+            (updated as any)[drag.key] = { y1: ny1, y2: ny1 + h, x1: nx1, x2: nx1 + w };
+          } else if (drag.type === "resize" && drag.corner) {
+            let { y1, y2, x1, x2 } = orig;
+            if (drag.corner.includes("l")) x1 = Math.max(0, Math.round(orig.x1 + dx));
+            if (drag.corner.includes("r")) x2 = Math.min(videoWidth, Math.round(orig.x2 + dx));
+            if (drag.corner.includes("t")) y1 = Math.max(0, Math.round(orig.y1 + dy));
+            if (drag.corner.includes("b")) y2 = Math.min(videoHeight, Math.round(orig.y2 + dy));
+            if (x2 - x1 >= 10 && y2 - y1 >= 4) {
+              (updated as any)[drag.key] = { y1, y2, x1, x2 };
+            }
+          }
+        } else if (drag.kind === "quad") {
+          const orig = drag.origQuad;
+          if (drag.type === "move") {
+            // Move all 4 points by the same delta
+            const clampX = (v: number) => Math.max(0, Math.min(videoWidth, Math.round(v)));
+            const clampY = (v: number) => Math.max(0, Math.min(videoHeight, Math.round(v)));
+            (updated as any)[drag.key] = {
+              tl: [clampX(orig.tl[0] + dx), clampY(orig.tl[1] + dy)] as [number, number],
+              tr: [clampX(orig.tr[0] + dx), clampY(orig.tr[1] + dy)] as [number, number],
+              br: [clampX(orig.br[0] + dx), clampY(orig.br[1] + dy)] as [number, number],
+              bl: [clampX(orig.bl[0] + dx), clampY(orig.bl[1] + dy)] as [number, number],
+            };
+          } else if (drag.type === "corner" && drag.corner) {
+            // Move just one corner
+            const newQuad = {
+              tl: [...orig.tl] as [number, number],
+              tr: [...orig.tr] as [number, number],
+              br: [...orig.br] as [number, number],
+              bl: [...orig.bl] as [number, number],
+            };
+            const c = drag.corner;
+            newQuad[c] = [
+              Math.max(0, Math.min(videoWidth, Math.round(orig[c][0] + dx))),
+              Math.max(0, Math.min(videoHeight, Math.round(orig[c][1] + dy))),
+            ];
+            (updated as any)[drag.key] = newQuad;
           }
         }
+
         return updated;
       });
     };
@@ -153,7 +222,7 @@ export function RoiPicker({ imageSrc, videoWidth, videoHeight, videoDurationSecs
   }, [drag, getMousePos, videoWidth, videoHeight]);
 
   const renderRoi = (key: string) => {
-    const roi = rois[key as keyof VodRoiConfig];
+    const roi = rois[key as keyof VodRoiConfig] as RoiRect;
     const left = roi.x1 * scale;
     const top = roi.y1 * scale;
     const width = (roi.x2 - roi.x1) * scale;
@@ -171,7 +240,7 @@ export function RoiPicker({ imageSrc, videoWidth, videoHeight, videoDurationSecs
             border: `2px solid ${ROI_BORDER_COLORS[key]}`,
             cursor: "move",
           }}
-          onMouseDown={handleMouseDown(key, "move")}
+          onMouseDown={handleRectMouseDown(key, "move")}
         >
           <span
             style={{
@@ -203,11 +272,63 @@ export function RoiPicker({ imageSrc, videoWidth, videoHeight, videoDurationSecs
                 backgroundColor: ROI_BORDER_COLORS[key],
                 cursor,
               }}
-              onMouseDown={handleMouseDown(key, "resize", corner)}
+              onMouseDown={handleRectMouseDown(key, "resize", corner)}
             />
           );
         })}
       </div>
+    );
+  };
+
+  const renderQuad = (key: string) => {
+    const quad = rois[key as keyof VodRoiConfig] as RoiQuad;
+    const corners: QuadCorner[] = ["tl", "tr", "br", "bl"];
+    const handleSize = 8;
+
+    // Scale all points for display
+    const pts = corners.map((c) => [quad[c][0] * scale, quad[c][1] * scale] as [number, number]);
+    const polyPoints = pts.map((p) => `${p[0]},${p[1]}`).join(" ");
+
+    // Compute bounding box for SVG viewBox and label placement
+    const minX = Math.min(...pts.map((p) => p[0]));
+    const minY = Math.min(...pts.map((p) => p[1]));
+
+    return (
+      <g key={key}>
+        {/* Filled polygon */}
+        <polygon
+          points={polyPoints}
+          fill={ROI_COLORS[key]}
+          stroke={ROI_BORDER_COLORS[key]}
+          strokeWidth={2}
+          style={{ cursor: "move" }}
+          onMouseDown={handleQuadMouseDown(key, "move")}
+        />
+        {/* Label */}
+        <text
+          x={minX}
+          y={minY - 4}
+          fill={ROI_BORDER_COLORS[key]}
+          fontSize={10}
+          fontWeight={600}
+          style={{ textShadow: "0 0 3px rgba(0,0,0,0.8)", pointerEvents: "none" }}
+        >
+          {ROI_LABELS[key]}
+        </text>
+        {/* Corner handles */}
+        {corners.map((c, i) => (
+          <rect
+            key={c}
+            x={pts[i][0] - handleSize / 2}
+            y={pts[i][1] - handleSize / 2}
+            width={handleSize}
+            height={handleSize}
+            fill={ROI_BORDER_COLORS[key]}
+            style={{ cursor: "crosshair" }}
+            onMouseDown={handleQuadMouseDown(key, "corner", c)}
+          />
+        ))}
+      </g>
     );
   };
 
@@ -242,8 +363,23 @@ export function RoiPicker({ imageSrc, videoWidth, videoHeight, videoDurationSecs
               {renderRoi("p1_tension")}
               {renderRoi("p2_tension")}
               {renderRoi("timer")}
-              {renderRoi("p1_name")}
-              {renderRoi("p2_name")}
+              {/* SVG overlay for quad ROIs */}
+              <svg
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  width: imgSize.w,
+                  height: imgSize.h,
+                  pointerEvents: "none",
+                  overflow: "visible",
+                }}
+              >
+                <g style={{ pointerEvents: "auto" }}>
+                  {renderQuad("p1_name")}
+                  {renderQuad("p2_name")}
+                </g>
+              </svg>
             </>
           )}
         </div>
@@ -270,7 +406,7 @@ export function RoiPicker({ imageSrc, videoWidth, videoHeight, videoDurationSecs
           </div>
         )}
         <div className="text-[10px] text-text-muted flex gap-6">
-          <span>Drag rectangles to move. Drag corners to resize. Use slider to find gameplay.</span>
+          <span>Drag regions to move. Drag corners to resize/reshape. Use slider to find gameplay.</span>
           <span className="text-blue-400">P1 Name / Tension</span>
           <span className="text-red-400">P2 Name / Tension</span>
           <span className="text-yellow-400">Timer</span>

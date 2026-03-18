@@ -105,12 +105,21 @@ export interface RoiRect {
   x2: number;
 }
 
+// 4-point quad for skewed/parallelogram regions (e.g. GGS name tags)
+// Points are [x, y] in clockwise order: top-left, top-right, bottom-right, bottom-left
+export interface RoiQuad {
+  tl: [number, number];
+  tr: [number, number];
+  br: [number, number];
+  bl: [number, number];
+}
+
 export interface VodRoiConfig {
   p1_tension: RoiRect;
   p2_tension: RoiRect;
   timer: RoiRect;
-  p1_name: RoiRect;
-  p2_name: RoiRect;
+  p1_name: RoiQuad;
+  p2_name: RoiQuad;
 }
 
 export interface DetectedSetInfo {

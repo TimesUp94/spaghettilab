@@ -17,11 +17,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# Force UTF-8 output on Windows to avoid charmap encoding errors from EasyOCR
+if sys.platform == "win32":
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")  # type: ignore
 
 import cv2
 import numpy as np
@@ -35,11 +42,11 @@ import numpy as np
 P1_TENSION = (1040, 1058, 50, 440)
 P2_TENSION = (1040, 1058, 1480, 1870)
 TIMER_ROI = (30, 100, 910, 1010)
-# Player name tags: diagonal black boxes with white text under health bars
-P1_NAME_ROI = (145, 178, 45, 370)   # left side name tag
-P2_NAME_ROI = (145, 178, 1555, 1880) # right side name tag
-# Legacy banner ROI kept for backwards compatibility
-BANNER_ROI = (2, 20, 100, 1820)
+# Player name tags: 4-point quads (tl_x,tl_y, tr_x,tr_y, br_x,br_y, bl_x,bl_y)
+# For rectangular name tags (e.g. SF6), all corners form a rectangle.
+# For skewed tags (e.g. GGS), corners trace the parallelogram.
+P1_NAME_QUAD = (45, 155, 340, 150, 370, 178, 75, 178)  # GGS left name tag
+P2_NAME_QUAD = (1555, 150, 1870, 155, 1850, 178, 1580, 178)  # GGS right name tag
 
 GAMEPLAY_MERGE_GAP = 12    # merge gameplay segments with < N second gaps
 MIN_SEGMENT_DURATION = 25  # discard segments shorter than this
@@ -122,6 +129,35 @@ def parse_roi(s: str) -> tuple[int, int, int, int]:
     if len(parts) != 4:
         raise ValueError(f"ROI must have 4 values (y1,y2,x1,x2), got: {s}")
     return tuple(parts)  # type: ignore
+
+
+def parse_quad(s: str) -> tuple[int, ...]:
+    """Parse 'tl_x,tl_y,tr_x,tr_y,br_x,br_y,bl_x,bl_y' string into 8-tuple."""
+    parts = [int(x) for x in s.split(",")]
+    if len(parts) != 8:
+        raise ValueError(f"Quad must have 8 values (tl_x,tl_y,...,bl_x,bl_y), got: {s}")
+    return tuple(parts)
+
+
+def warp_quad(frame: np.ndarray, quad: tuple[int, ...], out_w: int = 300, out_h: int = 40) -> np.ndarray:
+    """Perspective-warp a quad region of the frame into a rectangle.
+
+    quad = (tl_x, tl_y, tr_x, tr_y, br_x, br_y, bl_x, bl_y)
+    """
+    src_pts = np.array([
+        [quad[0], quad[1]],  # top-left
+        [quad[2], quad[3]],  # top-right
+        [quad[4], quad[5]],  # bottom-right
+        [quad[6], quad[7]],  # bottom-left
+    ], dtype=np.float32)
+    dst_pts = np.array([
+        [0, 0],
+        [out_w, 0],
+        [out_w, out_h],
+        [0, out_h],
+    ], dtype=np.float32)
+    M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+    return cv2.warpPerspective(frame, M, (out_w, out_h))
 
 
 # ---------------------------------------------------------------------------
@@ -270,18 +306,19 @@ def ocr_name_region(region: np.ndarray) -> str:
         (max(p[0] for p in r[0]) - min(p[0] for p in r[0])) *
         (max(p[1] for p in r[0]) - min(p[1] for p in r[0]))
     ))
-    return best[1].strip()
+    # Sanitize to ASCII-safe characters for filenames and JSON
+    text = best[1].strip()
+    return "".join(c for c in text if c.isascii() and (c.isalnum() or c in " _-"))
 
 
 def read_player_names(
     frame: np.ndarray,
-    p1_name_roi: tuple = P1_NAME_ROI,
-    p2_name_roi: tuple = P2_NAME_ROI,
+    p1_name_quad: tuple = P1_NAME_QUAD,
+    p2_name_quad: tuple = P2_NAME_QUAD,
 ) -> tuple[str, str]:
     """Read P1 and P2 player names from a frame. Returns (p1_name, p2_name)."""
-    fh, fw = frame.shape[:2]
-    p1 = frame[max(0,p1_name_roi[0]):min(fh,p1_name_roi[1]), max(0,p1_name_roi[2]):min(fw,p1_name_roi[3])]
-    p2 = frame[max(0,p2_name_roi[0]):min(fh,p2_name_roi[1]), max(0,p2_name_roi[2]):min(fw,p2_name_roi[3])]
+    p1 = warp_quad(frame, p1_name_quad)
+    p2 = warp_quad(frame, p2_name_quad)
     return ocr_name_region(p1), ocr_name_region(p2)
 
 
@@ -291,13 +328,12 @@ def read_player_names(
 
 def get_name_signature(
     frame: np.ndarray,
-    p1_name_roi: tuple = P1_NAME_ROI,
-    p2_name_roi: tuple = P2_NAME_ROI,
+    p1_name_quad: tuple = P1_NAME_QUAD,
+    p2_name_quad: tuple = P2_NAME_QUAD,
 ) -> np.ndarray | None:
     """Extract a compact signature from both player name tags."""
-    fh, fw = frame.shape[:2]
-    p1 = frame[max(0,p1_name_roi[0]):min(fh,p1_name_roi[1]), max(0,p1_name_roi[2]):min(fw,p1_name_roi[3])]
-    p2 = frame[max(0,p2_name_roi[0]):min(fh,p2_name_roi[1]), max(0,p2_name_roi[2]):min(fw,p2_name_roi[3])]
+    p1 = warp_quad(frame, p1_name_quad)
+    p2 = warp_quad(frame, p2_name_quad)
 
     if p1.size == 0 or p2.size == 0:
         return None
@@ -327,8 +363,8 @@ def detect_set_boundaries(
     h: int,
     gap_threshold: float = SET_GAP_THRESHOLD,
     dist_threshold: float = NAME_DIST_THRESHOLD,
-    p1_name_roi: tuple = P1_NAME_ROI,
-    p2_name_roi: tuple = P2_NAME_ROI,
+    p1_name_quad: tuple = P1_NAME_QUAD,
+    p2_name_quad: tuple = P2_NAME_QUAD,
 ) -> list[int]:
     """Return indices into *segments* where a new set begins.
 
@@ -353,7 +389,7 @@ def detect_set_boundaries(
             t = seg.start + seg.duration * frac
             frame = extract_frame_ffmpeg(vod_path, t, w, h)
             if frame is not None:
-                sig = get_name_signature(frame, p1_name_roi, p2_name_roi)
+                sig = get_name_signature(frame, p1_name_quad, p2_name_quad)
                 if sig is not None:
                     # Score by amount of visible text (higher = more text)
                     candidates.append((sig, float(np.mean(sig))))
@@ -483,17 +519,21 @@ def main():
     parser.add_argument("--banner-roi", type=str, default=None,
                         help="(deprecated, use --p1-name / --p2-name)")
     parser.add_argument("--p1-name", type=str, default=None,
-                        help="P1 name tag ROI as y1,y2,x1,x2")
+                        help="(deprecated, use --p1-name-quad)")
     parser.add_argument("--p2-name", type=str, default=None,
-                        help="P2 name tag ROI as y1,y2,x1,x2")
+                        help="(deprecated, use --p2-name-quad)")
+    parser.add_argument("--p1-name-quad", type=str, default=None,
+                        help="P1 name tag quad as tl_x,tl_y,tr_x,tr_y,br_x,br_y,bl_x,bl_y")
+    parser.add_argument("--p2-name-quad", type=str, default=None,
+                        help="P2 name tag quad as tl_x,tl_y,tr_x,tr_y,br_x,br_y,bl_x,bl_y")
     args = parser.parse_args()
 
     # Apply ROI overrides
     p1_tension = parse_roi(args.p1_tension) if args.p1_tension else P1_TENSION
     p2_tension = parse_roi(args.p2_tension) if args.p2_tension else P2_TENSION
     timer_roi = parse_roi(args.timer_roi) if args.timer_roi else TIMER_ROI
-    p1_name_roi = parse_roi(args.p1_name) if args.p1_name else P1_NAME_ROI
-    p2_name_roi = parse_roi(args.p2_name) if args.p2_name else P2_NAME_ROI
+    p1_name_quad = parse_quad(args.p1_name_quad) if args.p1_name_quad else P1_NAME_QUAD
+    p2_name_quad = parse_quad(args.p2_name_quad) if args.p2_name_quad else P2_NAME_QUAD
     # Use --name-threshold if specified, fall back to --banner-threshold for compat
     name_threshold = args.name_threshold if args.name_threshold != NAME_DIST_THRESHOLD else args.banner_threshold
 
@@ -547,8 +587,8 @@ def main():
         segments, vod_path, w, h,
         gap_threshold=args.set_gap,
         dist_threshold=name_threshold,
-        p1_name_roi=p1_name_roi,
-        p2_name_roi=p2_name_roi,
+        p1_name_quad=p1_name_quad,
+        p2_name_quad=p2_name_quad,
     )
     print(flush=True)
 
@@ -566,7 +606,7 @@ def main():
             t = seg.start + seg.duration * frac
             frame = extract_frame_ffmpeg(vod_path, t, w, h)
             if frame is not None:
-                p1, p2 = read_player_names(frame, p1_name_roi, p2_name_roi)
+                p1, p2 = read_player_names(frame, p1_name_quad, p2_name_quad)
                 total_len = len(p1) + len(p2)
                 if total_len > best_len:
                     best_p1, best_p2, best_len = p1, p2, total_len
