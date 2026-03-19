@@ -2402,7 +2402,9 @@ async fn export_spag(
                 p2_health_pct REAL,
                 timer_value INTEGER,
                 p1_rounds_won INTEGER,
-                p2_rounds_won INTEGER
+                p2_rounds_won INTEGER,
+                p1_tension_pct REAL,
+                p2_tension_pct REAL
             );
             CREATE TABLE dst.damage_events (
                 event_id INTEGER PRIMARY KEY AUTOINCREMENT,
