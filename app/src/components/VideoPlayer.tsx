@@ -1,5 +1,7 @@
 import { useRef, useEffect, useState, useCallback } from "react";
-import type { RoundResult, DamageEvent, Match, Note } from "../types";
+import type { RoundResult, DamageEvent, Match, Note, Drawing } from "../types";
+import { DrawingOverlay } from "./DrawingOverlay";
+import { DrawingToolbar } from "./DrawingToolbar";
 
 interface Props {
   src: string | null;
@@ -13,6 +15,9 @@ interface Props {
   onLocateVideo?: () => void;
   onTimeUpdate?: (ms: number) => void;
   notes?: Note[];
+  drawings?: Drawing[];
+  onSaveDrawing?: (timestampMs: number, strokesJson: string) => void;
+  onDeleteDrawing?: (drawingId: number) => void;
 }
 
 function formatTime(s: number): string {
@@ -33,15 +38,25 @@ export function VideoPlayer({
   onLocateVideo,
   onTimeUpdate,
   notes,
+  drawings = [],
+  onSaveDrawing,
+  onDeleteDrawing,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const progressRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const videoContainerRef = useRef<HTMLDivElement>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(durationMs / 1000);
   const [playing, setPlaying] = useState(false);
   const [volume, setVolume] = useState(0.5);
   const [playbackRate, setPlaybackRate] = useState(1);
+
+  // Drawing state
+  const [drawingMode, setDrawingMode] = useState(false);
+  const [activeTool, setActiveTool] = useState<"pen" | "eraser">("pen");
+  const [penColor, setPenColor] = useState("#ff3333");
+  const [penSize, setPenSize] = useState(8);
 
   // Seek when seekToMs changes
   useEffect(() => {
@@ -83,6 +98,7 @@ export function VideoPlayer({
   const togglePlay = useCallback(() => {
     const v = videoRef.current;
     if (!v) return;
+    if (drawingMode) return; // don't toggle play in drawing mode
     if (v.paused) {
       v.play();
       setPlaying(true);
@@ -90,6 +106,40 @@ export function VideoPlayer({
       v.pause();
       setPlaying(false);
     }
+  }, [drawingMode]);
+
+  const toggleDrawingMode = useCallback(() => {
+    setDrawingMode((prev) => {
+      if (!prev) {
+        // Entering drawing mode — auto-pause
+        const v = videoRef.current;
+        if (v && !v.paused) {
+          v.pause();
+          setPlaying(false);
+        }
+      }
+      return !prev;
+    });
+  }, []);
+
+  const handleClearDrawing = useCallback(() => {
+    // Find the drawing at current timestamp and delete it
+    const currentMs = (videoRef.current?.currentTime ?? 0) * 1000;
+    const existing = drawings.find((d) => Math.abs(d.timestamp_ms - currentMs) < 50);
+    if (existing && onDeleteDrawing) {
+      onDeleteDrawing(existing.drawing_id);
+    }
+    // Also save empty to clear active strokes (handled by DrawingOverlay exiting)
+    if (onSaveDrawing) {
+      onSaveDrawing(currentMs, "[]");
+    }
+    // Toggle off and back on to reset the overlay's active strokes
+    setDrawingMode(false);
+    setTimeout(() => setDrawingMode(true), 0);
+  }, [drawings, onDeleteDrawing, onSaveDrawing]);
+
+  const handleDrawingDone = useCallback(() => {
+    setDrawingMode(false);
   }, []);
 
   // Zoom range for progress bar
@@ -146,11 +196,17 @@ export function VideoPlayer({
             videoRef.current.currentTime += 1 / 30; // frame forward
           }
           break;
+        case "d":
+          if (onSaveDrawing) toggleDrawingMode();
+          break;
+        case "Escape":
+          if (drawingMode) setDrawingMode(false);
+          break;
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [togglePlay, skipSeconds]);
+  }, [togglePlay, skipSeconds, toggleDrawingMode, drawingMode, onSaveDrawing]);
 
   // Map a time (seconds) to a 0-100% position within the zoom range
   const toBarPct = (s: number) =>
@@ -186,19 +242,45 @@ export function VideoPlayer({
   return (
     <div ref={containerRef} className="bg-surface-2 rounded-lg overflow-hidden border border-surface-4/50">
       {/* Video */}
-      <div className="relative bg-black aspect-video">
+      <div ref={videoContainerRef} className="relative bg-black aspect-video">
         {src ? (
           <>
             <video
               ref={videoRef}
               src={src}
               className="w-full h-full object-contain"
-              onClick={togglePlay}
+              onClick={drawingMode ? undefined : togglePlay}
               onPlay={() => setPlaying(true)}
               onPause={() => setPlaying(false)}
             />
+            {/* Drawing overlay (always rendered for playback display; captures input only in drawingMode) */}
+            {onSaveDrawing && (
+              <DrawingOverlay
+                videoRef={videoRef}
+                drawings={drawings}
+                drawingMode={drawingMode}
+                activeTool={activeTool}
+                penColor={penColor}
+                penSize={penSize}
+                onSaveDrawing={onSaveDrawing}
+                containerRef={videoContainerRef}
+              />
+            )}
+            {/* Drawing toolbar */}
+            {drawingMode && (
+              <DrawingToolbar
+                activeTool={activeTool}
+                penColor={penColor}
+                penSize={penSize}
+                onToolChange={setActiveTool}
+                onColorChange={setPenColor}
+                onSizeChange={setPenSize}
+                onClear={handleClearDrawing}
+                onDone={handleDrawingDone}
+              />
+            )}
             {/* Overlay: current round info */}
-            {currentRound && (
+            {currentRound && !drawingMode && (
               <div className="absolute top-2 left-2 bg-black/60 backdrop-blur-sm rounded px-2 py-1 text-[10px] text-text-secondary pointer-events-none">
                 Round {currentRound.round_index + 1}
                 {currentRound.is_comeback && (
@@ -206,8 +288,14 @@ export function VideoPlayer({
                 )}
               </div>
             )}
+            {/* Drawing mode indicator */}
+            {drawingMode && (
+              <div className="absolute bottom-2 left-2 bg-accent-gold/80 rounded px-2 py-1 text-[10px] text-black font-medium pointer-events-none">
+                Drawing Mode
+              </div>
+            )}
             {/* Play overlay when paused */}
-            {!playing && (
+            {!playing && !drawingMode && (
               <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                 <div className="w-12 h-12 bg-black/40 rounded-full flex items-center justify-center">
                   <span className="text-white/80 text-lg ml-0.5">{"\u25B6"}</span>
@@ -317,6 +405,19 @@ export function VideoPlayer({
           );
         })}
 
+        {/* Drawing markers */}
+        {drawings.map((d, i) => {
+          const pos = toBarPct(d.timestamp_ms / 1000);
+          return (
+            <div
+              key={`draw-${i}`}
+              className="absolute top-0 bottom-0 w-1 bg-accent-gold/50 rounded"
+              style={{ left: `${pos}%` }}
+              title="Drawing"
+            />
+          );
+        })}
+
         {/* Playhead */}
         <div
           className="absolute top-0 bottom-0 w-0.5 bg-text-primary"
@@ -359,6 +460,21 @@ export function VideoPlayer({
             title="Show full timeline"
           >
             G{selectedMatch.match_index + 1} &times;
+          </button>
+        )}
+
+        {/* Draw toggle */}
+        {onSaveDrawing && (
+          <button
+            onClick={toggleDrawingMode}
+            className={`text-[10px] px-1.5 py-0.5 rounded cursor-pointer transition-colors ${
+              drawingMode
+                ? "bg-accent-gold/20 text-accent-gold"
+                : "text-text-muted hover:text-text-secondary"
+            }`}
+            title="Toggle drawing mode (D)"
+          >
+            Draw
           </button>
         )}
 
@@ -408,6 +524,7 @@ export function VideoPlayer({
         <span>Shift+{"<-/->"}: seek 10s</span>
         <span>,/.: frame step</span>
         <span>M: mute</span>
+        {onSaveDrawing && <span>D: draw</span>}
       </div>
     </div>
   );

@@ -93,6 +93,15 @@ pub struct Note {
     pub created_at: String,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct Drawing {
+    pub drawing_id: i64,
+    pub replay_id: String,
+    pub timestamp_ms: f64,
+    pub strokes_json: String,
+    pub created_at: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct AnalysisStatus {
     pub running: bool,
@@ -2102,6 +2111,90 @@ fn delete_note(db_path: String, note_id: i64) -> Result<(), String> {
     Ok(())
 }
 
+// ── Drawings ─────────────────────────────────────────────────────────────────
+
+fn ensure_drawings_table(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS drawings (
+            drawing_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            replay_id    TEXT NOT NULL,
+            timestamp_ms REAL NOT NULL,
+            strokes_json TEXT NOT NULL,
+            created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(replay_id, timestamp_ms)
+        );"
+    ).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_drawings(db_path: String, replay_id: String) -> Result<Vec<Drawing>, String> {
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    ensure_drawings_table(&conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT drawing_id, replay_id, timestamp_ms, strokes_json, created_at
+         FROM drawings WHERE replay_id = ? ORDER BY timestamp_ms"
+    ).map_err(|e| e.to_string())?;
+    let drawings = stmt.query_map([&replay_id], |row| {
+        Ok(Drawing {
+            drawing_id: row.get(0)?,
+            replay_id: row.get(1)?,
+            timestamp_ms: row.get(2)?,
+            strokes_json: row.get(3)?,
+            created_at: row.get(4)?,
+        })
+    }).map_err(|e| e.to_string())?
+    .filter_map(|r| r.ok())
+    .collect();
+    Ok(drawings)
+}
+
+#[tauri::command]
+fn save_drawing(db_path: String, replay_id: String, timestamp_ms: f64, strokes_json: String) -> Result<Option<Drawing>, String> {
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    ensure_drawings_table(&conn)?;
+
+    // If strokes are empty, delete the drawing at this timestamp
+    if strokes_json == "[]" {
+        conn.execute(
+            "DELETE FROM drawings WHERE replay_id = ? AND timestamp_ms = ?",
+            rusqlite::params![&replay_id, timestamp_ms],
+        ).map_err(|e| e.to_string())?;
+        return Ok(None);
+    }
+
+    // Upsert: INSERT OR REPLACE on the unique(replay_id, timestamp_ms) constraint
+    conn.execute(
+        "INSERT INTO drawings (replay_id, timestamp_ms, strokes_json)
+         VALUES (?, ?, ?)
+         ON CONFLICT(replay_id, timestamp_ms)
+         DO UPDATE SET strokes_json = excluded.strokes_json",
+        rusqlite::params![&replay_id, timestamp_ms, &strokes_json],
+    ).map_err(|e| e.to_string())?;
+
+    let drawing = conn.query_row(
+        "SELECT drawing_id, replay_id, timestamp_ms, strokes_json, created_at
+         FROM drawings WHERE replay_id = ? AND timestamp_ms = ?",
+        rusqlite::params![&replay_id, timestamp_ms],
+        |row| Ok(Drawing {
+            drawing_id: row.get(0)?,
+            replay_id: row.get(1)?,
+            timestamp_ms: row.get(2)?,
+            strokes_json: row.get(3)?,
+            created_at: row.get(4)?,
+        })
+    ).map_err(|e| e.to_string())?;
+    Ok(Some(drawing))
+}
+
+#[tauri::command]
+fn delete_drawing(db_path: String, drawing_id: i64) -> Result<(), String> {
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    ensure_drawings_table(&conn)?;
+    conn.execute("DELETE FROM drawings WHERE drawing_id = ?", [drawing_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ── VOD Splitter ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -2423,6 +2516,14 @@ async fn export_spag(
                 timestamp_ms REAL NOT NULL,
                 text TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE dst.drawings (
+                drawing_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                replay_id TEXT NOT NULL,
+                timestamp_ms REAL NOT NULL,
+                strokes_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(replay_id, timestamp_ms)
             );"
         ).map_err(|e| e.to_string())?;
 
@@ -2445,6 +2546,12 @@ async fn export_spag(
         ensure_notes_table(&src_conn)?;
         src_conn.execute(
             "INSERT INTO dst.notes SELECT * FROM main.notes WHERE replay_id = ?",
+            [&replay_id],
+        ).map_err(|e| e.to_string())?;
+
+        ensure_drawings_table(&src_conn)?;
+        src_conn.execute(
+            "INSERT INTO dst.drawings SELECT * FROM main.drawings WHERE replay_id = ?",
             [&replay_id],
         ).map_err(|e| e.to_string())?;
 
@@ -2656,6 +2763,9 @@ pub fn run() {
             add_note,
             update_note,
             delete_note,
+            get_drawings,
+            save_drawing,
+            delete_drawing,
             export_spag,
             open_spag,
             save_spag,

@@ -10,6 +10,7 @@ import type {
   MatchStats,
   Highlight,
   Note,
+  Drawing,
   SpagSession,
   ActiveTab,
 } from "./types";
@@ -24,6 +25,9 @@ import {
   addNote,
   updateNote,
   deleteNote,
+  getDrawings,
+  saveDrawing,
+  deleteDrawing,
   getDefaultDbPath,
   resolveVideoPath,
   reanalyzeReplay,
@@ -144,6 +148,7 @@ export default function App() {
   const [stats, setStats] = useState<MatchStats | null>(null);
   const [highlights, setHighlights] = useState<Highlight[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
+  const [drawings, setDrawings] = useState<Drawing[]>([]);
 
   // Video state
   const [videoSrc, setVideoSrc] = useState<string | null>(null);
@@ -288,19 +293,21 @@ export default function App() {
       setSelectedMatchIndex(null);
       setLoading(true);
       try {
-        const [fd, de, rn, st, hl, nt, vp] = await Promise.all([
+        const [fd, de, rn, st, hl, nt, dr, vp] = await Promise.all([
           getFrameData(db, replay.replay_id),
           getDamageEvents(db, replay.replay_id),
           getRounds(db, replay.replay_id),
           getMatchStats(db, replay.replay_id),
           getHighlights(db, replay.replay_id),
           getNotes(db, replay.replay_id).catch(() => [] as Note[]),
+          getDrawings(db, replay.replay_id).catch(() => [] as Drawing[]),
           resolveVideoPath(db, replay.replay_id).catch(() => ""),
         ]);
         setFrameData(fd);
         setDamageEvents(de);
         setRounds(rn);
         setNotes(nt);
+        setDrawings(dr);
         setStats(st);
         setHighlights(hl);
         if (vp) {
@@ -403,6 +410,32 @@ export default function App() {
     [dbPath]
   );
 
+  // Drawing handlers
+  const handleSaveDrawing = useCallback(
+    async (timestampMs: number, strokesJson: string) => {
+      if (!dbPath || !selectedReplay) return;
+      const result = await saveDrawing(dbPath, selectedReplay.replay_id, timestampMs, strokesJson);
+      setDrawings((prev) => {
+        // Remove existing drawing at this timestamp
+        const filtered = prev.filter((d) => Math.abs(d.timestamp_ms - timestampMs) >= 1);
+        if (result) {
+          return [...filtered, result].sort((a, b) => a.timestamp_ms - b.timestamp_ms);
+        }
+        return filtered;
+      });
+    },
+    [dbPath, selectedReplay]
+  );
+
+  const handleDeleteDrawing = useCallback(
+    async (drawingId: number) => {
+      if (!dbPath) return;
+      await deleteDrawing(dbPath, drawingId);
+      setDrawings((prev) => prev.filter((d) => d.drawing_id !== drawingId));
+    },
+    [dbPath]
+  );
+
   // Reanalyze: re-run Python CV pipeline then reload
   const [reanalyzing, setReanalyzing] = useState(false);
   const handleReanalyze = useCallback(async () => {
@@ -481,13 +514,14 @@ export default function App() {
       if (replay) {
         setSelectedReplay(replay);
         setSelectedMatchIndex(null);
-        const [fd, de, rn, st, hl, nt] = await Promise.all([
+        const [fd, de, rn, st, hl, nt, dr] = await Promise.all([
           getFrameData(session.db_path, replay.replay_id),
           getDamageEvents(session.db_path, replay.replay_id),
           getRounds(session.db_path, replay.replay_id),
           getMatchStats(session.db_path, replay.replay_id),
           getHighlights(session.db_path, replay.replay_id),
           getNotes(session.db_path, replay.replay_id).catch(() => [] as Note[]),
+          getDrawings(session.db_path, replay.replay_id).catch(() => [] as Drawing[]),
         ]);
         setFrameData(fd);
         setDamageEvents(de);
@@ -495,6 +529,7 @@ export default function App() {
         setStats(st);
         setHighlights(hl);
         setNotes(nt);
+        setDrawings(dr);
 
         // Use the extracted video from the .spag session
         setVideoPath(session.video_path);
@@ -743,6 +778,9 @@ export default function App() {
                       onLocateVideo={handleLocateVideo}
                       onTimeUpdate={setCurrentTimeMs}
                       notes={notes}
+                      drawings={drawings}
+                      onSaveDrawing={handleSaveDrawing}
+                      onDeleteDrawing={handleDeleteDrawing}
                     />
                   </div>
                   <div className="w-[320px] shrink-0">
@@ -852,10 +890,12 @@ export default function App() {
                   {activeTab === "notes" && (
                     <NotesPanel
                       notes={notes}
+                      drawings={drawings}
                       onSeek={handleSeek}
                       onAdd={handleAddNote}
                       onUpdate={handleUpdateNote}
                       onDelete={handleDeleteNote}
+                      onDeleteDrawing={handleDeleteDrawing}
                       currentTimeMs={currentTimeMs}
                     />
                   )}

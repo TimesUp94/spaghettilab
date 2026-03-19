@@ -10,6 +10,7 @@ import type {
   DetectedSetInfo,
   CutSetRequest,
   Note,
+  Drawing,
   SpagSession,
 } from "./types";
 
@@ -127,6 +128,20 @@ export async function updateNote(dbPath: string, noteId: number, text: string, t
 
 export async function deleteNote(dbPath: string, noteId: number): Promise<void> {
   return invoke("delete_note", { dbPath, noteId });
+}
+
+// Drawings
+
+export async function getDrawings(dbPath: string, replayId: string): Promise<Drawing[]> {
+  return invoke("get_drawings", { dbPath, replayId });
+}
+
+export async function saveDrawing(dbPath: string, replayId: string, timestampMs: number, strokesJson: string): Promise<Drawing | null> {
+  return invoke("save_drawing", { dbPath, replayId, timestampMs, strokesJson });
+}
+
+export async function deleteDrawing(dbPath: string, drawingId: number): Promise<void> {
+  return invoke("delete_drawing", { dbPath, drawingId });
 }
 
 // Winner overrides

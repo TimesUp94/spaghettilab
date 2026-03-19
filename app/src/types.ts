@@ -87,6 +87,21 @@ export interface Note {
   created_at: string;
 }
 
+export interface Drawing {
+  drawing_id: number;
+  replay_id: string;
+  timestamp_ms: number;
+  strokes_json: string;
+  created_at: string;
+}
+
+export interface DrawingStroke {
+  points: [number, number][];  // normalized 0-1 coords (x/width, y/height)
+  color: string;               // hex, e.g. "#ff0000"
+  size: number;                // px at 1920px reference width
+  isEraser: boolean;           // true = eraser stroke (destination-out compositing)
+}
+
 export interface SpagSession {
   db_path: string;
   video_path: string;
