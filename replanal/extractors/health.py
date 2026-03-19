@@ -31,8 +31,8 @@ class HealthBarExtractor(BaseExtractor):
     # portrait (edge) toward the center.  At low health the remaining
     # sliver sits near the center, so the range must extend close to
     # the timer area (~x=960) to catch it.
-    P1_X1, P1_X2 = 200, 900
-    P2_X1, P2_X2 = 1040, 1800
+    P1_X1, P1_X2 = 155, 868
+    P2_X1, P2_X2 = 1052, 1782
 
     # Primary Y band for health bars (confirmed from pixel inspection).
     _PRIMARY_BAND = (112, 142)
@@ -51,8 +51,8 @@ class HealthBarExtractor(BaseExtractor):
     # bar depletes from the right, so the left start stays near the left edge.
     # Readings that don't meet this constraint are spurious (e.g. round
     # transition UI elements that happen to have warm pixels).
-    _P1_ANCHOR_END_MIN = 640   # P1 run must end at column >= this (out of 700)
-    _P2_ANCHOR_START_MAX = 40  # P2 run must start at column <= this (out of 760)
+    _P1_ANCHOR_END_MIN = 650   # P1 run must end at column >= this (out of 713)
+    _P2_ANCHOR_START_MAX = 40  # P2 run must start at column <= this (out of 730)
 
     # Activation: either player must exceed this for N consecutive frames
     _ACTIVATE_THRESHOLD = 200
@@ -77,10 +77,13 @@ class HealthBarExtractor(BaseExtractor):
     # (bar gone after KO).  Must exceed any brief screen-flash duration.
     _DEATH_FRAMES = 10
 
+    # Fixed max widths: 100% health = full ROI width
+    P1_MAX_W = P1_X2 - P1_X1  # 868 - 155 = 713
+    P2_MAX_W = P2_X2 - P2_X1  # 1782 - 1052 = 730
+
     def __init__(self, config: HealthBarConfig | None = None):
         self.config = config or HealthBarConfig()
         self._last_frame: int = -9999
-        self._max_w: tuple[int, int] = (0, 0)
         self._activated: bool = False
         self._activate_count: int = 0
         # Rolling median buffers for raw pixel measurements
@@ -123,7 +126,6 @@ class HealthBarExtractor(BaseExtractor):
             self._p2_buf.clear()
             self._last_p1_pct = 1.0
             self._last_p2_pct = 1.0
-            self._max_w = (0, 0)
             self._post_round = False
             self._p1_unreadable_count = 0
             self._p2_unreadable_count = 0
@@ -289,13 +291,9 @@ class HealthBarExtractor(BaseExtractor):
             if any_trustworthy:
                 self._last_frame = ctx.frame_number
 
-        # Update max widths (only from non-clamped, readable readings).
-        p1_max, p2_max = self._max_w
-        if p1_readable and p1_w > p1_max and not p1_was_clamped:
-            p1_max = p1_w
-        if p2_readable and p2_w > p2_max and not p2_was_clamped:
-            p2_max = p2_w
-        self._max_w = (p1_max, p2_max)
+        # Fixed max widths: 100% health = full ROI width
+        p1_max = self.P1_MAX_W
+        p2_max = self.P2_MAX_W
 
         # ── P1 processing ──────────────────────────────────────────────
         if p1_readable:

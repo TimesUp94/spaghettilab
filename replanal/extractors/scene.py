@@ -27,8 +27,8 @@ class SceneDetector(BaseExtractor):
     # Health bar Y band (confirmed from pixel inspection)
     BAR_Y1, BAR_Y2 = 112, 142
     # Health bar x-ranges for checking
-    P1_HEALTH_X = (200, 900)
-    P2_HEALTH_X = (1040, 1800)
+    P1_HEALTH_X = (155, 868)
+    P2_HEALTH_X = (1052, 1782)
     # Timer region (the ornate circle with digits)
     TIMER_Y1, TIMER_Y2 = 110, 180
     TIMER_X1, TIMER_X2 = 920, 1000
