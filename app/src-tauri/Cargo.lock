@@ -3523,7 +3523,7 @@ dependencies = [
 
 [[package]]
 name = "spaghetti-lab"
-version = "2026.3.19-preview.3"
+version = "2026.3.19-preview.4"
 dependencies = [
  "rusqlite",
  "serde",
