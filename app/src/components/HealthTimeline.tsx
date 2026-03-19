@@ -147,6 +147,16 @@ export function HealthTimeline({
 
   const comebacks = visibleRounds.filter((r) => r.is_comeback);
 
+  // Compute chart time range for overlay positioning
+  const chartTimeRange = useMemo(() => {
+    if (chartData.length < 2) return { min: 0, max: 1 };
+    return { min: chartData[0].time_s, max: chartData[chartData.length - 1].time_s };
+  }, [chartData]);
+
+  // YAxis width (32) + left margin (4) = 36px offset for chart area
+  const chartLeftPx = 36;
+  const chartRightPx = 4; // right margin
+
   if (chartData.length === 0) {
     return (
       <div className="bg-surface-2 rounded-lg border border-surface-4/50 h-28 flex items-center justify-center text-text-muted text-sm">
@@ -160,7 +170,7 @@ export function HealthTimeline({
       <div className="flex items-center justify-between px-2 mb-1">
         <div className="flex items-center gap-2">
           <span className="text-[10px] text-text-muted uppercase tracking-wider font-medium">
-            Health & Tension
+            Health & Tension {visibleRounds.length > 0 && `(${visibleRounds.length} rounds)`}
           </span>
           {selectedMatch && (
             <>
@@ -200,6 +210,7 @@ export function HealthTimeline({
           )}
         </div>
       </div>
+      <div className="relative">
       <ResponsiveContainer width="100%" height={120}>
         <AreaChart
           data={chartData}
@@ -249,17 +260,6 @@ export function HealthTimeline({
             }}
           />
 
-          {/* Round boundary lines */}
-          {visibleRounds.map((r, i) => (
-            <ReferenceLine
-              key={`rb-${i}`}
-              x={r.round_end_ms / 1000}
-              stroke="#555570"
-              strokeDasharray="2 2"
-              strokeOpacity={0.5}
-            />
-          ))}
-
           {/* Note markers */}
           {notes.map((note, i) => (
             <ReferenceLine
@@ -304,8 +304,38 @@ export function HealthTimeline({
             connectNulls={true}
             isAnimationActive={false}
           />
+
+          {/* Round end markers removed — using overlay divs instead */}
         </AreaChart>
       </ResponsiveContainer>
+      {/* Round end marker overlays — positioned over chart area */}
+      <div style={{ position: "absolute", top: 0, bottom: 0, left: chartLeftPx, right: chartRightPx, pointerEvents: "none", zIndex: 10 }}>
+        {visibleRounds.map((r, i) => {
+          const t = r.round_end_ms / 1000;
+          const range = chartTimeRange.max - chartTimeRange.min;
+          if (range <= 0) return null;
+          const pct = ((t - chartTimeRange.min) / range) * 100;
+          if (pct < 0 || pct > 100) return null;
+          return (
+            <div
+              key={`rm-${i}`}
+              style={{
+                position: "absolute",
+                left: `${pct}%`,
+                top: 0,
+                bottom: 0,
+                width: 2,
+                backgroundColor: "#f0c040",
+              }}
+            >
+              <span style={{ position: "absolute", top: -1, left: 4, fontSize: 9, fontWeight: 700, color: "#f0c040", whiteSpace: "nowrap" }}>
+                {r.winner}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      </div>
 
       {/* P1 Tension gauge chart */}
       <div className="flex items-center gap-1 px-2 mt-1">
@@ -345,6 +375,16 @@ export function HealthTimeline({
               return [`${pct}%`, "P1 Tension"];
             }}
           />
+          {/* Round end markers */}
+          {visibleRounds.map((r, i) => (
+            <ReferenceLine
+              key={`t1rb-${i}`}
+              x={r.round_end_ms / 1000}
+              stroke="#f0c040"
+              strokeWidth={2}
+              strokeOpacity={0.8}
+            />
+          ))}
           {/* Tension spend markers for P1 */}
           {tensionSpends
             .filter((s) => s.side === "p1")
@@ -357,16 +397,6 @@ export function HealthTimeline({
                 strokeOpacity={0.7}
               />
             ))}
-          {/* Round boundary lines */}
-          {visibleRounds.map((r, i) => (
-            <ReferenceLine
-              key={`t1rb-${i}`}
-              x={r.round_end_ms / 1000}
-              stroke="#555570"
-              strokeDasharray="2 2"
-              strokeOpacity={0.3}
-            />
-          ))}
           <Area
             type="monotone"
             dataKey="t1"
@@ -418,6 +448,16 @@ export function HealthTimeline({
               return [`${pct}%`, "P2 Tension"];
             }}
           />
+          {/* Round end markers */}
+          {visibleRounds.map((r, i) => (
+            <ReferenceLine
+              key={`t2rb-${i}`}
+              x={r.round_end_ms / 1000}
+              stroke="#f0c040"
+              strokeWidth={2}
+              strokeOpacity={0.8}
+            />
+          ))}
           {/* Tension spend markers for P2 */}
           {tensionSpends
             .filter((s) => s.side === "p2")
@@ -430,16 +470,6 @@ export function HealthTimeline({
                 strokeOpacity={0.7}
               />
             ))}
-          {/* Round boundary lines */}
-          {visibleRounds.map((r, i) => (
-            <ReferenceLine
-              key={`t2rb-${i}`}
-              x={r.round_end_ms / 1000}
-              stroke="#555570"
-              strokeDasharray="2 2"
-              strokeOpacity={0.3}
-            />
-          ))}
           <Area
             type="monotone"
             dataKey="t2"
