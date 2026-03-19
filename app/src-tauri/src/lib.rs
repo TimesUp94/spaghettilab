@@ -5,6 +5,23 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use tauri::Emitter;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// Apply CREATE_NO_WINDOW on Windows so spawned processes don't show a console.
+#[cfg(target_os = "windows")]
+fn hide_window(cmd: &mut Command) -> &mut Command {
+    cmd.creation_flags(CREATE_NO_WINDOW)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hide_window(cmd: &mut Command) -> &mut Command {
+    cmd
+}
+
 // ── Data models ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Clone)]
@@ -1870,6 +1887,7 @@ async fn analyze_video(
 
     let mut cmd = Command::new("python");
     // Set PYTHONPATH so `import replanal` works from installed location
+    hide_window(&mut cmd);
     cmd.env("PYTHONPATH", project_root.to_str().unwrap())
         .arg(script.to_str().unwrap())
         .arg(&video_path)
@@ -1907,6 +1925,7 @@ async fn reanalyze_replay(
     let config = project_root.join("config").join("default.yaml");
 
     let mut cmd = Command::new("python");
+    hide_window(&mut cmd);
     cmd.env("PYTHONPATH", project_root.to_str().unwrap())
         .arg(script.to_str().unwrap())
         .arg(video_path.to_str().unwrap())
@@ -1947,7 +1966,9 @@ async fn export_clip(
     let start_s = start_ms / 1000.0;
     let duration_s = (end_ms - start_ms) / 1000.0;
 
-    let output = Command::new("ffmpeg")
+    let mut ffmpeg_cmd = Command::new("ffmpeg");
+    hide_window(&mut ffmpeg_cmd);
+    let output = ffmpeg_cmd
         .args([
             "-y",
             "-ss",
@@ -2256,7 +2277,9 @@ async fn extract_preview_frame(
     let preview_path = output_dir.join(".vod_preview.png");
     std::fs::create_dir_all(&output_dir).map_err(|e| e.to_string())?;
 
-    let output = Command::new("ffmpeg")
+    let mut ffmpeg_cmd = Command::new("ffmpeg");
+    hide_window(&mut ffmpeg_cmd);
+    let output = ffmpeg_cmd
         .args([
             "-y",
             "-ss", &format!("{:.3}", timestamp_secs),
@@ -2287,6 +2310,7 @@ async fn scan_vod(
     let script = project_root.join("scripts").join("split_vod.py");
 
     let mut cmd = Command::new("python");
+    hide_window(&mut cmd);
     cmd.env("PYTHONPATH", project_root.to_str().unwrap())
         .arg(script.to_str().unwrap())
         .arg(&video_path)
@@ -2400,7 +2424,9 @@ async fn cut_vod_sets(
         };
         let out_path = PathBuf::from(&output_dir).join(&filename);
 
-        let output = Command::new("ffmpeg")
+        let mut ffmpeg_cmd = Command::new("ffmpeg");
+        hide_window(&mut ffmpeg_cmd);
+        let output = ffmpeg_cmd
             .args([
                 "-y",
                 "-ss", &format!("{:.3}", start),
