@@ -539,11 +539,11 @@ fn detect_rounds_for_replay(
     }
 
     // ── Merge all boundary signals ──
-    // Game breaks (large data gaps) are exempt from the wallbreak timer filter
-    // because a multi-second gap is unambiguously a round/game boundary regardless
-    // of timer state (post-KO transition screens don't show readable timers).
+    // Only true game breaks (>5s data gaps) are exempt from the wallbreak timer
+    // filter. Gap-based HP resets (shorter gaps from super/burst VFX occlusion)
+    // must still pass the timer check — if the timer didn't reset to ≥90, the
+    // "reset" was just VFX covering the health bars, not a real round boundary.
     let game_break_set: std::collections::HashSet<usize> = game_breaks.iter()
-        .chain(gap_hp_resets.iter())
         .copied().collect();
 
     let mut all_indices: Vec<usize> = Vec::new();
@@ -1882,7 +1882,11 @@ async fn analyze_video(
 }
 
 #[tauri::command]
-async fn reanalyze_replay(db_path: String, replay_id: String) -> Result<(), String> {
+async fn reanalyze_replay(
+    app_handle: tauri::AppHandle,
+    db_path: String,
+    replay_id: String,
+) -> Result<(), String> {
     let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
     let video_path = resolve_video_for_replay(&conn, &replay_id)?;
     drop(conn);
@@ -1900,14 +1904,25 @@ async fn reanalyze_replay(db_path: String, replay_id: String) -> Result<(), Stri
         .arg("--config")
         .arg(config.to_str().unwrap())
         .arg("--output")
-        .arg(output_dir.to_str().unwrap());
+        .arg(output_dir.to_str().unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
 
-    let output = cmd.output().map_err(|e| format!("Failed to run Python: {}", e))?;
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to run Python: {}", e))?;
+    let stdout = child.stdout.take().unwrap();
 
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Reanalysis failed:\n{}\n{}", stdout, stderr));
+    for line in std::io::BufReader::new(stdout).lines() {
+        if let Ok(line) = line {
+            // Forward lines that contain frame progress
+            if line.contains("Processed") || line.contains("Analyzing") || line.contains("Detected") {
+                let _ = app_handle.emit("reanalyze-progress", &line);
+            }
+        }
+    }
+
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err("Reanalysis failed. Check console for errors.".into());
     }
 
     Ok(())
@@ -2561,7 +2576,10 @@ async fn save_spag(spag_path: String, db_path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn reanalyze_all(db_path: String) -> Result<(), String> {
+async fn reanalyze_all(
+    app_handle: tauri::AppHandle,
+    db_path: String,
+) -> Result<(), String> {
     let ids: Vec<String> = {
         let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
         let mut stmt = conn
@@ -2575,9 +2593,20 @@ async fn reanalyze_all(db_path: String) -> Result<(), String> {
         result
     };
 
-    for id in &ids {
-        reanalyze_replay(db_path.clone(), id.clone()).await?;
+    let total = ids.len();
+    for (i, id) in ids.iter().enumerate() {
+        let msg = format!("Replay {}/{}: {}", i + 1, total, id);
+        let _ = app_handle.emit("reanalyze-progress", &msg);
+        eprintln!("[REANALYZE] {}", msg);
+        // Run on blocking thread so the event loop can dispatch the emit
+        let handle = app_handle.clone();
+        let db = db_path.clone();
+        let rid = id.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            tauri::async_runtime::block_on(reanalyze_replay(handle, db, rid))
+        }).await.map_err(|e| e.to_string())??;
     }
+    let _ = app_handle.emit("reanalyze-progress", format!("Done — {} replays reanalyzed", total));
     Ok(())
 }
 

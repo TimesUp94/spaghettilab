@@ -96,6 +96,37 @@ function groupRoundsIntoMatches(rounds: RoundResult[]): Match[] {
 
 type AppView = "welcome" | "analyze" | "split" | "dashboard";
 
+function ReanalyzeOverlay({ isAll }: { isAll: boolean }) {
+  const [progress, setProgress] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    const unlistenPromise = listen<string>("reanalyze-progress", (event) => {
+      if (!cancelled) setProgress(event.payload);
+    });
+    return () => {
+      cancelled = true;
+      unlistenPromise.then((fn) => fn());
+    };
+  }, []);
+
+  return (
+    <div className="absolute inset-0 z-50 bg-surface-0/80 backdrop-blur-sm flex items-center justify-center">
+      <div className="flex flex-col items-center gap-3 bg-surface-2 rounded-xl border border-surface-4/50 px-8 py-6 shadow-2xl min-w-[320px]">
+        <div className="w-10 h-10 border-2 border-accent-purple/30 border-t-accent-purple rounded-full animate-spin" />
+        <div className="text-text-primary text-sm font-medium">
+          {isAll ? "Reanalyzing all replays..." : "Reanalyzing replay..."}
+        </div>
+        {progress && (
+          <div className="text-text-muted text-xs text-center max-w-[280px] truncate">
+            {progress}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [view, setView] = useState<AppView>("welcome");
 
@@ -659,7 +690,10 @@ export default function App() {
         />
 
         {/* Main content */}
-        <main className="flex-1 flex flex-col overflow-hidden">
+        <main className="flex-1 flex flex-col overflow-hidden relative">
+          {(reanalyzing || reanalyzingAll) && (
+            <ReanalyzeOverlay isAll={reanalyzingAll} />
+          )}
           {loading ? (
             <div className="flex-1 flex items-center justify-center">
               <div className="flex flex-col items-center gap-3">

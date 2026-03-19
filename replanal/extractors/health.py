@@ -66,8 +66,10 @@ class HealthBarExtractor(BaseExtractor):
     _MEDIAN_WINDOW = 9
 
     # Non-gameplay gap (in frame numbers) that triggers partial state reset.
-    # Resets median buffers, but preserves max_w calibration.
-    _RESET_GAP = 15
+    # Must be longer than super/burst VFX occlusions (~2-3s = 60-90 frames)
+    # so the median buffer survives and can reject the post-VFX HP spike.
+    # Real round transitions have gaps > 3-5s (90-150+ frames).
+    _RESET_GAP = 100
 
     # Max rate health can drop per frame (prevents instant 0% from noise).
     # 3% per frame ≈ 90% per second at 30fps — well above any real damage rate.
