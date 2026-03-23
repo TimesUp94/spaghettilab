@@ -22,6 +22,26 @@ fn hide_window(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
+/// Returns the Python binary name. Prefers "python3" on non-Windows.
+fn python_bin() -> &'static str {
+    #[cfg(target_os = "windows")]
+    { "python" }
+    #[cfg(not(target_os = "windows"))]
+    {
+        use std::sync::OnceLock;
+        static PYTHON: OnceLock<&str> = OnceLock::new();
+        PYTHON.get_or_init(|| {
+            if Command::new("python3")
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok()
+            { "python3" } else { "python" }
+        })
+    }
+}
+
 // ── Data models ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Clone)]
@@ -1848,11 +1868,8 @@ fn default_output_paths() -> Result<(PathBuf, PathBuf), String> {
     }
 
     // Installed: use AppData/Local
-    let app_data = std::env::var("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs_fallback()
-        });
+    let app_data = dirs::data_local_dir()
+        .unwrap_or_else(|| dirs_fallback());
     let output_dir = app_data.join("SpaghettiLab").join("output");
     let db_path = output_dir.join("analysis.db");
     Ok((output_dir, db_path))
@@ -1885,7 +1902,7 @@ async fn analyze_video(
     let script = project_root.join("scripts").join("analyze_replay.py");
     let config = project_root.join("config").join("default.yaml");
 
-    let mut cmd = Command::new("python");
+    let mut cmd = Command::new(python_bin());
     // Set PYTHONPATH so `import replanal` works from installed location
     hide_window(&mut cmd);
     cmd.env("PYTHONPATH", project_root.to_str().unwrap())
@@ -1924,7 +1941,7 @@ async fn reanalyze_replay(
     let script = project_root.join("scripts").join("analyze_replay.py");
     let config = project_root.join("config").join("default.yaml");
 
-    let mut cmd = Command::new("python");
+    let mut cmd = Command::new(python_bin());
     hide_window(&mut cmd);
     cmd.env("PYTHONPATH", project_root.to_str().unwrap())
         .arg(script.to_str().unwrap())
@@ -2275,7 +2292,7 @@ async fn download_vod(
     output_dir: String,
 ) -> Result<String, String> {
     // Ensure yt-dlp is installed (auto-install if missing)
-    let check = Command::new("python")
+    let check = Command::new(python_bin())
         .args(["-m", "yt_dlp", "--version"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2288,7 +2305,7 @@ async fn download_vod(
 
     if needs_install {
         let _ = app_handle.emit("vod-download-progress", "Installing yt-dlp...");
-        let mut pip_cmd = Command::new("python");
+        let mut pip_cmd = Command::new(python_bin());
         hide_window(&mut pip_cmd);
         let pip_status = pip_cmd
             .args(["-m", "pip", "install", "yt-dlp"])
@@ -2304,7 +2321,7 @@ async fn download_vod(
 
     // Use python -m yt_dlp to download the VOD as mp4
     // -u forces unbuffered stdout/stderr so progress lines arrive in real time
-    let mut cmd = Command::new("python");
+    let mut cmd = Command::new(python_bin());
     hide_window(&mut cmd);
     cmd.arg("-u").args(["-m", "yt_dlp"])
         .arg(&url)
@@ -2423,7 +2440,7 @@ async fn scan_vod(
     let project_root = find_project_root()?;
     let script = project_root.join("scripts").join("split_vod.py");
 
-    let mut cmd = Command::new("python");
+    let mut cmd = Command::new(python_bin());
     hide_window(&mut cmd);
     cmd.env("PYTHONPATH", project_root.to_str().unwrap())
         .arg(script.to_str().unwrap())
@@ -2758,9 +2775,8 @@ async fn open_spag(spag_path: String) -> Result<SpagSession, String> {
     }
 
     // Deterministic extraction dir based on file path
-    let app_data = std::env::var("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| dirs_fallback());
+    let app_data = dirs::data_local_dir()
+        .unwrap_or_else(|| dirs_fallback());
     let hash = {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -2993,9 +3009,8 @@ async fn open_spagz(spagz_path: String) -> Result<SpagzSession, String> {
     }
 
     // Deterministic extraction dir based on file path
-    let app_data = std::env::var("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| dirs_fallback());
+    let app_data = dirs::data_local_dir()
+        .unwrap_or_else(|| dirs_fallback());
     let hash = {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};

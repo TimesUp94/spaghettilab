@@ -10,6 +10,7 @@
     "beforeBuildCommand": "npm run build"
   },
   "bundle": {
+    "category": "Utility",
     "createUpdaterArtifacts": true,
     "fileAssociations": [
       {

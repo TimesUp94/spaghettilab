@@ -467,14 +467,14 @@ export function VideoPlayer({
         {onSaveDrawing && (
           <button
             onClick={toggleDrawingMode}
-            className={`text-[10px] px-1.5 py-0.5 rounded cursor-pointer transition-colors ${
+            className={`btn-ghost !px-2 !py-1 text-xs font-medium cursor-pointer transition-colors ${
               drawingMode
-                ? "bg-accent-gold/20 text-accent-gold"
-                : "text-text-muted hover:text-text-secondary"
+                ? "!bg-accent-gold/20 !text-accent-gold"
+                : ""
             }`}
             title="Toggle drawing mode (D)"
           >
-            Draw
+            &#9998; Draw
           </button>
         )}
 

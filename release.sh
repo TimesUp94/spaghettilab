@@ -180,10 +180,14 @@ echo "Creating GitHub release..."
 NOTES="$(cat <<EOF
 ## Download
 
-- **Spaghetti Lab_${VERSION}_x64-setup.exe** -- Windows installer (recommended, registers .spag file association)
-- **spaghetti-lab.exe** -- Standalone executable
+- **Windows:** Spaghetti Lab_${VERSION}_x64-setup.exe (installer, recommended)
+- **macOS (Apple Silicon):** Spaghetti Lab_${VERSION}_aarch64.dmg
+- **macOS (Intel):** Spaghetti Lab_${VERSION}_x64.dmg
+- **Linux:** spaghetti-lab_${VERSION}_amd64.AppImage / .deb
 
 > This is a preview release. Expect bugs. The app will check for updates automatically.
+>
+> macOS/Linux builds are produced by CI — run \`./release.sh\` locally for Windows only.
 EOF
 )"
 

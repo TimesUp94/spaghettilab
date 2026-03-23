@@ -3525,6 +3525,7 @@ dependencies = [
 name = "spaghetti-lab"
 version = "2026.3.23-preview.2"
 dependencies = [
+ "dirs",
  "rusqlite",
  "serde",
  "serde_json",
