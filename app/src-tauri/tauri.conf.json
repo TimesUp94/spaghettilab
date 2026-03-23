@@ -16,6 +16,11 @@
         "ext": ["spag"],
         "mimeType": "application/x-spaghetti-lab",
         "description": "Spaghetti Lab Replay Analysis"
+      },
+      {
+        "ext": ["spagz"],
+        "mimeType": "application/x-spaghetti-lab-lite",
+        "description": "Spaghetti Lab Analysis (no video)"
       }
     ],
     "resources": {

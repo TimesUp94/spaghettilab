@@ -109,6 +109,15 @@ export interface SpagSession {
   replay_id: string;
 }
 
+export interface SpagzSession {
+  db_path: string;
+  video_hint: string;
+  spagz_path: string;
+  replay_id: string;
+}
+
+export type VideoMode = "local" | "url" | "none";
+
 export type ActiveTab = "matches" | "rounds" | "highlights" | "damage" | "notes";
 
 // VOD Splitter types

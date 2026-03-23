@@ -12,6 +12,7 @@ import type {
   Note,
   Drawing,
   SpagSession,
+  SpagzSession,
 } from "./types";
 
 export async function getReplays(dbPath: string): Promise<Replay[]> {
@@ -166,4 +167,18 @@ export async function openSpag(spagPath: string): Promise<SpagSession> {
 
 export async function saveSpag(spagPath: string, dbPath: string): Promise<void> {
   return invoke("save_spag", { spagPath, dbPath });
+}
+
+// .spagz file format (lightweight, no video)
+
+export async function exportSpagz(dbPath: string, replayId: string, outputPath: string): Promise<void> {
+  return invoke("export_spagz", { dbPath, replayId, outputPath });
+}
+
+export async function openSpagz(spagzPath: string): Promise<SpagzSession> {
+  return invoke("open_spagz", { spagzPath });
+}
+
+export async function saveSpagz(spagzPath: string, dbPath: string): Promise<void> {
+  return invoke("save_spagz", { spagzPath, dbPath });
 }

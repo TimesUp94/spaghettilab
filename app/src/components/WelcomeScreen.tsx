@@ -86,9 +86,9 @@ export function WelcomeScreen({ onAnalyze, onSplitVod, onOpenSpag, onOpenDatabas
             <div className="text-lg mb-1 opacity-70 group-hover:opacity-100 transition-opacity">
               &#128230;
             </div>
-            <div className="font-medium text-sm">Open .spag</div>
+            <div className="font-medium text-sm">Open Analysis</div>
             <div className="text-[10px] text-text-muted mt-1">
-              Open exported analysis
+              .spag / .spagz files
             </div>
           </button>
         </div>

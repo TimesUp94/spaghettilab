@@ -1,4 +1,4 @@
-import type { Replay } from "../types";
+import type { Replay, VideoMode } from "../types";
 
 interface Props {
   replays: Replay[];
@@ -12,6 +12,7 @@ interface Props {
   onReanalyzeAll?: () => void;
   reanalyzingAll?: boolean;
   onAnalyzeNew?: () => void;
+  videoMode?: VideoMode;
 }
 
 function formatDuration(ms: number): string {
@@ -40,7 +41,11 @@ function extractSetInfo(replayId: string): {
   return { number: "", players: replayId, bracket: "" };
 }
 
-export function Sidebar({ replays, selectedReplay, onSelect, onReload, reloading, onReanalyze, reanalyzing, onReanalyzeAll, reanalyzingAll, onAnalyzeNew }: Props) {
+export function Sidebar({ replays, selectedReplay, onSelect, onReload, reloading, onReanalyze, reanalyzing, onReanalyzeAll, reanalyzingAll, onAnalyzeNew, videoMode }: Props) {
+  // Hide reanalyze buttons when there's no local video
+  const showReanalyze = videoMode !== "url" && videoMode !== "none";
+  const effectiveOnReanalyze = showReanalyze ? onReanalyze : undefined;
+  const effectiveOnReanalyzeAll = showReanalyze ? onReanalyzeAll : undefined;
   return (
     <aside className="w-[260px] bg-surface-1 border-r border-surface-4/50 flex flex-col shrink-0">
       <div className="p-3 border-b border-surface-4/50 flex items-center justify-between">
@@ -48,9 +53,9 @@ export function Sidebar({ replays, selectedReplay, onSelect, onReload, reloading
           Sets ({replays.length})
         </h2>
         <div className="flex items-center gap-2">
-          {onReanalyzeAll && (
+          {effectiveOnReanalyzeAll && (
             <button
-              onClick={onReanalyzeAll}
+              onClick={effectiveOnReanalyzeAll}
               disabled={reanalyzingAll || reanalyzing || reloading}
               className="text-[10px] text-text-muted hover:text-accent-green transition-colors cursor-pointer disabled:opacity-50"
               title="Re-run full CV analysis on all sets"
@@ -58,9 +63,9 @@ export function Sidebar({ replays, selectedReplay, onSelect, onReload, reloading
               {reanalyzingAll ? "Analyzing..." : "Reanalyze All"}
             </button>
           )}
-          {onReanalyze && (
+          {effectiveOnReanalyze && (
             <button
-              onClick={onReanalyze}
+              onClick={effectiveOnReanalyze}
               disabled={reanalyzing || reanalyzingAll || reloading}
               className="text-[10px] text-text-muted hover:text-accent-green transition-colors cursor-pointer disabled:opacity-50"
               title="Re-run full CV analysis (Python + round detection)"

@@ -2303,9 +2303,10 @@ async fn download_vod(
     }
 
     // Use python -m yt_dlp to download the VOD as mp4
+    // -u forces unbuffered stdout/stderr so progress lines arrive in real time
     let mut cmd = Command::new("python");
     hide_window(&mut cmd);
-    cmd.args(["-m", "yt_dlp"])
+    cmd.arg("-u").args(["-m", "yt_dlp"])
         .arg(&url)
         .arg("-f").arg("best[ext=mp4]/best")
         .arg("--merge-output-format").arg("mp4")
@@ -2575,6 +2576,14 @@ pub struct SpagSession {
     pub replay_id: String,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct SpagzSession {
+    pub db_path: String,
+    pub video_hint: String,
+    pub spagz_path: String,
+    pub replay_id: String,
+}
+
 /// Resolve the video path for a replay (reusable helper).
 fn resolve_video_for_replay(conn: &Connection, replay_id: &str) -> Result<PathBuf, String> {
     let raw_path: String = conn
@@ -2691,6 +2700,21 @@ async fn export_spag(
         ensure_drawings_table(&src_conn)?;
         src_conn.execute(
             "INSERT INTO dst.drawings SELECT * FROM main.drawings WHERE replay_id = ?",
+            [&replay_id],
+        ).map_err(|e| e.to_string())?;
+
+        // Copy winner_overrides
+        src_conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS dst.winner_overrides (
+                replay_id   TEXT NOT NULL,
+                round_index INTEGER NOT NULL,
+                winner      TEXT NOT NULL,
+                PRIMARY KEY (replay_id, round_index)
+            );"
+        ).map_err(|e| e.to_string())?;
+        ensure_winner_overrides_table(&src_conn)?;
+        src_conn.execute(
+            "INSERT INTO dst.winner_overrides SELECT * FROM main.winner_overrides WHERE replay_id = ?",
             [&replay_id],
         ).map_err(|e| e.to_string())?;
 
@@ -2823,6 +2847,216 @@ async fn save_spag(spag_path: String, db_path: String) -> Result<(), String> {
     Ok(())
 }
 
+// ── .spagz file format (lightweight, no video) ──────────────────────────────
+
+/// Helper: copy a single replay's data (all tables) into an attached "dst" database.
+/// Caller must ATTACH the destination as "dst" beforehand and DETACH after.
+fn copy_replay_tables_to_dst(src_conn: &Connection, replay_id: &str, rewrite_video: Option<&str>) -> Result<(), String> {
+    src_conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS dst.replays (
+            replay_id TEXT PRIMARY KEY,
+            video_path TEXT,
+            duration_ms REAL,
+            frame_count INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS dst.frame_data (
+            replay_id TEXT,
+            frame_number INTEGER,
+            timestamp_ms REAL,
+            p1_health_pct REAL,
+            p2_health_pct REAL,
+            timer_value INTEGER,
+            p1_rounds_won INTEGER,
+            p2_rounds_won INTEGER,
+            p1_tension_pct REAL,
+            p2_tension_pct REAL
+        );
+        CREATE TABLE IF NOT EXISTS dst.damage_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            replay_id TEXT,
+            timestamp_ms REAL,
+            frame_start INTEGER,
+            frame_end INTEGER,
+            target_side INTEGER,
+            damage_pct REAL,
+            pre_health_pct REAL,
+            post_health_pct REAL
+        );
+        CREATE TABLE IF NOT EXISTS dst.notes (
+            note_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            replay_id TEXT NOT NULL,
+            timestamp_ms REAL NOT NULL,
+            text TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS dst.drawings (
+            drawing_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            replay_id TEXT NOT NULL,
+            timestamp_ms REAL NOT NULL,
+            strokes_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(replay_id, timestamp_ms)
+        );
+        CREATE TABLE IF NOT EXISTS dst.winner_overrides (
+            replay_id   TEXT NOT NULL,
+            round_index INTEGER NOT NULL,
+            winner      TEXT NOT NULL,
+            PRIMARY KEY (replay_id, round_index)
+        );"
+    ).map_err(|e| e.to_string())?;
+
+    // Copy replays row
+    if let Some(vp) = rewrite_video {
+        src_conn.execute(
+            "INSERT INTO dst.replays SELECT replay_id, ?, duration_ms, frame_count FROM main.replays WHERE replay_id = ?",
+            rusqlite::params![vp, replay_id],
+        ).map_err(|e| e.to_string())?;
+    } else {
+        src_conn.execute(
+            "INSERT INTO dst.replays SELECT * FROM main.replays WHERE replay_id = ?",
+            [replay_id],
+        ).map_err(|e| e.to_string())?;
+    }
+
+    src_conn.execute(
+        "INSERT INTO dst.frame_data SELECT * FROM main.frame_data WHERE replay_id = ?",
+        [replay_id],
+    ).map_err(|e| e.to_string())?;
+
+    src_conn.execute(
+        "INSERT INTO dst.damage_events SELECT * FROM main.damage_events WHERE replay_id = ?",
+        [replay_id],
+    ).map_err(|e| e.to_string())?;
+
+    ensure_notes_table(src_conn)?;
+    src_conn.execute(
+        "INSERT INTO dst.notes SELECT * FROM main.notes WHERE replay_id = ?",
+        [replay_id],
+    ).map_err(|e| e.to_string())?;
+
+    ensure_drawings_table(src_conn)?;
+    src_conn.execute(
+        "INSERT INTO dst.drawings SELECT * FROM main.drawings WHERE replay_id = ?",
+        [replay_id],
+    ).map_err(|e| e.to_string())?;
+
+    ensure_winner_overrides_table(src_conn)?;
+    src_conn.execute(
+        "INSERT INTO dst.winner_overrides SELECT * FROM main.winner_overrides WHERE replay_id = ?",
+        [replay_id],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn export_spagz(
+    db_path: String,
+    replay_id: String,
+    output_path: String,
+) -> Result<(), String> {
+    let src_conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+
+    // Create temp DB with just this replay's data — preserve original video_path
+    let tmp_db = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
+    let tmp_db_path = tmp_db.path().to_path_buf();
+    {
+        let tmp_str = tmp_db_path.to_string_lossy().replace('\\', "/");
+        src_conn.execute(&format!("ATTACH DATABASE '{}' AS dst", tmp_str), [])
+            .map_err(|e| e.to_string())?;
+
+        copy_replay_tables_to_dst(&src_conn, &replay_id, None)?;
+
+        src_conn.execute("DETACH DATABASE dst", []).map_err(|e| e.to_string())?;
+    }
+
+    // Build ZIP with only replay.db (no video)
+    let out_file = std::fs::File::create(&output_path)
+        .map_err(|e| format!("Cannot create {}: {}", output_path, e))?;
+    let mut zip = zip::ZipWriter::new(out_file);
+
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    zip.start_file("replay.db", options).map_err(|e| e.to_string())?;
+    let db_bytes = std::fs::read(&tmp_db_path).map_err(|e| e.to_string())?;
+    zip.write_all(&db_bytes).map_err(|e| e.to_string())?;
+
+    zip.finish().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn open_spagz(spagz_path: String) -> Result<SpagzSession, String> {
+    let spagz = PathBuf::from(&spagz_path);
+    if !spagz.exists() {
+        return Err(format!("File not found: {}", spagz_path));
+    }
+
+    // Deterministic extraction dir based on file path
+    let app_data = std::env::var("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| dirs_fallback());
+    let hash = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        spagz_path.hash(&mut h);
+        h.finish()
+    };
+    let session_dir = app_data.join("SpaghettiLab").join("spag_sessions").join(format!("{:016x}", hash));
+    std::fs::create_dir_all(&session_dir).map_err(|e| e.to_string())?;
+
+    let db_dest = session_dir.join("replay.db");
+
+    // Extract only replay.db
+    let file = std::fs::File::open(&spagz).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    {
+        let mut entry = archive.by_name("replay.db").map_err(|e| e.to_string())?;
+        let mut out = std::fs::File::create(&db_dest).map_err(|e| e.to_string())?;
+        std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
+    }
+
+    // Read replay_id and video_path hint from extracted DB
+    let conn = Connection::open(&db_dest).map_err(|e| e.to_string())?;
+    let (replay_id, video_hint): (String, String) = conn
+        .query_row("SELECT replay_id, COALESCE(video_path, '') FROM replays LIMIT 1", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+
+    Ok(SpagzSession {
+        db_path: db_dest.to_string_lossy().to_string(),
+        video_hint,
+        spagz_path,
+        replay_id,
+    })
+}
+
+#[tauri::command]
+async fn save_spagz(spagz_path: String, db_path: String) -> Result<(), String> {
+    let spagz = PathBuf::from(&spagz_path);
+
+    // Write to a temp file next to the original, then rename
+    let tmp_path = spagz.with_extension("spagz.tmp");
+    {
+        let out_file = std::fs::File::create(&tmp_path).map_err(|e| e.to_string())?;
+        let mut zip = zip::ZipWriter::new(out_file);
+
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zip.start_file("replay.db", options).map_err(|e| e.to_string())?;
+        let db_bytes = std::fs::read(&db_path).map_err(|e| e.to_string())?;
+        zip.write_all(&db_bytes).map_err(|e| e.to_string())?;
+
+        zip.finish().map_err(|e| e.to_string())?;
+    }
+
+    // Atomic rename
+    std::fs::rename(&tmp_path, &spagz).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 async fn reanalyze_all(
     app_handle: tauri::AppHandle,
@@ -2870,13 +3104,20 @@ pub fn run() {
             // Check if launched with a .spag file argument (file association)
             let args: Vec<String> = std::env::args().collect();
             if let Some(path) = args.get(1) {
-                if path.ends_with(".spag") {
+                let event_name = if path.ends_with(".spagz") {
+                    Some("open-spagz-file")
+                } else if path.ends_with(".spag") {
+                    Some("open-spag-file")
+                } else {
+                    None
+                };
+                if let Some(event) = event_name {
                     let path = path.clone();
                     let handle = app.handle().clone();
                     // Emit after a short delay so frontend is ready
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(500));
-                        let _ = handle.emit("open-spag-file", &path);
+                        let _ = handle.emit(event, &path);
                     });
                 }
             }
@@ -2909,6 +3150,9 @@ pub fn run() {
             export_spag,
             open_spag,
             save_spag,
+            export_spagz,
+            open_spagz,
+            save_spagz,
             set_round_winner,
         ])
         .run(tauri::generate_context!())

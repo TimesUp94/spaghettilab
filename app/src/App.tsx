@@ -12,6 +12,8 @@ import type {
   Note,
   Drawing,
   SpagSession,
+  SpagzSession,
+  VideoMode,
   ActiveTab,
 } from "./types";
 import {
@@ -36,6 +38,9 @@ import {
   exportSpag,
   openSpag,
   saveSpag,
+  exportSpagz,
+  openSpagz,
+  saveSpagz,
 } from "./api";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Sidebar } from "./components/Sidebar";
@@ -52,6 +57,7 @@ import { AnalysisProgress } from "./components/AnalysisProgress";
 import { SplitVodView } from "./components/SplitVodView";
 import { NotesPanel } from "./components/NotesPanel";
 import { UpdateBanner } from "./components/UpdateBanner";
+import { SpagzVideoModal } from "./components/SpagzVideoModal";
 
 /** Group rounds into matches (first-to-2 round wins). */
 function groupRoundsIntoMatches(rounds: RoundResult[]): Match[] {
@@ -166,8 +172,13 @@ export default function App() {
     null
   );
   const [spagSession, setSpagSession] = useState<SpagSession | null>(null);
+  const [spagzSession, setSpagzSession] = useState<SpagzSession | null>(null);
+  const [videoMode, setVideoMode] = useState<VideoMode>("local");
   const [savingSpag, setSavingSpag] = useState(false);
   const [exportingSpag, setExportingSpag] = useState(false);
+  const [exportingSpagz, setExportingSpagz] = useState(false);
+  const [showSpagzVideoModal, setShowSpagzVideoModal] = useState(false);
+  const [pendingSpagzSession, setPendingSpagzSession] = useState<SpagzSession | null>(null);
 
   // Resizable split between top (video/timeline) and bottom (tabs)
   const [topHeight, setTopHeight] = useState<number | string>("55%");
@@ -548,14 +559,34 @@ export default function App() {
     }
   }, []);
 
+  const openSpagzFile = useCallback(async (path: string) => {
+    setLoading(true);
+    setError(null);
+    try {
+      const session = await openSpagz(path);
+      setPendingSpagzSession(session);
+      setShowSpagzVideoModal(true);
+    } catch (err) {
+      console.error("Failed to open .spagz:", err);
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   const handleOpenSpag = useCallback(async () => {
     const selected = await open({
       multiple: false,
-      filters: [{ name: "Spaghetti Lab Analysis", extensions: ["spag"] }],
+      filters: [{ name: "Spaghetti Lab Analysis", extensions: ["spag", "spagz"] }],
     });
     if (!selected) return;
-    await openSpagFile(selected as string);
-  }, [openSpagFile]);
+    const path = selected as string;
+    if (path.endsWith(".spagz")) {
+      await openSpagzFile(path);
+    } else {
+      await openSpagFile(path);
+    }
+  }, [openSpagFile, openSpagzFile]);
 
   const handleExportSpag = useCallback(async () => {
     if (!dbPath || !selectedReplay) return;
@@ -588,13 +619,140 @@ export default function App() {
     }
   }, [spagSession]);
 
-  // Listen for .spag file association (app launched with .spag argument)
+  // .spagz file support
+  const loadSpagzReplayData = useCallback(async (session: SpagzSession) => {
+    setSpagzSession(session);
+    setDbPath(session.db_path);
+    const reps = await getReplays(session.db_path);
+    setReplays(reps);
+    setView("dashboard");
+
+    const replay = reps.find(r => r.replay_id === session.replay_id) || reps[0];
+    if (replay) {
+      setSelectedReplay(replay);
+      setSelectedMatchIndex(null);
+      const [fd, de, rn, st, hl, nt, dr] = await Promise.all([
+        getFrameData(session.db_path, replay.replay_id),
+        getDamageEvents(session.db_path, replay.replay_id),
+        getRounds(session.db_path, replay.replay_id),
+        getMatchStats(session.db_path, replay.replay_id),
+        getHighlights(session.db_path, replay.replay_id),
+        getNotes(session.db_path, replay.replay_id).catch(() => [] as Note[]),
+        getDrawings(session.db_path, replay.replay_id).catch(() => [] as Drawing[]),
+      ]);
+      setFrameData(fd);
+      setDamageEvents(de);
+      setRounds(rn);
+      setStats(st);
+      setHighlights(hl);
+      setNotes(nt);
+      setDrawings(dr);
+      setActiveTab("matches");
+    }
+  }, []);
+
+  const handleSpagzLocalFile = useCallback(async (filePath: string) => {
+    setShowSpagzVideoModal(false);
+    if (!pendingSpagzSession) return;
+    setLoading(true);
+    try {
+      setVideoPath(filePath);
+      try {
+        setVideoSrc(convertFileSrc(filePath));
+      } catch {
+        setVideoSrc(null);
+      }
+      setVideoMode("local");
+      await loadSpagzReplayData(pendingSpagzSession);
+    } catch (err) {
+      console.error("Failed to load .spagz:", err);
+      setError(String(err));
+    } finally {
+      setLoading(false);
+      setPendingSpagzSession(null);
+    }
+  }, [pendingSpagzSession, loadSpagzReplayData]);
+
+  const handleSpagzStreamUrl = useCallback(async (url: string) => {
+    setShowSpagzVideoModal(false);
+    if (!pendingSpagzSession) return;
+    setLoading(true);
+    try {
+      setVideoSrc(url);
+      setVideoPath(null);
+      setVideoMode("url");
+      await loadSpagzReplayData(pendingSpagzSession);
+    } catch (err) {
+      console.error("Failed to load .spagz:", err);
+      setError(String(err));
+    } finally {
+      setLoading(false);
+      setPendingSpagzSession(null);
+    }
+  }, [pendingSpagzSession, loadSpagzReplayData]);
+
+  const handleSpagzSkip = useCallback(async () => {
+    setShowSpagzVideoModal(false);
+    if (!pendingSpagzSession) return;
+    setLoading(true);
+    try {
+      setVideoSrc(null);
+      setVideoPath(null);
+      setVideoMode("none");
+      await loadSpagzReplayData(pendingSpagzSession);
+    } catch (err) {
+      console.error("Failed to load .spagz:", err);
+      setError(String(err));
+    } finally {
+      setLoading(false);
+      setPendingSpagzSession(null);
+    }
+  }, [pendingSpagzSession, loadSpagzReplayData]);
+
+  const handleExportSpagz = useCallback(async () => {
+    if (!dbPath || !selectedReplay) return;
+    const dest = await save({
+      filters: [{ name: "Spaghetti Lab Analysis (no video)", extensions: ["spagz"] }],
+      defaultPath: `${selectedReplay.replay_id}.spagz`,
+    });
+    if (!dest) return;
+    setExportingSpagz(true);
+    try {
+      await exportSpagz(dbPath, selectedReplay.replay_id, dest);
+    } catch (err) {
+      console.error("Failed to export .spagz:", err);
+      setError(String(err));
+    } finally {
+      setExportingSpagz(false);
+    }
+  }, [dbPath, selectedReplay]);
+
+  const handleSaveSpagz = useCallback(async () => {
+    if (!spagzSession) return;
+    setSavingSpag(true);
+    try {
+      await saveSpagz(spagzSession.spagz_path, spagzSession.db_path);
+    } catch (err) {
+      console.error("Failed to save .spagz:", err);
+      setError(String(err));
+    } finally {
+      setSavingSpag(false);
+    }
+  }, [spagzSession]);
+
+  // Listen for .spag/.spagz file association (app launched with file argument)
   useEffect(() => {
-    const unlisten = listen<string>("open-spag-file", (event) => {
+    const unlisten1 = listen<string>("open-spag-file", (event) => {
       openSpagFile(event.payload);
     });
-    return () => { unlisten.then(fn => fn()); };
-  }, [openSpagFile]);
+    const unlisten2 = listen<string>("open-spagz-file", (event) => {
+      openSpagzFile(event.payload);
+    });
+    return () => {
+      unlisten1.then(fn => fn());
+      unlisten2.then(fn => fn());
+    };
+  }, [openSpagFile, openSpagzFile]);
 
   const handleOpenDefaultDb = useCallback(async () => {
     try {
@@ -651,6 +809,8 @@ export default function App() {
             onClick={() => {
               setDbPath(null);
               setSpagSession(null);
+              setSpagzSession(null);
+              setVideoMode("local");
               setView("welcome");
             }}
             className="flex items-center gap-2 hover:opacity-80 transition-opacity cursor-pointer"
@@ -666,11 +826,15 @@ export default function App() {
           </button>
           <span className="text-text-muted text-xs">|</span>
           <span className="text-text-secondary text-xs truncate max-w-[400px]">
-            {spagSession
+            {spagzSession
+              ? spagzSession.spagz_path.split(/[/\\]/).pop()
+              : spagSession
               ? spagSession.spag_path.split(/[/\\]/).pop()
               : dbPath?.split(/[/\\]/).pop()}
           </span>
-          {spagSession ? (
+          {spagzSession ? (
+            <span className="text-accent-gold text-[10px] font-medium">.spagz</span>
+          ) : spagSession ? (
             <span className="text-p2 text-[10px] font-medium">.spag</span>
           ) : (
             <span className="text-text-muted text-[10px]">
@@ -682,7 +846,16 @@ export default function App() {
           {error && (
             <span className="text-p1 text-xs mr-2">{error}</span>
           )}
-          {spagSession && (
+          {spagzSession && (
+            <button
+              onClick={handleSaveSpagz}
+              disabled={savingSpag}
+              className="btn-ghost text-xs text-accent-green border-accent-green/30 hover:bg-accent-green/10"
+            >
+              {savingSpag ? "Saving..." : "Save .spagz"}
+            </button>
+          )}
+          {spagSession && !spagzSession && (
             <button
               onClick={handleSaveSpag}
               disabled={savingSpag}
@@ -691,14 +864,23 @@ export default function App() {
               {savingSpag ? "Saving..." : "Save .spag"}
             </button>
           )}
-          {selectedReplay && !spagSession && (
-            <button
-              onClick={handleExportSpag}
-              disabled={exportingSpag}
-              className="btn-ghost text-xs text-p2 border-p2/30 hover:bg-p2/10"
-            >
-              {exportingSpag ? "Exporting..." : "Export .spag"}
-            </button>
+          {selectedReplay && !spagSession && !spagzSession && (
+            <>
+              <button
+                onClick={handleExportSpag}
+                disabled={exportingSpag}
+                className="btn-ghost text-xs text-p2 border-p2/30 hover:bg-p2/10"
+              >
+                {exportingSpag ? "Exporting..." : "Export .spag"}
+              </button>
+              <button
+                onClick={handleExportSpagz}
+                disabled={exportingSpagz}
+                className="btn-ghost text-xs text-accent-gold border-accent-gold/30 hover:bg-accent-gold/10"
+              >
+                {exportingSpagz ? "Exporting..." : "Export .spagz"}
+              </button>
+            </>
           )}
           <button onClick={handleOpenDb} className="btn-ghost text-xs">
             Open Database
@@ -722,6 +904,7 @@ export default function App() {
           onReanalyzeAll={dbPath ? handleReanalyzeAll : undefined}
           reanalyzingAll={reanalyzingAll}
           onAnalyzeNew={() => setView("analyze")}
+          videoMode={videoMode}
         />
 
         {/* Main content */}
@@ -910,13 +1093,27 @@ export default function App() {
         </main>
       </div>
 
-      {/* Export modal */}
-      {exportTarget && videoPath && (
+      {/* Export modal — only for local video */}
+      {exportTarget && videoPath && videoMode === "local" && (
         <ExportModal
           videoPath={videoPath}
           startMs={exportTarget.startMs}
           endMs={exportTarget.endMs}
           onClose={() => setExportTarget(null)}
+        />
+      )}
+
+      {/* Spagz video source modal */}
+      {showSpagzVideoModal && pendingSpagzSession && (
+        <SpagzVideoModal
+          videoHint={pendingSpagzSession.video_hint}
+          onLocalFile={handleSpagzLocalFile}
+          onStreamUrl={handleSpagzStreamUrl}
+          onSkip={handleSpagzSkip}
+          onCancel={() => {
+            setShowSpagzVideoModal(false);
+            setPendingSpagzSession(null);
+          }}
         />
       )}
     </div>
