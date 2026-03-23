@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { extractPreviewFrame, scanVod, cutVodSets } from "../api";
+import { extractPreviewFrame, scanVod, cutVodSets, downloadVod } from "../api";
 import type { VodRoiConfig, DetectedSetInfo } from "../types";
 import { RoiPicker } from "./RoiPicker";
 
@@ -11,7 +11,7 @@ interface Props {
   onCancel: () => void;
 }
 
-type SplitStep = "select" | "roi" | "scanning" | "results" | "cutting" | "done" | "error";
+type SplitStep = "select" | "downloading" | "roi" | "scanning" | "results" | "cutting" | "done" | "error";
 
 function formatTime(secs: number): string {
   const h = Math.floor(secs / 3600);
@@ -32,10 +32,49 @@ export function SplitVodView({ onComplete, onCancel }: Props) {
   const [cutPaths, setCutPaths] = useState<string[]>([]);
   const [outputDir, setOutputDir] = useState<string | null>(null);
   const [videoDuration, setVideoDuration] = useState<number>(0);
+  const [vodUrl, setVodUrl] = useState("");
+  const [downloadProgress, setDownloadProgress] = useState("");
 
   // Video dimensions (assume 1920x1080 for now — could probe)
   const videoWidth = 1920;
   const videoHeight = 1080;
+
+  // Listen for download progress events
+  useEffect(() => {
+    if (step !== "downloading") return;
+    let cancelled = false;
+    const unlistenPromise = listen<string>("vod-download-progress", (event) => {
+      if (!cancelled) {
+        setDownloadProgress(event.payload);
+      }
+    });
+    return () => {
+      cancelled = true;
+      unlistenPromise.then((fn) => fn());
+    };
+  }, [step]);
+
+  const handleDownloadVod = useCallback(async () => {
+    const url = vodUrl.trim();
+    if (!url) return;
+    setStep("downloading");
+    setDownloadProgress("Starting download...");
+    setError(null);
+    try {
+      // Download to system temp directory
+      const tmpDir = await import("@tauri-apps/api/path").then(m => m.tempDir());
+      const filePath = await downloadVod(url, tmpDir);
+      setVideoPath(filePath);
+      setVodUrl("");
+      // Auto-proceed to preview
+      const framePath = await extractPreviewFrame(filePath, 30);
+      setPreviewSrc(convertFileSrc(framePath));
+      setStep("roi");
+    } catch (err) {
+      setError(String(err));
+      setStep("error");
+    }
+  }, [vodUrl]);
 
   const handleSelectVideo = useCallback(async () => {
     const file = await open({
@@ -180,7 +219,45 @@ export function SplitVodView({ onComplete, onCancel }: Props) {
         </div>
 
         <div className="p-6 space-y-4">
-          {step === "scanning" ? (
+          {step === "downloading" ? (
+            (() => {
+              // Parse percentage from yt-dlp output like "[download]  45.2% of ~3.21GiB at 5.23MiB/s ETA 06:32"
+              const pctMatch = downloadProgress.match(/([\d.]+)%/);
+              const pct = pctMatch ? parseFloat(pctMatch[1]) : null;
+              // Extract speed and ETA
+              const speedMatch = downloadProgress.match(/at\s+([\d.]+\S+\/s)/);
+              const etaMatch = downloadProgress.match(/ETA\s+(\S+)/);
+              const sizeMatch = downloadProgress.match(/of\s+~?([\d.]+\S+)/);
+              return (
+                <div className="py-8 space-y-3">
+                  <div className="text-accent-purple text-sm font-medium text-center">
+                    Downloading VOD...
+                  </div>
+                  {/* Progress bar */}
+                  <div className="w-full bg-surface-3 rounded-full h-2">
+                    <div
+                      className={`h-2 rounded-full transition-all duration-300 ${pct != null ? "bg-accent-purple" : "bg-accent-purple animate-pulse"}`}
+                      style={{ width: pct != null ? `${pct}%` : "50%" }}
+                    />
+                  </div>
+                  {/* Stats row */}
+                  <div className="flex justify-between text-xs text-text-muted px-1">
+                    <span>{pct != null ? `${pct.toFixed(1)}%` : "Starting..."}</span>
+                    {sizeMatch && <span>{sizeMatch[1]}</span>}
+                    {speedMatch && <span>{speedMatch[1]}</span>}
+                    {etaMatch && <span>ETA {etaMatch[1]}</span>}
+                  </div>
+                  {/* Raw line for non-download messages (e.g. "Installing yt-dlp...", "[info] ...") */}
+                  {!pctMatch && downloadProgress && (
+                    <div className="text-text-muted text-[10px] font-mono text-center truncate px-4">
+                      {downloadProgress}
+                    </div>
+                  )}
+                </div>
+              );
+            })()
+
+          ) : step === "scanning" ? (
             <div className="text-center py-8">
               <div className="text-accent-purple text-sm animate-pulse mb-2">
                 Scanning VOD for gameplay...
@@ -300,9 +377,40 @@ export function SplitVodView({ onComplete, onCancel }: Props) {
           ) : (
             /* select step */
             <>
+              {/* Download from URL */}
               <div>
                 <label className="text-xs text-text-muted block mb-1.5">
-                  VOD File
+                  Download from Twitch / YouTube
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={vodUrl}
+                    onChange={(e) => setVodUrl(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") handleDownloadVod(); }}
+                    placeholder="https://www.twitch.tv/videos/..."
+                    className="flex-1 bg-surface-3 border border-surface-4 rounded-lg px-3 py-2 text-xs text-text-primary placeholder:text-text-muted/50 outline-none focus:border-accent-purple/50"
+                  />
+                  <button
+                    onClick={handleDownloadVod}
+                    disabled={!vodUrl.trim()}
+                    className="btn-primary !py-2 disabled:opacity-30 disabled:cursor-not-allowed"
+                  >
+                    Download
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <div className="flex-1 h-px bg-surface-4/50" />
+                <span className="text-[10px] text-text-muted">or</span>
+                <div className="flex-1 h-px bg-surface-4/50" />
+              </div>
+
+              {/* Local file */}
+              <div>
+                <label className="text-xs text-text-muted block mb-1.5">
+                  Local File
                 </label>
                 <div className="flex gap-2">
                   <div className="flex-1 bg-surface-3 border border-surface-4 rounded-lg px-3 py-2 text-xs text-text-secondary truncate">
@@ -315,8 +423,8 @@ export function SplitVodView({ onComplete, onCancel }: Props) {
               </div>
 
               <div className="text-[10px] text-text-muted">
-                Select a tournament VOD to detect and split into individual sets.
-                You can adjust the detection regions on the next screen.
+                Paste a Twitch or YouTube VOD link to download, or select a local file.
+                Requires <span className="font-mono text-text-secondary">yt-dlp</span> for downloads.
               </div>
 
               <div className="flex justify-end gap-2 pt-2">

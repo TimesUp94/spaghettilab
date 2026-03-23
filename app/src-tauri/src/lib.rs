@@ -2269,6 +2269,119 @@ pub struct DetectedSetInfo {
 }
 
 #[tauri::command]
+async fn download_vod(
+    app_handle: tauri::AppHandle,
+    url: String,
+    output_dir: String,
+) -> Result<String, String> {
+    // Ensure yt-dlp is installed (auto-install if missing)
+    let check = Command::new("python")
+        .args(["-m", "yt_dlp", "--version"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    let needs_install = match check {
+        Ok(s) => !s.success(),
+        Err(_) => true,
+    };
+
+    if needs_install {
+        let _ = app_handle.emit("vod-download-progress", "Installing yt-dlp...");
+        let mut pip_cmd = Command::new("python");
+        hide_window(&mut pip_cmd);
+        let pip_status = pip_cmd
+            .args(["-m", "pip", "install", "yt-dlp"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|e| format!("Failed to run pip: {}", e))?;
+
+        if !pip_status.success() {
+            return Err("Failed to install yt-dlp. Run manually: pip install yt-dlp".to_string());
+        }
+    }
+
+    // Use python -m yt_dlp to download the VOD as mp4
+    let mut cmd = Command::new("python");
+    hide_window(&mut cmd);
+    cmd.args(["-m", "yt_dlp"])
+        .arg(&url)
+        .arg("-f").arg("best[ext=mp4]/best")
+        .arg("--merge-output-format").arg("mp4")
+        .arg("-o").arg(format!("{}/%(title)s.%(ext)s", output_dir))
+        .arg("--newline")  // one progress line per update
+        .arg("--no-colors")
+        .arg("--print").arg("after_move:filepath")  // print final path after download
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to run yt-dlp: {}", e))?;
+
+    let stderr = child.stderr.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+
+    // Stream stderr progress to frontend
+    let handle = app_handle.clone();
+    let stderr_thread = std::thread::spawn(move || {
+        let reader = std::io::BufReader::new(stderr);
+        for line in reader.lines() {
+            if let Ok(line) = line {
+                let _ = handle.emit("vod-download-progress", &line);
+            }
+        }
+    });
+
+    // Capture stdout (final file path printed by --print after_move:filepath)
+    let stdout_thread = std::thread::spawn(move || {
+        let reader = std::io::BufReader::new(stdout);
+        let mut last_line = String::new();
+        for line in reader.lines() {
+            if let Ok(line) = line {
+                let trimmed = line.trim().to_string();
+                if !trimmed.is_empty() {
+                    last_line = trimmed;
+                }
+            }
+        }
+        last_line
+    });
+
+    let status = child.wait().map_err(|e| format!("yt-dlp process error: {}", e))?;
+    stderr_thread.join().ok();
+    let final_path = stdout_thread.join().map_err(|_| "Failed to read yt-dlp output".to_string())?;
+
+    if !status.success() {
+        return Err(format!("yt-dlp exited with code {}", status.code().unwrap_or(-1)));
+    }
+
+    if final_path.is_empty() {
+        // Fallback: find the most recently created mp4 in output_dir
+        let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+        if let Ok(entries) = std::fs::read_dir(&output_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map(|e| e == "mp4").unwrap_or(false) {
+                    if let Ok(meta) = path.metadata() {
+                        if let Ok(modified) = meta.modified() {
+                            if newest.as_ref().map_or(true, |(t, _)| modified > *t) {
+                                newest = Some((modified, path));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        match newest {
+            Some((_, path)) => Ok(path.to_string_lossy().to_string()),
+            None => Err("Download completed but could not find output file".to_string()),
+        }
+    } else {
+        Ok(final_path)
+    }
+}
+
+#[tauri::command]
 async fn extract_preview_frame(
     video_path: String,
     timestamp_secs: f64,
@@ -2782,6 +2895,7 @@ pub fn run() {
             reanalyze_all,
             export_clip,
             resolve_video_path,
+            download_vod,
             extract_preview_frame,
             scan_vod,
             cut_vod_sets,

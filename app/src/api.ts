@@ -90,6 +90,10 @@ export async function resolveVideoPath(
 
 // VOD Splitter
 
+export async function downloadVod(url: string, outputDir: string): Promise<string> {
+  return invoke("download_vod", { url, outputDir });
+}
+
 export async function extractPreviewFrame(
   videoPath: string,
   timestampSecs: number
