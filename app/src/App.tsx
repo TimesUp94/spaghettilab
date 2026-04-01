@@ -525,11 +525,33 @@ export default function App() {
 
       const reps = await getReplays(session.db_path);
       setReplays(reps);
-      setView("dashboard");
 
       // Load the replay (there's only one in a .spag)
       const replay = reps.find(r => r.replay_id === session.replay_id) || reps[0];
       if (replay) {
+        // Annotate-only session — route to annotate view
+        if (replay.frame_count === 0) {
+          setSelectedReplay(replay);
+          setAnnotateSrcType("file");
+          setAnnotateEmbedId(undefined);
+          setVideoPath(session.video_path);
+          try {
+            setVideoSrc(convertFileSrc(session.video_path));
+          } catch {
+            setVideoSrc(null);
+          }
+          const [nt, dr] = await Promise.all([
+            getNotes(session.db_path, replay.replay_id).catch(() => [] as Note[]),
+            getDrawings(session.db_path, replay.replay_id).catch(() => [] as Drawing[]),
+          ]);
+          setNotes(nt);
+          setDrawings(dr);
+          setView("annotate");
+          return;
+        }
+
+        // Full analysis — load all data and go to dashboard
+        setView("dashboard");
         setSelectedReplay(replay);
         setSelectedMatchIndex(null);
         const [fd, de, rn, st, hl, nt, dr] = await Promise.all([
@@ -571,6 +593,52 @@ export default function App() {
     setError(null);
     try {
       const session = await openSpagz(path);
+
+      // Check if this is an annotate-only session (no CV analysis)
+      const reps = await getReplays(session.db_path);
+      const replay = reps.find(r => r.replay_id === session.replay_id) || reps[0];
+
+      if (replay && replay.frame_count === 0) {
+        // Annotate session — try to embed directly from video_url
+        if (session.video_url) {
+          const detected = detectVideoSource(session.video_url);
+          if (detected.type !== "file") {
+            // YouTube/Twitch — go directly to annotate view with embed
+            const annotateSession: SpagzSession = { ...session };
+            setSpagzSession(annotateSession);
+            setDbPath(session.db_path);
+            setSelectedReplay(replay);
+            setAnnotateSrcType(detected.type);
+            setAnnotateEmbedId(detected.id);
+            setVideoSrc(null);
+            const [nt, dr] = await Promise.all([
+              getNotes(session.db_path, replay.replay_id).catch(() => [] as Note[]),
+              getDrawings(session.db_path, replay.replay_id).catch(() => [] as Drawing[]),
+            ]);
+            setNotes(nt);
+            setDrawings(dr);
+            setView("annotate");
+            return;
+          }
+        }
+        // Annotate session without embed URL — open without video
+        setSpagzSession(session);
+        setDbPath(session.db_path);
+        setSelectedReplay(replay);
+        setAnnotateSrcType("file");
+        setAnnotateEmbedId(undefined);
+        setVideoSrc(null);
+        const [nt, dr] = await Promise.all([
+          getNotes(session.db_path, replay.replay_id).catch(() => [] as Note[]),
+          getDrawings(session.db_path, replay.replay_id).catch(() => [] as Drawing[]),
+        ]);
+        setNotes(nt);
+        setDrawings(dr);
+        setView("annotate");
+        return;
+      }
+
+      // Full analysis — show SpagzVideoModal for user to provide video
       setPendingSpagzSession(session);
       setShowSpagzVideoModal(true);
     } catch (err) {
@@ -848,6 +916,19 @@ export default function App() {
           <AnnotateSetup
             onSession={handleAnnotateSession}
             onCancel={() => setShowAnnotateSetup(false)}
+          />
+        )}
+        {showSpagzVideoModal && pendingSpagzSession && (
+          <SpagzVideoModal
+            videoHint={pendingSpagzSession.video_hint}
+            videoUrl={pendingSpagzSession.video_url}
+            onLocalFile={handleSpagzLocalFile}
+            onStreamUrl={handleSpagzStreamUrl}
+            onSkip={handleSpagzSkip}
+            onCancel={() => {
+              setShowSpagzVideoModal(false);
+              setPendingSpagzSession(null);
+            }}
           />
         )}
       </>

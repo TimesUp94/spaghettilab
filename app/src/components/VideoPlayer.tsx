@@ -150,13 +150,17 @@ export function VideoPlayer({
     const el = embedRef.current;
     if (!el) return;
 
-    // YouTube API replaces the element, so we add a child div
+    // YouTube API replaces the target element with an iframe
     const target = document.createElement("div");
+    target.style.width = "100%";
+    target.style.height = "100%";
     el.appendChild(target);
 
     loadYouTubeApi().then(() => {
       if (destroyed) return;
       const player = new window.YT.Player(target, {
+        width: "100%",
+        height: "100%",
         videoId: embedId,
         playerVars: {
           autoplay: 0,
@@ -461,7 +465,7 @@ export function VideoPlayer({
             {isEmbed ? (
               <div
                 ref={embedRef}
-                className="w-full h-full"
+                className="w-full h-full [&_iframe]:!w-full [&_iframe]:!h-full"
                 onClick={drawingMode ? undefined : togglePlay}
               />
             ) : (
