@@ -2597,6 +2597,7 @@ pub struct SpagSession {
 pub struct SpagzSession {
     pub db_path: String,
     pub video_hint: String,
+    pub video_url: String,
     pub spagz_path: String,
     pub replay_id: String,
 }
@@ -2868,10 +2869,14 @@ async fn save_spag(spag_path: String, db_path: String) -> Result<(), String> {
 /// Helper: copy a single replay's data (all tables) into an attached "dst" database.
 /// Caller must ATTACH the destination as "dst" beforehand and DETACH after.
 fn copy_replay_tables_to_dst(src_conn: &Connection, replay_id: &str, rewrite_video: Option<&str>) -> Result<(), String> {
+    // Ensure video_url column exists in source (older DBs may lack it)
+    let _ = src_conn.execute("ALTER TABLE replays ADD COLUMN video_url TEXT", []);
+
     src_conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS dst.replays (
             replay_id TEXT PRIMARY KEY,
             video_path TEXT,
+            video_url TEXT,
             duration_ms REAL,
             frame_count INTEGER
         );
@@ -2921,15 +2926,17 @@ fn copy_replay_tables_to_dst(src_conn: &Connection, replay_id: &str, rewrite_vid
         );"
     ).map_err(|e| e.to_string())?;
 
-    // Copy replays row
+    // Copy replays row (explicit columns for video_url compatibility)
     if let Some(vp) = rewrite_video {
         src_conn.execute(
-            "INSERT INTO dst.replays SELECT replay_id, ?, duration_ms, frame_count FROM main.replays WHERE replay_id = ?",
+            "INSERT INTO dst.replays (replay_id, video_path, video_url, duration_ms, frame_count)
+             SELECT replay_id, ?, video_url, duration_ms, frame_count FROM main.replays WHERE replay_id = ?",
             rusqlite::params![vp, replay_id],
         ).map_err(|e| e.to_string())?;
     } else {
         src_conn.execute(
-            "INSERT INTO dst.replays SELECT * FROM main.replays WHERE replay_id = ?",
+            "INSERT INTO dst.replays (replay_id, video_path, video_url, duration_ms, frame_count)
+             SELECT replay_id, video_path, video_url, duration_ms, frame_count FROM main.replays WHERE replay_id = ?",
             [replay_id],
         ).map_err(|e| e.to_string())?;
     }
@@ -3032,17 +3039,24 @@ async fn open_spagz(spagz_path: String) -> Result<SpagzSession, String> {
         std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
     }
 
-    // Read replay_id and video_path hint from extracted DB
+    // Read replay_id, video_path hint, and video_url from extracted DB
     let conn = Connection::open(&db_dest).map_err(|e| e.to_string())?;
-    let (replay_id, video_hint): (String, String) = conn
-        .query_row("SELECT replay_id, COALESCE(video_path, '') FROM replays LIMIT 1", [], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
+
+    // Add video_url column if missing (older .spagz files)
+    let _ = conn.execute("ALTER TABLE replays ADD COLUMN video_url TEXT", []);
+
+    let (replay_id, video_hint, video_url): (String, String, String) = conn
+        .query_row(
+            "SELECT replay_id, COALESCE(video_path, ''), COALESCE(video_url, '') FROM replays LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
         .map_err(|e| e.to_string())?;
 
     Ok(SpagzSession {
         db_path: db_dest.to_string_lossy().to_string(),
         video_hint,
+        video_url,
         spagz_path,
         replay_id,
     })
@@ -3070,6 +3084,150 @@ async fn save_spagz(spagz_path: String, db_path: String) -> Result<(), String> {
     // Atomic rename
     std::fs::rename(&tmp_path, &spagz).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+async fn create_quick_session(
+    video_path: String,
+    video_url: Option<String>,
+) -> Result<SpagzSession, String> {
+    // Derive replay_id from URL video ID or filename
+    let replay_id = if let Some(ref url) = video_url {
+        // Try to extract video ID from YouTube/Twitch URL
+        if let Some(caps) = regex_lite_extract_id(url) {
+            caps
+        } else {
+            url_to_slug(url)
+        }
+    } else if !video_path.is_empty() {
+        PathBuf::from(&video_path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "untitled".to_string())
+    } else {
+        "untitled".to_string()
+    };
+
+    // Session dir based on replay_id
+    let app_data = dirs::data_local_dir().unwrap_or_else(|| dirs_fallback());
+    let session_dir = app_data
+        .join("SpaghettiLab")
+        .join("quick_sessions")
+        .join(&replay_id);
+    std::fs::create_dir_all(&session_dir).map_err(|e| e.to_string())?;
+
+    let db_path = session_dir.join("replay.db");
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS replays (
+            replay_id TEXT PRIMARY KEY,
+            video_path TEXT,
+            video_url TEXT,
+            duration_ms REAL,
+            frame_count INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS frame_data (
+            replay_id TEXT,
+            frame_number INTEGER,
+            timestamp_ms REAL,
+            p1_health_pct REAL,
+            p2_health_pct REAL,
+            timer_value INTEGER,
+            p1_rounds_won INTEGER,
+            p2_rounds_won INTEGER,
+            p1_tension_pct REAL,
+            p2_tension_pct REAL
+        );
+        CREATE TABLE IF NOT EXISTS damage_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            replay_id TEXT,
+            timestamp_ms REAL,
+            frame_start INTEGER,
+            frame_end INTEGER,
+            target_side INTEGER,
+            damage_pct REAL,
+            pre_health_pct REAL,
+            post_health_pct REAL
+        );
+        CREATE TABLE IF NOT EXISTS notes (
+            note_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            replay_id TEXT NOT NULL,
+            timestamp_ms REAL NOT NULL,
+            text TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS drawings (
+            drawing_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            replay_id TEXT NOT NULL,
+            timestamp_ms REAL NOT NULL,
+            strokes_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(replay_id, timestamp_ms)
+        );
+        CREATE TABLE IF NOT EXISTS winner_overrides (
+            replay_id TEXT NOT NULL,
+            round_index INTEGER NOT NULL,
+            winner TEXT NOT NULL,
+            PRIMARY KEY (replay_id, round_index)
+        );"
+    ).map_err(|e| e.to_string())?;
+
+    // Insert or update replay entry
+    conn.execute(
+        "INSERT OR REPLACE INTO replays (replay_id, video_path, video_url, duration_ms, frame_count) VALUES (?, ?, ?, 0, 0)",
+        rusqlite::params![replay_id, video_path, video_url],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(SpagzSession {
+        db_path: db_path.to_string_lossy().to_string(),
+        video_hint: video_path,
+        video_url: video_url.unwrap_or_default(),
+        spagz_path: String::new(),
+        replay_id,
+    })
+}
+
+/// Extract video ID from YouTube/Twitch URLs
+fn regex_lite_extract_id(url: &str) -> Option<String> {
+    // YouTube: various URL patterns
+    if url.contains("youtu.be/") || url.contains("youtube.com/") {
+        // Find the video ID after watch?v=, embed/, shorts/, live/, or youtu.be/
+        let markers = ["watch?v=", "embed/", "shorts/", "live/", "youtu.be/"];
+        for marker in markers {
+            if let Some(pos) = url.find(marker) {
+                let start = pos + marker.len();
+                let id: String = url[start..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+                    .collect();
+                if !id.is_empty() {
+                    return Some(id);
+                }
+            }
+        }
+    }
+    // Twitch: /videos/DIGITS
+    if let Some(pos) = url.find("twitch.tv/videos/") {
+        let start = pos + "twitch.tv/videos/".len();
+        let id: String = url[start..].chars().take_while(|c| c.is_ascii_digit()).collect();
+        if !id.is_empty() {
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// Fallback: convert a URL to a filesystem-safe slug
+fn url_to_slug(url: &str) -> String {
+    url.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string()
+        .chars()
+        .take(64)
+        .collect()
 }
 
 #[tauri::command]
@@ -3168,6 +3326,7 @@ pub fn run() {
             export_spagz,
             open_spagz,
             save_spagz,
+            create_quick_session,
             set_round_winner,
         ])
         .run(tauri::generate_context!())

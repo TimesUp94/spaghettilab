@@ -112,6 +112,7 @@ export interface SpagSession {
 export interface SpagzSession {
   db_path: string;
   video_hint: string;
+  video_url: string;
   spagz_path: string;
   replay_id: string;
 }

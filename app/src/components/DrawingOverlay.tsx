@@ -2,7 +2,7 @@ import { useRef, useEffect, useCallback } from "react";
 import type { Drawing, DrawingStroke } from "../types";
 
 interface Props {
-  videoRef: React.RefObject<HTMLVideoElement | null>;
+  currentTimeMs: number;
   drawings: Drawing[];
   drawingMode: boolean;
   activeTool: "pen" | "eraser";
@@ -17,7 +17,7 @@ const FADE_START_MS = 3000;
 const MIN_POINT_DIST = 0.002; // normalized distance threshold for downsampling
 
 export function DrawingOverlay({
-  videoRef,
+  currentTimeMs,
   drawings,
   drawingMode,
   activeTool,
@@ -97,8 +97,7 @@ export function DrawingOverlay({
       const { width, height } = canvas;
       ctx.clearRect(0, 0, width, height);
 
-      const video = videoRef.current;
-      const currentMs = video ? video.currentTime * 1000 : 0;
+      const currentMs = currentTimeMs;
 
       // Render saved drawings with fade
       for (const drawing of drawings) {
@@ -140,13 +139,12 @@ export function DrawingOverlay({
 
     rafRef.current = requestAnimationFrame(render);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [drawings, drawingMode, videoRef, syncSize, renderStrokes]);
+  }, [drawings, drawingMode, currentTimeMs, syncSize, renderStrokes]);
 
   // When entering drawing mode: snapshot timestamp, load existing strokes
   useEffect(() => {
     if (drawingMode) {
-      const video = videoRef.current;
-      const ts = video ? video.currentTime * 1000 : 0;
+      const ts = currentTimeMs;
       drawingTimestampRef.current = ts;
 
       // Load existing strokes at this timestamp (find closest within 50ms)

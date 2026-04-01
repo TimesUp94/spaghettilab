@@ -1,10 +1,15 @@
 import { useRef, useEffect, useState, useCallback } from "react";
 import type { RoundResult, DamageEvent, Match, Note, Drawing } from "../types";
+import type { VideoSourceType } from "../lib/videoSourceDetect";
 import { DrawingOverlay } from "./DrawingOverlay";
 import { DrawingToolbar } from "./DrawingToolbar";
+import { loadYouTubeApi } from "../lib/youtubeApi";
+import { loadTwitchApi } from "../lib/twitchApi";
 
 interface Props {
   src: string | null;
+  srcType?: VideoSourceType;
+  embedId?: string;
   seekToMs: number | null;
   onSeeked: () => void;
   durationMs: number;
@@ -28,6 +33,8 @@ function formatTime(s: number): string {
 
 export function VideoPlayer({
   src,
+  srcType = "file",
+  embedId,
   seekToMs,
   onSeeked,
   durationMs,
@@ -43,6 +50,8 @@ export function VideoPlayer({
   onDeleteDrawing,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const embedRef = useRef<HTMLDivElement>(null);
+  const embedPlayerRef = useRef<any>(null);
   const progressRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const videoContainerRef = useRef<HTMLDivElement>(null);
@@ -51,23 +60,230 @@ export function VideoPlayer({
   const [playing, setPlaying] = useState(false);
   const [volume, setVolume] = useState(0.5);
   const [playbackRate, setPlaybackRate] = useState(1);
+  const [embedReady, setEmbedReady] = useState(false);
 
-  // Drawing state
-  const [drawingMode, setDrawingMode] = useState(false);
-  const [activeTool, setActiveTool] = useState<"pen" | "eraser">("pen");
-  const [penColor, setPenColor] = useState("#ff3333");
-  const [penSize, setPenSize] = useState(8);
+  const isEmbed = srcType === "youtube" || srcType === "twitch";
 
-  // Seek when seekToMs changes
+  // ── Dispatch helpers ─────────────────────────────────────────────────
+
+  const doPlay = useCallback(() => {
+    if (!isEmbed) {
+      videoRef.current?.play();
+    } else if (srcType === "youtube") {
+      embedPlayerRef.current?.playVideo();
+    } else {
+      embedPlayerRef.current?.play();
+    }
+  }, [isEmbed, srcType]);
+
+  const doPause = useCallback(() => {
+    if (!isEmbed) {
+      videoRef.current?.pause();
+    } else if (srcType === "youtube") {
+      embedPlayerRef.current?.pauseVideo();
+    } else {
+      embedPlayerRef.current?.pause();
+    }
+  }, [isEmbed, srcType]);
+
+  const doSeek = useCallback((seconds: number) => {
+    if (!isEmbed) {
+      if (videoRef.current) videoRef.current.currentTime = seconds;
+    } else if (srcType === "youtube") {
+      embedPlayerRef.current?.seekTo(seconds, true);
+    } else {
+      embedPlayerRef.current?.seek(seconds);
+    }
+  }, [isEmbed, srcType]);
+
+  const doSetVolume = useCallback((v: number) => {
+    if (!isEmbed) {
+      if (videoRef.current) videoRef.current.volume = v;
+    } else if (srcType === "youtube") {
+      embedPlayerRef.current?.setVolume(v * 100);
+    } else {
+      embedPlayerRef.current?.setVolume(v);
+    }
+  }, [isEmbed, srcType]);
+
+  const doSetPlaybackRate = useCallback((rate: number) => {
+    if (!isEmbed) {
+      if (videoRef.current) videoRef.current.playbackRate = rate;
+    } else if (srcType === "youtube") {
+      embedPlayerRef.current?.setPlaybackRate(rate);
+    }
+    // Twitch doesn't support playback rate
+  }, [isEmbed, srcType]);
+
+  const doGetCurrentTime = useCallback((): number => {
+    if (!isEmbed) {
+      return videoRef.current?.currentTime ?? 0;
+    }
+    return embedPlayerRef.current?.getCurrentTime?.() ?? 0;
+  }, [isEmbed]);
+
+  const doGetDuration = useCallback((): number => {
+    if (!isEmbed) {
+      return videoRef.current?.duration ?? 0;
+    }
+    return embedPlayerRef.current?.getDuration?.() ?? 0;
+  }, [isEmbed]);
+
+  const doIsPaused = useCallback((): boolean => {
+    if (!isEmbed) {
+      return videoRef.current?.paused ?? true;
+    }
+    if (srcType === "youtube") {
+      const state = embedPlayerRef.current?.getPlayerState?.();
+      return state !== 1; // 1 = PLAYING
+    }
+    return embedPlayerRef.current?.isPaused?.() ?? true;
+  }, [isEmbed, srcType]);
+
+  // ── YouTube embed setup ──────────────────────────────────────────────
+
   useEffect(() => {
+    if (srcType !== "youtube" || !embedId) return;
+    setEmbedReady(false);
+
+    let destroyed = false;
+    const el = embedRef.current;
+    if (!el) return;
+
+    // YouTube API replaces the element, so we add a child div
+    const target = document.createElement("div");
+    el.appendChild(target);
+
+    loadYouTubeApi().then(() => {
+      if (destroyed) return;
+      const player = new window.YT.Player(target, {
+        videoId: embedId,
+        playerVars: {
+          autoplay: 0,
+          controls: 0,
+          modestbranding: 1,
+          rel: 0,
+          iv_load_policy: 3,
+          disablekb: 1,
+          fs: 0,
+          playsinline: 1,
+        },
+        events: {
+          onReady: () => {
+            if (destroyed) return;
+            embedPlayerRef.current = player;
+            setDuration(player.getDuration());
+            player.setVolume(volume * 100);
+            setEmbedReady(true);
+          },
+          onStateChange: (e: any) => {
+            if (destroyed) return;
+            setPlaying(e.data === 1); // 1 = PLAYING
+          },
+        },
+      });
+    });
+
+    return () => {
+      destroyed = true;
+      embedPlayerRef.current?.destroy?.();
+      embedPlayerRef.current = null;
+      // Clean up added child
+      while (el.firstChild) el.removeChild(el.firstChild);
+    };
+  }, [srcType, embedId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Twitch embed setup ───────────────────────────────────────────────
+
+  useEffect(() => {
+    if (srcType !== "twitch" || !embedId) return;
+    setEmbedReady(false);
+
+    let destroyed = false;
+    const el = embedRef.current;
+    if (!el) return;
+
+    const target = document.createElement("div");
+    target.style.width = "100%";
+    target.style.height = "100%";
+    el.appendChild(target);
+
+    loadTwitchApi().then(() => {
+      if (destroyed) return;
+      const player = new window.Twitch.Player(target, {
+        video: embedId,
+        parent: [location.hostname],
+        controls: false,
+        autoplay: false,
+        muted: false,
+        width: "100%",
+        height: "100%",
+      });
+
+      player.addEventListener(window.Twitch.Player.READY, () => {
+        if (destroyed) return;
+        embedPlayerRef.current = player;
+        player.setVolume(volume);
+        setEmbedReady(true);
+        // Duration becomes available after a short delay
+        setTimeout(() => {
+          if (!destroyed) setDuration(player.getDuration());
+        }, 1000);
+      });
+
+      player.addEventListener(window.Twitch.Player.PLAY, () => {
+        if (!destroyed) setPlaying(true);
+      });
+      player.addEventListener(window.Twitch.Player.PAUSE, () => {
+        if (!destroyed) setPlaying(false);
+      });
+    });
+
+    return () => {
+      destroyed = true;
+      embedPlayerRef.current = null;
+      while (el.firstChild) el.removeChild(el.firstChild);
+    };
+  }, [srcType, embedId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Time polling for embeds ──────────────────────────────────────────
+
+  useEffect(() => {
+    if (!isEmbed || !embedReady) return;
+    const interval = setInterval(() => {
+      const t = doGetCurrentTime();
+      setCurrentTime(t);
+      onTimeUpdate?.(t * 1000);
+      // Also refresh duration if it was 0
+      if (duration === 0) {
+        const d = doGetDuration();
+        if (d > 0) setDuration(d);
+      }
+    }, 100);
+    return () => clearInterval(interval);
+  }, [isEmbed, embedReady, doGetCurrentTime, doGetDuration, onTimeUpdate, duration]);
+
+  // ── Local video event listeners ──────────────────────────────────────
+
+  useEffect(() => {
+    if (isEmbed) return;
     if (seekToMs !== null && videoRef.current) {
       videoRef.current.currentTime = seekToMs / 1000;
       onSeeked();
     }
-  }, [seekToMs, onSeeked]);
+  }, [seekToMs, onSeeked, isEmbed]);
 
-  // Time update
+  // Seek for embeds
   useEffect(() => {
+    if (!isEmbed || !embedReady) return;
+    if (seekToMs !== null) {
+      doSeek(seekToMs / 1000);
+      onSeeked();
+    }
+  }, [seekToMs, onSeeked, isEmbed, embedReady, doSeek]);
+
+  useEffect(() => {
+    if (isEmbed) return;
     const video = videoRef.current;
     if (!video) return;
     const handler = () => {
@@ -76,67 +292,63 @@ export function VideoPlayer({
     };
     video.addEventListener("timeupdate", handler);
     return () => video.removeEventListener("timeupdate", handler);
-  }, [src, onTimeUpdate]);
+  }, [src, onTimeUpdate, isEmbed]);
 
   useEffect(() => {
+    if (isEmbed) return;
     const video = videoRef.current;
     if (!video) return;
     const handler = () => setDuration(video.duration || durationMs / 1000);
     video.addEventListener("loadedmetadata", handler);
     return () => video.removeEventListener("loadedmetadata", handler);
-  }, [src, durationMs]);
+  }, [src, durationMs, isEmbed]);
 
-  // Volume + playback rate
-  useEffect(() => {
-    if (videoRef.current) videoRef.current.volume = volume;
-  }, [volume]);
+  // Volume + playback rate sync
+  useEffect(() => { doSetVolume(volume); }, [volume, doSetVolume]);
+  useEffect(() => { doSetPlaybackRate(playbackRate); }, [playbackRate, doSetPlaybackRate]);
 
-  useEffect(() => {
-    if (videoRef.current) videoRef.current.playbackRate = playbackRate;
-  }, [playbackRate]);
+  // Drawing state
+  const [drawingMode, setDrawingMode] = useState(false);
+  const [activeTool, setActiveTool] = useState<"pen" | "eraser">("pen");
+  const [penColor, setPenColor] = useState("#ff3333");
+  const [penSize, setPenSize] = useState(8);
 
   const togglePlay = useCallback(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    if (drawingMode) return; // don't toggle play in drawing mode
-    if (v.paused) {
-      v.play();
+    if (drawingMode) return;
+    if (doIsPaused()) {
+      doPlay();
       setPlaying(true);
     } else {
-      v.pause();
+      doPause();
       setPlaying(false);
     }
-  }, [drawingMode]);
+  }, [drawingMode, doIsPaused, doPlay, doPause]);
 
   const toggleDrawingMode = useCallback(() => {
     setDrawingMode((prev) => {
       if (!prev) {
         // Entering drawing mode — auto-pause
-        const v = videoRef.current;
-        if (v && !v.paused) {
-          v.pause();
+        if (!doIsPaused()) {
+          doPause();
           setPlaying(false);
         }
       }
       return !prev;
     });
-  }, []);
+  }, [doIsPaused, doPause]);
 
   const handleClearDrawing = useCallback(() => {
-    // Find the drawing at current timestamp and delete it
-    const currentMs = (videoRef.current?.currentTime ?? 0) * 1000;
+    const currentMs = doGetCurrentTime() * 1000;
     const existing = drawings.find((d) => Math.abs(d.timestamp_ms - currentMs) < 50);
     if (existing && onDeleteDrawing) {
       onDeleteDrawing(existing.drawing_id);
     }
-    // Also save empty to clear active strokes (handled by DrawingOverlay exiting)
     if (onSaveDrawing) {
       onSaveDrawing(currentMs, "[]");
     }
-    // Toggle off and back on to reset the overlay's active strokes
     setDrawingMode(false);
     setTimeout(() => setDrawingMode(true), 0);
-  }, [drawings, onDeleteDrawing, onSaveDrawing]);
+  }, [drawings, onDeleteDrawing, onSaveDrawing, doGetCurrentTime]);
 
   const handleDrawingDone = useCallback(() => {
     setDrawingMode(false);
@@ -150,24 +362,23 @@ export function VideoPlayer({
   const handleProgressClick = useCallback(
     (e: React.MouseEvent) => {
       const bar = progressRef.current;
-      const video = videoRef.current;
-      if (!bar || !video) return;
+      if (!bar) return;
       const rect = bar.getBoundingClientRect();
       const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-      video.currentTime = zoomStartS + pct * zoomDuration;
+      doSeek(zoomStartS + pct * zoomDuration);
     },
-    [zoomStartS, zoomDuration]
+    [zoomStartS, zoomDuration, doSeek]
   );
 
   const skipSeconds = useCallback((delta: number) => {
-    const v = videoRef.current;
-    if (v) v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + delta));
-  }, []);
+    const t = doGetCurrentTime();
+    const d = doGetDuration() || duration;
+    doSeek(Math.max(0, Math.min(d, t + delta)));
+  }, [doGetCurrentTime, doGetDuration, doSeek, duration]);
 
   // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      // Don't capture when typing in inputs
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
       switch (e.key) {
@@ -187,13 +398,13 @@ export function VideoPlayer({
           setVolume((v) => (v > 0 ? 0 : 0.5));
           break;
         case ",":
-          if (videoRef.current && videoRef.current.paused) {
-            videoRef.current.currentTime -= 1 / 30; // frame back
+          if (!isEmbed && videoRef.current && videoRef.current.paused) {
+            videoRef.current.currentTime -= 1 / 30;
           }
           break;
         case ".":
-          if (videoRef.current && videoRef.current.paused) {
-            videoRef.current.currentTime += 1 / 30; // frame forward
+          if (!isEmbed && videoRef.current && videoRef.current.paused) {
+            videoRef.current.currentTime += 1 / 30;
           }
           break;
         case "d":
@@ -206,7 +417,7 @@ export function VideoPlayer({
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [togglePlay, skipSeconds, toggleDrawingMode, drawingMode, onSaveDrawing]);
+  }, [togglePlay, skipSeconds, toggleDrawingMode, drawingMode, onSaveDrawing, isEmbed]);
 
   // Map a time (seconds) to a 0-100% position within the zoom range
   const toBarPct = (s: number) =>
@@ -239,24 +450,34 @@ export function VideoPlayer({
     (r) => currentMs >= r.round_start_ms && currentMs <= r.round_end_ms
   );
 
+  const hasVideo = isEmbed ? !!embedId : !!src;
+
   return (
     <div ref={containerRef} className="bg-surface-2 rounded-lg overflow-hidden border border-surface-4/50">
       {/* Video */}
       <div ref={videoContainerRef} className="relative bg-black aspect-video">
-        {src ? (
+        {hasVideo ? (
           <>
-            <video
-              ref={videoRef}
-              src={src}
-              className="w-full h-full object-contain"
-              onClick={drawingMode ? undefined : togglePlay}
-              onPlay={() => setPlaying(true)}
-              onPause={() => setPlaying(false)}
-            />
+            {isEmbed ? (
+              <div
+                ref={embedRef}
+                className="w-full h-full"
+                onClick={drawingMode ? undefined : togglePlay}
+              />
+            ) : (
+              <video
+                ref={videoRef}
+                src={src!}
+                className="w-full h-full object-contain"
+                onClick={drawingMode ? undefined : togglePlay}
+                onPlay={() => setPlaying(true)}
+                onPause={() => setPlaying(false)}
+              />
+            )}
             {/* Drawing overlay (always rendered for playback display; captures input only in drawingMode) */}
             {onSaveDrawing && (
               <DrawingOverlay
-                videoRef={videoRef}
+                currentTimeMs={currentTime * 1000}
                 drawings={drawings}
                 drawingMode={drawingMode}
                 activeTool={activeTool}
@@ -522,7 +743,7 @@ export function VideoPlayer({
         <span>Space: play/pause</span>
         <span>{"<-/->"}: seek 5s</span>
         <span>Shift+{"<-/->"}: seek 10s</span>
-        <span>,/.: frame step</span>
+        {!isEmbed && <span>,/.: frame step</span>}
         <span>M: mute</span>
         {onSaveDrawing && <span>D: draw</span>}
       </div>

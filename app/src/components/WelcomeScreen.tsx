@@ -8,9 +8,10 @@ interface Props {
   onSplitVod: () => void;
   onOpenSpag: () => void;
   onOpenDatabase: () => void;
+  onAnnotate: () => void;
 }
 
-export function WelcomeScreen({ onAnalyze, onSplitVod, onOpenSpag, onOpenDatabase }: Props) {
+export function WelcomeScreen({ onAnalyze, onSplitVod, onOpenSpag, onOpenDatabase, onAnnotate }: Props) {
   return (
     <div className="h-screen flex flex-col items-center justify-center bg-surface-0">
       <div className="text-center max-w-lg">
@@ -34,7 +35,7 @@ export function WelcomeScreen({ onAnalyze, onSplitVod, onOpenSpag, onOpenDatabas
         <div className="w-48 h-px bg-gradient-to-r from-transparent via-accent-purple/40 to-transparent mx-auto mb-10" />
 
         {/* Actions */}
-        <div className="grid grid-cols-4 gap-3 max-w-lg mx-auto">
+        <div className="grid grid-cols-5 gap-3 max-w-2xl mx-auto">
           <button
             onClick={onOpenDatabase}
             className="px-5 py-4 bg-accent-purple/12 text-accent-purple border border-accent-purple/20
@@ -91,15 +92,30 @@ export function WelcomeScreen({ onAnalyze, onSplitVod, onOpenSpag, onOpenDatabas
               .spag / .spagz files
             </div>
           </button>
+          <button
+            onClick={onAnnotate}
+            className="px-5 py-4 bg-cyan-500/12 text-cyan-400 border border-cyan-500/20
+                       rounded-xl hover:bg-cyan-500/20 hover:border-cyan-500/35
+                       transition-all duration-300 cursor-pointer group"
+          >
+            <div className="text-lg mb-1 opacity-70 group-hover:opacity-100 transition-opacity">
+              &#9998;
+            </div>
+            <div className="font-medium text-sm">Annotate Video</div>
+            <div className="text-[10px] text-text-muted mt-1">
+              Notes on any video
+            </div>
+          </button>
         </div>
 
         {/* Feature cards */}
-        <div className="mt-12 grid grid-cols-4 gap-3 text-center">
+        <div className="mt-12 grid grid-cols-5 gap-3 text-center max-w-2xl mx-auto">
           {[
             ["Health Tracking", "Per-frame HP"],
             ["Round Detection", "Win/loss analysis"],
             ["Comebacks", "Deficit detection"],
             ["Clip Export", "ffmpeg extraction"],
+            ["Annotations", "Notes & drawings"],
           ].map(([title, desc]) => (
             <div key={title} className="stat-card !p-3">
               <div className="text-text-primary text-[11px] font-medium mb-0.5">

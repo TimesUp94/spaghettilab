@@ -182,3 +182,12 @@ export async function openSpagz(spagzPath: string): Promise<SpagzSession> {
 export async function saveSpagz(spagzPath: string, dbPath: string): Promise<void> {
   return invoke("save_spagz", { spagzPath, dbPath });
 }
+
+// Quick annotation sessions
+
+export async function createQuickSession(
+  videoPath: string,
+  videoUrl?: string
+): Promise<SpagzSession> {
+  return invoke("create_quick_session", { videoPath, videoUrl: videoUrl ?? null });
+}

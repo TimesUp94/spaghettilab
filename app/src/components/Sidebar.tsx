@@ -12,6 +12,7 @@ interface Props {
   onReanalyzeAll?: () => void;
   reanalyzingAll?: boolean;
   onAnalyzeNew?: () => void;
+  onAnnotate?: () => void;
   videoMode?: VideoMode;
 }
 
@@ -41,7 +42,7 @@ function extractSetInfo(replayId: string): {
   return { number: "", players: replayId, bracket: "" };
 }
 
-export function Sidebar({ replays, selectedReplay, onSelect, onReload, reloading, onReanalyze, reanalyzing, onReanalyzeAll, reanalyzingAll, onAnalyzeNew, videoMode }: Props) {
+export function Sidebar({ replays, selectedReplay, onSelect, onReload, reloading, onReanalyze, reanalyzing, onReanalyzeAll, reanalyzingAll, onAnalyzeNew, onAnnotate, videoMode }: Props) {
   // Hide reanalyze buttons when there's no local video
   const showReanalyze = videoMode !== "url" && videoMode !== "none";
   const effectiveOnReanalyze = showReanalyze ? onReanalyze : undefined;
@@ -94,6 +95,15 @@ export function Sidebar({ replays, selectedReplay, onSelect, onReload, reloading
           >
             + Analyze Video
           </button>
+          {onAnnotate && (
+            <button
+              onClick={onAnnotate}
+              className="w-full mt-1 px-3 py-2 text-xs font-medium text-cyan-400 bg-cyan-500/8 border border-cyan-500/20
+                         rounded-lg hover:bg-cyan-500/15 hover:border-cyan-500/35 transition-all cursor-pointer"
+            >
+              + Annotate Video
+            </button>
+          )}
         </div>
       )}
       <div className="flex-1 overflow-y-auto">

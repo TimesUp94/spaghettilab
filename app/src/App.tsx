@@ -41,6 +41,7 @@ import {
   exportSpagz,
   openSpagz,
   saveSpagz,
+  createQuickSession,
 } from "./api";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Sidebar } from "./components/Sidebar";
@@ -58,6 +59,9 @@ import { SplitVodView } from "./components/SplitVodView";
 import { NotesPanel } from "./components/NotesPanel";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { SpagzVideoModal } from "./components/SpagzVideoModal";
+import { AnnotateSetup } from "./components/AnnotateSetup";
+import { AnnotateView } from "./components/AnnotateView";
+import { detectVideoSource, type VideoSourceType } from "./lib/videoSourceDetect";
 
 /** Group rounds into matches (first-to-2 round wins). */
 function groupRoundsIntoMatches(rounds: RoundResult[]): Match[] {
@@ -104,7 +108,7 @@ function groupRoundsIntoMatches(rounds: RoundResult[]): Match[] {
   return matches;
 }
 
-type AppView = "welcome" | "analyze" | "split" | "dashboard";
+type AppView = "welcome" | "analyze" | "split" | "dashboard" | "annotate";
 
 function ReanalyzeOverlay({ isAll }: { isAll: boolean }) {
   const [progress, setProgress] = useState("");
@@ -179,6 +183,9 @@ export default function App() {
   const [exportingSpagz, setExportingSpagz] = useState(false);
   const [showSpagzVideoModal, setShowSpagzVideoModal] = useState(false);
   const [pendingSpagzSession, setPendingSpagzSession] = useState<SpagzSession | null>(null);
+  const [showAnnotateSetup, setShowAnnotateSetup] = useState(false);
+  const [annotateSrcType, setAnnotateSrcType] = useState<VideoSourceType>("file");
+  const [annotateEmbedId, setAnnotateEmbedId] = useState<string | undefined>();
 
   // Resizable split between top (video/timeline) and bottom (tabs)
   const [topHeight, setTopHeight] = useState<number | string>("55%");
@@ -625,12 +632,37 @@ export default function App() {
     setDbPath(session.db_path);
     const reps = await getReplays(session.db_path);
     setReplays(reps);
-    setView("dashboard");
 
     const replay = reps.find(r => r.replay_id === session.replay_id) || reps[0];
     if (replay) {
+      // Detect annotate session: frame_count === 0 means no CV analysis
+      if (replay.frame_count === 0) {
+        setSelectedReplay(replay);
+        // Check if video_url contains a YouTube/Twitch URL
+        if (session.video_url) {
+          const detected = detectVideoSource(session.video_url);
+          if (detected.type !== "file") {
+            setAnnotateSrcType(detected.type);
+            setAnnotateEmbedId(detected.id);
+            setVideoSrc(null);
+          } else {
+            setAnnotateSrcType("file");
+            setAnnotateEmbedId(undefined);
+          }
+        }
+        const [nt, dr] = await Promise.all([
+          getNotes(session.db_path, replay.replay_id).catch(() => [] as Note[]),
+          getDrawings(session.db_path, replay.replay_id).catch(() => [] as Drawing[]),
+        ]);
+        setNotes(nt);
+        setDrawings(dr);
+        setView("annotate");
+        return;
+      }
+
       setSelectedReplay(replay);
       setSelectedMatchIndex(null);
+      setView("dashboard");
       const [fd, de, rn, st, hl, nt, dr] = await Promise.all([
         getFrameData(session.db_path, replay.replay_id),
         getDamageEvents(session.db_path, replay.replay_id),
@@ -740,6 +772,43 @@ export default function App() {
     }
   }, [spagzSession]);
 
+  // Annotate session handler
+  const handleAnnotateSession = useCallback(
+    async (session: SpagzSession, srcType: VideoSourceType, embedId?: string) => {
+      setShowAnnotateSetup(false);
+      setDbPath(session.db_path);
+      setSelectedReplay({
+        replay_id: session.replay_id,
+        video_path: session.video_hint,
+        duration_ms: 0,
+        frame_count: 0,
+      });
+      setSpagzSession(session.spagz_path ? session : null);
+      setAnnotateSrcType(srcType);
+      setAnnotateEmbedId(embedId);
+
+      if (srcType === "file" && session.video_hint) {
+        try {
+          setVideoSrc(convertFileSrc(session.video_hint));
+        } catch {
+          setVideoSrc(null);
+        }
+      } else {
+        setVideoSrc(null);
+      }
+
+      // Load any existing notes and drawings
+      const [nt, dr] = await Promise.all([
+        getNotes(session.db_path, session.replay_id).catch(() => [] as Note[]),
+        getDrawings(session.db_path, session.replay_id).catch(() => [] as Drawing[]),
+      ]);
+      setNotes(nt);
+      setDrawings(dr);
+      setView("annotate");
+    },
+    []
+  );
+
   // Listen for .spag/.spagz file association (app launched with file argument)
   useEffect(() => {
     const unlisten1 = listen<string>("open-spag-file", (event) => {
@@ -767,12 +836,48 @@ export default function App() {
   // Welcome screen
   if (view === "welcome") {
     return (
-      <WelcomeScreen
-        onAnalyze={() => setView("analyze")}
-        onSplitVod={() => setView("split")}
-        onOpenSpag={handleOpenSpag}
-        onOpenDatabase={handleOpenDefaultDb}
-      />
+      <>
+        <WelcomeScreen
+          onAnalyze={() => setView("analyze")}
+          onSplitVod={() => setView("split")}
+          onOpenSpag={handleOpenSpag}
+          onOpenDatabase={handleOpenDefaultDb}
+          onAnnotate={() => setShowAnnotateSetup(true)}
+        />
+        {showAnnotateSetup && (
+          <AnnotateSetup
+            onSession={handleAnnotateSession}
+            onCancel={() => setShowAnnotateSetup(false)}
+          />
+        )}
+      </>
+    );
+  }
+
+  // Annotate view
+  if (view === "annotate" && selectedReplay && dbPath) {
+    return (
+      <>
+        <AnnotateView
+          videoSrc={videoSrc}
+          srcType={annotateSrcType}
+          embedId={annotateEmbedId}
+          replay={selectedReplay}
+          dbPath={dbPath}
+          spagzSession={spagzSession}
+          notes={notes}
+          drawings={drawings}
+          onNotesChange={setNotes}
+          onDrawingsChange={setDrawings}
+          onBack={() => setView("welcome")}
+        />
+        {showAnnotateSetup && (
+          <AnnotateSetup
+            onSession={handleAnnotateSession}
+            onCancel={() => setShowAnnotateSetup(false)}
+          />
+        )}
+      </>
     );
   }
 
@@ -904,6 +1009,7 @@ export default function App() {
           onReanalyzeAll={dbPath ? handleReanalyzeAll : undefined}
           reanalyzingAll={reanalyzingAll}
           onAnalyzeNew={() => setView("analyze")}
+          onAnnotate={() => setShowAnnotateSetup(true)}
           videoMode={videoMode}
         />
 
@@ -1107,6 +1213,7 @@ export default function App() {
       {showSpagzVideoModal && pendingSpagzSession && (
         <SpagzVideoModal
           videoHint={pendingSpagzSession.video_hint}
+          videoUrl={pendingSpagzSession.video_url}
           onLocalFile={handleSpagzLocalFile}
           onStreamUrl={handleSpagzStreamUrl}
           onSkip={handleSpagzSkip}
@@ -1114,6 +1221,12 @@ export default function App() {
             setShowSpagzVideoModal(false);
             setPendingSpagzSession(null);
           }}
+        />
+      )}
+      {showAnnotateSetup && (
+        <AnnotateSetup
+          onSession={handleAnnotateSession}
+          onCancel={() => setShowAnnotateSetup(false)}
         />
       )}
     </div>

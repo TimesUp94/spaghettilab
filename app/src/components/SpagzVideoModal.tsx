@@ -5,6 +5,7 @@ import { downloadVod } from "../api";
 
 interface Props {
   videoHint: string;
+  videoUrl?: string;
   onLocalFile: (path: string) => void;
   onStreamUrl: (url: string) => void;
   onSkip: () => void;
@@ -13,10 +14,11 @@ interface Props {
 
 type Tab = "browse" | "download" | "stream" | "skip";
 
-export function SpagzVideoModal({ videoHint, onLocalFile, onStreamUrl, onSkip, onCancel }: Props) {
+export function SpagzVideoModal({ videoHint, videoUrl, onLocalFile, onStreamUrl, onSkip, onCancel }: Props) {
   const hintIsUrl = videoHint.startsWith("http");
-  const [activeTab, setActiveTab] = useState<Tab>("browse");
-  const [url, setUrl] = useState(hintIsUrl ? videoHint : "");
+  const hasVideoUrl = !!videoUrl;
+  const [activeTab, setActiveTab] = useState<Tab>(hasVideoUrl ? "download" : "browse");
+  const [url, setUrl] = useState(videoUrl || (hintIsUrl ? videoHint : ""));
   const [streamUrl, setStreamUrl] = useState(hintIsUrl ? videoHint : "");
   const [downloading, setDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState("");
@@ -83,6 +85,11 @@ export function SpagzVideoModal({ videoHint, onLocalFile, onStreamUrl, onSkip, o
           {videoHint && (
             <div className="mt-2 px-3 py-1.5 bg-surface-2 rounded-lg text-[11px] text-text-secondary font-mono truncate">
               Original: {videoHint}
+            </div>
+          )}
+          {videoUrl && (
+            <div className="mt-1 px-3 py-1.5 bg-surface-2 rounded-lg text-[11px] text-accent-purple font-mono truncate">
+              URL: {videoUrl}
             </div>
           )}
         </div>
