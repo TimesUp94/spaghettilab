@@ -132,13 +132,18 @@ export function QuestionnairePanel({ open, onClose, dbPath, replayId, readOnly =
                 role="dialog"
                 aria-label="Review Questionnaire"
             >
-                <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700 bg-gray-900/95">
+                <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-gray-700 bg-gray-900/95">
                     <div className="flex items-center gap-2 min-w-0">
                         <ClipboardList className="w-4 h-4 text-yellow-400 shrink-0" />
                         <h2 className="text-sm font-semibold text-white truncate">Review Questionnaire</h2>
                     </div>
-                    <button onClick={onClose} className="text-gray-400 hover:text-white" title="Close">
-                        <X className="w-5 h-5" />
+                    <button
+                        onClick={onClose}
+                        title="Close"
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-gray-800 hover:bg-gray-700 border border-gray-600 text-gray-200 hover:text-white text-xs font-medium transition-colors shrink-0"
+                    >
+                        <X className="w-3.5 h-3.5" />
+                        <span>Close</span>
                     </button>
                 </div>
 
