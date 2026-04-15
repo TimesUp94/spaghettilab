@@ -123,12 +123,12 @@ export function QuestionnairePanel({ open, onClose, dbPath, replayId, readOnly =
         <>
             <div
                 onClick={onClose}
-                className="fixed inset-0 z-30 bg-black/40 sm:hidden"
+                className="fixed inset-0 z-[55] bg-black/40 sm:hidden"
                 aria-hidden="true"
             />
 
             <aside
-                className="fixed right-0 top-0 h-full w-full sm:w-[420px] z-40 bg-gray-900 border-l border-gray-700 shadow-2xl flex flex-col"
+                className="fixed right-0 top-0 h-full w-full sm:w-[420px] z-[60] bg-gray-900 border-l border-gray-700 shadow-2xl flex flex-col"
                 role="dialog"
                 aria-label="Review Questionnaire"
             >
