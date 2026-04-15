@@ -2233,6 +2233,107 @@ fn delete_drawing(db_path: String, drawing_id: i64) -> Result<(), String> {
     Ok(())
 }
 
+// ── Questionnaire answers ────────────────────────────────────────────────────
+// Free-form review checklist attached to each replay. Keys are namespaced by
+// template id (e.g. "ggst.roundstart.main_options"). Reserved meta keys are
+// prefixed with an underscore (e.g. "_meta.selected_template").
+
+fn ensure_questionnaire_answers_table(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS questionnaire_answers (
+            replay_id    TEXT NOT NULL,
+            question_key TEXT NOT NULL,
+            answer_text  TEXT,
+            updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (replay_id, question_key)
+        );"
+    ).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_questionnaire_answers(db_path: String, replay_id: String) -> Result<std::collections::HashMap<String, String>, String> {
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    ensure_schema_version(&conn)?;
+    ensure_questionnaire_answers_table(&conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT question_key, COALESCE(answer_text, '') FROM questionnaire_answers WHERE replay_id = ?"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([&replay_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }).map_err(|e| e.to_string())?;
+    let mut map = std::collections::HashMap::new();
+    for r in rows {
+        if let Ok((k, v)) = r { map.insert(k, v); }
+    }
+    Ok(map)
+}
+
+#[tauri::command]
+fn set_questionnaire_answer(db_path: String, replay_id: String, question_key: String, answer_text: String) -> Result<(), String> {
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    ensure_schema_version(&conn)?;
+    ensure_questionnaire_answers_table(&conn)?;
+    if answer_text.trim().is_empty() {
+        conn.execute(
+            "DELETE FROM questionnaire_answers WHERE replay_id = ? AND question_key = ?",
+            rusqlite::params![&replay_id, &question_key],
+        ).map_err(|e| e.to_string())?;
+    } else {
+        conn.execute(
+            "INSERT INTO questionnaire_answers (replay_id, question_key, answer_text, updated_at)
+             VALUES (?, ?, ?, datetime('now'))
+             ON CONFLICT(replay_id, question_key)
+             DO UPDATE SET answer_text = excluded.answer_text, updated_at = excluded.updated_at",
+            rusqlite::params![&replay_id, &question_key, &answer_text],
+        ).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+// ── Schema versioning ────────────────────────────────────────────────────────
+// `PRAGMA user_version` lives in the SQLite header. We use it to tell whether
+// a .spag/.spagz file predates a non-additive schema change and migrate it
+// in place on open. The web app and the desktop app must agree on the
+// version number so files round-trip cleanly between them.
+//
+// Version history:
+//   0 → 1 : questionnaire_answers keys gained a template-id prefix
+//           ("roundstart.main_options" → "ggst.roundstart.main_options").
+
+const SCHEMA_VERSION: u32 = 1;
+
+fn ensure_schema_version(conn: &Connection) -> Result<(), String> {
+    ensure_questionnaire_answers_table(conn)?;
+    let current: u32 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+        .map(|n| n as u32)
+        .unwrap_or(0);
+
+    if current < SCHEMA_VERSION {
+        // v0 → v1: prefix legacy unprefixed questionnaire keys with "ggst.".
+        // Meta keys (leading underscore) and already-prefixed keys are untouched.
+        if current < 1 {
+            let _ = conn.execute(
+                "UPDATE questionnaire_answers
+                 SET question_key = 'ggst.' || question_key
+                 WHERE question_key NOT LIKE '_%'
+                   AND instr(question_key, '.') > 0
+                   AND question_key NOT LIKE 'ggst.%'",
+                [],
+            );
+        }
+        conn.execute_batch(&format!("PRAGMA user_version = {}", SCHEMA_VERSION))
+            .map_err(|e| e.to_string())?;
+    } else if current > SCHEMA_VERSION {
+        eprintln!(
+            "[spaghetti-lab] WARNING: opened a file with schema v{} but this build only understands up to v{}. \
+             Newer fields may not be preserved.",
+            current, SCHEMA_VERSION
+        );
+    }
+    Ok(())
+}
+
 // ── VOD Splitter ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -2690,6 +2791,13 @@ async fn export_spag(
                 strokes_json TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 UNIQUE(replay_id, timestamp_ms)
+            );
+            CREATE TABLE dst.questionnaire_answers (
+                replay_id    TEXT NOT NULL,
+                question_key TEXT NOT NULL,
+                answer_text  TEXT,
+                updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (replay_id, question_key)
             );"
         ).map_err(|e| e.to_string())?;
 
@@ -2721,6 +2829,13 @@ async fn export_spag(
             [&replay_id],
         ).map_err(|e| e.to_string())?;
 
+        // Copy questionnaire_answers — keeps review-checklist data intact
+        ensure_questionnaire_answers_table(&src_conn)?;
+        src_conn.execute(
+            "INSERT INTO dst.questionnaire_answers SELECT * FROM main.questionnaire_answers WHERE replay_id = ?",
+            [&replay_id],
+        ).map_err(|e| e.to_string())?;
+
         // Copy winner_overrides
         src_conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS dst.winner_overrides (
@@ -2735,6 +2850,10 @@ async fn export_spag(
             "INSERT INTO dst.winner_overrides SELECT * FROM main.winner_overrides WHERE replay_id = ?",
             [&replay_id],
         ).map_err(|e| e.to_string())?;
+
+        // Stamp destination with current schema version
+        src_conn.execute_batch(&format!("PRAGMA dst.user_version = {}", SCHEMA_VERSION))
+            .map_err(|e| e.to_string())?;
 
         src_conn.execute("DETACH DATABASE dst", []).map_err(|e| e.to_string())?;
     }
@@ -2809,8 +2928,9 @@ async fn open_spag(spag_path: String) -> Result<SpagSession, String> {
         std::io::copy(&mut entry, &mut out).map_err(|e| e.to_string())?;
     }
 
-    // Get replay_id from extracted DB
+    // Get replay_id from extracted DB, running any pending schema migrations
     let conn = Connection::open(&db_dest).map_err(|e| e.to_string())?;
+    ensure_schema_version(&conn)?;
     let replay_id: String = conn
         .query_row("SELECT replay_id FROM replays LIMIT 1", [], |row| row.get(0))
         .map_err(|e| e.to_string())?;
@@ -2923,6 +3043,13 @@ fn copy_replay_tables_to_dst(src_conn: &Connection, replay_id: &str, rewrite_vid
             round_index INTEGER NOT NULL,
             winner      TEXT NOT NULL,
             PRIMARY KEY (replay_id, round_index)
+        );
+        CREATE TABLE IF NOT EXISTS dst.questionnaire_answers (
+            replay_id    TEXT NOT NULL,
+            question_key TEXT NOT NULL,
+            answer_text  TEXT,
+            updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (replay_id, question_key)
         );"
     ).map_err(|e| e.to_string())?;
 
@@ -2968,6 +3095,17 @@ fn copy_replay_tables_to_dst(src_conn: &Connection, replay_id: &str, rewrite_vid
         "INSERT INTO dst.winner_overrides SELECT * FROM main.winner_overrides WHERE replay_id = ?",
         [replay_id],
     ).map_err(|e| e.to_string())?;
+
+    ensure_questionnaire_answers_table(src_conn)?;
+    src_conn.execute(
+        "INSERT INTO dst.questionnaire_answers SELECT * FROM main.questionnaire_answers WHERE replay_id = ?",
+        [replay_id],
+    ).map_err(|e| e.to_string())?;
+
+    // Stamp the destination with our current schema version so re-openers
+    // know no migrations are needed.
+    src_conn.execute_batch(&format!("PRAGMA dst.user_version = {}", SCHEMA_VERSION))
+        .map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -3044,6 +3182,9 @@ async fn open_spagz(spagz_path: String) -> Result<SpagzSession, String> {
 
     // Add video_url column if missing (older .spagz files)
     let _ = conn.execute("ALTER TABLE replays ADD COLUMN video_url TEXT", []);
+
+    // Run any pending schema migrations in-place on the extracted DB
+    ensure_schema_version(&conn)?;
 
     let (replay_id, video_hint, video_url): (String, String, String) = conn
         .query_row(
@@ -3328,6 +3469,8 @@ pub fn run() {
             save_spagz,
             create_quick_session,
             set_round_winner,
+            get_questionnaire_answers,
+            set_questionnaire_answer,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

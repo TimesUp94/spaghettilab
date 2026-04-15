@@ -155,6 +155,27 @@ export async function setRoundWinner(dbPath: string, replayId: string, roundInde
   return invoke("set_round_winner", { dbPath, replayId, roundIndex, winner });
 }
 
+// Review questionnaire answers — free-form checklist stored in the same DB
+// that rides inside .spag/.spagz files. Keys are template-id-prefixed
+// (e.g. "ggst.roundstart.main_options"); meta keys start with an underscore
+// (e.g. "_meta.selected_template").
+
+export async function getQuestionnaireAnswers(
+  dbPath: string,
+  replayId: string
+): Promise<Record<string, string>> {
+  return invoke("get_questionnaire_answers", { dbPath, replayId });
+}
+
+export async function setQuestionnaireAnswer(
+  dbPath: string,
+  replayId: string,
+  questionKey: string,
+  answerText: string
+): Promise<void> {
+  return invoke("set_questionnaire_answer", { dbPath, replayId, questionKey, answerText });
+}
+
 // .spag file format
 
 export async function exportSpag(dbPath: string, replayId: string, outputPath: string): Promise<void> {

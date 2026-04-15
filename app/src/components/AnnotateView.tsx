@@ -1,9 +1,11 @@
 import { useState, useCallback } from "react";
+import { ClipboardList } from "lucide-react";
 import { save } from "@tauri-apps/plugin-dialog";
 import type { Replay, Note, Drawing, SpagzSession } from "../types";
 import type { VideoSourceType } from "../lib/videoSourceDetect";
 import { VideoPlayer } from "./VideoPlayer";
 import { NotesPanel } from "./NotesPanel";
+import { QuestionnairePanel } from "./QuestionnairePanel";
 import {
   addNote,
   updateNote,
@@ -47,6 +49,7 @@ export function AnnotateView({
 }: Props) {
   const [seekToMs, setSeekToMs] = useState<number | null>(null);
   const [currentTimeMs, setCurrentTimeMs] = useState(0);
+  const [questionnaireOpen, setQuestionnaireOpen] = useState(false);
 
   // Note handlers
   const handleAddNote = useCallback(
@@ -138,6 +141,18 @@ export function AnnotateView({
           </span>
         </div>
         <button
+          onClick={() => setQuestionnaireOpen((o) => !o)}
+          title="Open review questionnaire"
+          className={`!py-1.5 !px-3 !text-xs rounded inline-flex items-center gap-1.5 ${
+            questionnaireOpen
+              ? "bg-yellow-500 text-gray-900 hover:bg-yellow-400"
+              : "bg-gray-700 text-gray-200 hover:bg-gray-600"
+          }`}
+        >
+          <ClipboardList className="w-3.5 h-3.5" />
+          Checklist
+        </button>
+        <button
           onClick={handleExportSpagz}
           className="btn-primary !py-1.5 !px-3 !text-xs"
         >
@@ -183,6 +198,14 @@ export function AnnotateView({
           />
         </div>
       </div>
+
+      {/* Review questionnaire — slides in from the right */}
+      <QuestionnairePanel
+        open={questionnaireOpen}
+        onClose={() => setQuestionnaireOpen(false)}
+        dbPath={dbPath}
+        replayId={replay.replay_id}
+      />
     </div>
   );
 }
