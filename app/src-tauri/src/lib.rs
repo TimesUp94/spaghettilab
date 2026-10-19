@@ -935,6 +935,15 @@ fn detect_rounds_for_replay(
         if hp_diff >= 0.15 {
             let winner = if ep1 >= ep2 { "P1".to_string() } else { "P2".to_string() };
             eprintln!("[WINNER-DBG]   → {} wins via cluster hp_diff", winner);
+            // ep1/ep2 are smoothed medians and can pick up the next round's
+            // full bars; when the loser has a KO frame, report the cleaned HP
+            // at that moment instead (as the KO-count rules do).
+            let p1_loses = winner == "P2";
+            let lose = if p1_loses { &p1_norm } else { &p2_norm };
+            if (effective_search_start..e).any(|j| !lose[j].is_nan() && lose[j] <= 0.02) {
+                let (a, b) = ko_hp(p1_loses);
+                return Some((winner, a, b, true));
+            }
             return Some((winner, ep1, ep2, true));
         }
 

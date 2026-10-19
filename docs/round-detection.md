@@ -244,7 +244,10 @@ Collect all frames where `min(p1, p2)` is within 0.10 of the best (lowest) minim
 
 From the last cluster, take up to 30 frames from the end. Compute median P1 and P2 HP values.
 
-If HP difference >= 0.15 -> clear winner (higher HP wins). **Confident.**
+If HP difference >= 0.15 -> clear winner (higher HP wins). **Confident.** The medians are
+smoothed and can pick up the next round's full bars, so when the loser has a frame at <= 0.02
+the reported HP is the cleaned HP at that KO (winner) and the loser's minimum, as in the
+KO-count rules (`ko_hp`); otherwise the medians are reported.
 
 ### Step 5: Min-HP Fallback with Weighted Average
 
@@ -296,7 +299,7 @@ After all rounds are determined by HP analysis, round counter hearts provide a g
 
 GGS pending combo damage appears as a red bar segment that the old warm-pixel extractor counted as health. This caused HP-based winner detection to misidentify winners when a lethal combo killed a player who appeared to have more health. Since the health extractor rewrite (see `docs/cv-pipeline.md`, HealthBarExtractor), the red segment is measured separately and is not counted as health, and `health_pct` is cleaned to be non-increasing within a round. The hearts override is still useful as ground truth.
 
-The hearts are part of the Spaghetti Showdown stream overlay and are missing from other users' videos, so winner logic must not depend on them. With cleaned HP, the override is skipped when HP shows a single KO (winner confident, loser <= 0.01, winner > 0.01).
+The hearts are the game's own HUD (same pixels on any 1080p GGST video, verified on non-overlay YouTube replays); only the score banner above them belongs to the Spaghetti Showdown stream overlay and must never be read. The extractor still misreads lost (grey) hearts, so winner logic must not depend on them. With cleaned HP, the override is skipped when HP shows a single KO (winner confident, loser <= 0.01, winner > 0.01).
 
 ### Algorithm
 

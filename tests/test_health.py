@@ -309,3 +309,27 @@ def test_round_intro_belongs_to_the_next_round():
     r = clean_series(p1, p2, c, c, None, q2, timer)
     assert r.resets[-1] <= 460
     assert abs(np.nanmin(r.p1[:460]) - 0.6) < 1e-9
+
+
+def test_short_ko_before_slash_reaches_zero():
+    # Set 12 R1: P2 (at 5 %) is KO'd during a super cinematic that hides the
+    # HUD; the bar shows empty for only 6 frames before the slash.  Too few
+    # down-weighted empty readings to form a level on their own.
+    n = 260
+    p1 = np.full(n, 0.873)
+    p2 = np.full(n, 0.053)
+    c1 = np.full(n, 0.95)
+    c2 = np.full(n, 0.8)
+    timer = np.full(n, np.nan)
+    timer[:100] = 72
+    p1[100:] = np.nan                           # cinematic: HUD hidden
+    p2[100:] = np.nan
+    p2[150:160] = 0.06                          # junk under the cinematic
+    c2[150:160] = 0.65
+    p1[200:206] = 0.03                          # the HUD is back for 6 frames
+    c1[200:206] = 0.43
+    p2[200:206] = 0.0
+    c2[200:206] = 0.95
+    r = clean_series(p1, p2, c1, c2, np.zeros(n), np.zeros(n), timer)
+    assert r.p2[205] == 0.0
+    assert abs(np.nanmin(r.p1) - 0.873) < 1e-9

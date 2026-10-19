@@ -403,15 +403,25 @@ def _raw_ko(p: np.ndarray, c: np.ndarray, q: np.ndarray | None, lo: int, hi: int
     return None
 
 
-def _fit_points(pv: np.ndarray, cv: np.ndarray, use: np.ndarray) -> np.ndarray:
-    """Isotonic fit on the ``use`` points of a span, interpolated across short gaps."""
+def _fit_points(pv: np.ndarray, cv: np.ndarray, use: np.ndarray,
+                full_from: int | None = None) -> np.ndarray:
+    """Isotonic fit on the ``use`` points of a span, interpolated across short gaps.
+
+    ``full_from``: span-relative frame (the end of play) from which empty
+    readings keep their full weight.  Only credible empties are in ``use``
+    there, and the HUD is often up for just a few frames between the KO and
+    the slash that hides it.
+    """
     out = np.full(len(pv), np.nan)
     idx = np.flatnonzero(use)
     if len(idx) == 0:
         return out
     y = np.clip(pv[idx], 0.0, 1.0)
     w = cv[idx].astype(np.float64)
-    w = np.where(y <= EMPTY_PCT, w * EMPTY_WEIGHT, w)
+    scaled = y <= EMPTY_PCT
+    if full_from is not None:
+        scaled &= idx < full_from
+    w = np.where(scaled, w * EMPTY_WEIGHT, w)
     out[idx] = isotonic_l1_decreasing(y, w, MIN_STEP_WEIGHT)
     # Fill frames between fitted points (low-confidence reads, missing reads).
     # Interpolation between two fitted values is itself non-increasing, so a
@@ -479,11 +489,16 @@ def _opp_combo_gate(pv: np.ndarray, cv: np.ndarray, use: np.ndarray, empty: np.n
 
 def _clean_side(p: np.ndarray, c: np.ndarray, q: np.ndarray | None, lo: int, hi: int,
                 end: int | None = None, q_opp: np.ndarray | None = None,
-                strict_from: int | None = None, p_opp: np.ndarray | None = None) -> np.ndarray:
+                strict_from: int | None = None, p_opp: np.ndarray | None = None,
+                post_end_full: bool = False) -> np.ndarray:
     """Fit one side within one segment [lo, hi).  Returns cleaned values for the span.
 
     ``strict_from``: span-relative frame (the opponent's KO) after which no
     reading may lower this side.
+
+    ``post_end_full``: credible empty readings after the end of play keep
+    their full weight (see the KO fallback in ``clean_series``), if the other
+    side was not low at the end of play.
 
     Empty-bar readings are the most common artifact (HUD hidden by a
     cinematic, a dark sprite or a transition screen still classifies as
@@ -555,7 +570,15 @@ def _clean_side(p: np.ndarray, c: np.ndarray, q: np.ndarray | None, lo: int, hi:
             if _comes_back(pv, cv, j, float(level), po, opp_level):
                 use2[i:j + 1] &= ~cand[i:j + 1]
             i = j + 1
-    out = first if not (use2 & ~use).any() else _fit_points(pv, cv, use2)
+    # post_end_full: with the other side low too, slash-screen empties would
+    # fake a double KO.
+    full_from = None
+    if post_end_full and end is not None and p_opp is not None:
+        po_end = p_opp[lo:hi][max(0, end - OPP_REF):end + 1]
+        po_end = po_end[~np.isnan(po_end)]
+        if len(po_end) and float(np.median(po_end)) > LOW_HP:
+            full_from = end + END_GRACE
+    out = first if not (use2 & ~use).any() else _fit_points(pv, cv, use2, full_from)
     # Frames after the last usable reading where the bar was still read (but
     # the reading was rejected) keep the last fitted value: the HUD is up and
     # health cannot have gone up, and nothing credible says it went down.
@@ -622,6 +645,20 @@ def clean_series(
             k1 = r1
         if r2 is not None and (k2 is None or r2 < k2):
             k2 = r2
+        if k1 is None and k2 is None and end is not None:
+            # KO fallback: the HUD is often up for only a few frames between
+            # the KO and the slash that hides it, too few for the down-weighted
+            # empty readings to form a level.  Refit with full weight on
+            # credible empties after the end of play; adopt it only if exactly
+            # one side then reaches 0.
+            g1 = _clean_side(p1, c1, q1, lo, hi, end, q2, p_opp=p2, post_end_full=True)
+            g2 = _clean_side(p2, c2, q2, lo, hi, end, q1, p_opp=p1, post_end_full=True)
+            j1, j2 = _first_ko(g1), _first_ko(g2)
+            if (j1 is None) != (j2 is None):
+                if j1 is not None:
+                    f1, k1 = g1, j1
+                else:
+                    f2, k2 = g2, j2
         kos = [(k, side) for k, side in ((k1, 1), (k2, 2)) if k is not None]
         if kos:
             k_ko, loser = min(kos)

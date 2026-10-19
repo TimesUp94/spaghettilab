@@ -83,7 +83,7 @@ Video (1080p @30fps)
 - Non-gameplay filtering (no timer for 20+ seconds → NaN-out HP data)
 - Wallbreak detection (distinguishes mid-round stage transitions from KO animations)
 - Match grouping (first-to-2 round wins), comeback detection
-- Hearts-based winner override from round counter extraction (raw data, not smoothed). The hearts only exist in the Spaghetti Showdown stream overlay, so never make them the primary signal
+- Hearts-based winner override from round counter extraction (raw data, not smoothed). The hearts are game-native HUD (portable), but the extractor misreads lost hearts, so they stay a secondary signal; never use the Spaghetti Showdown overlay's score banner above them, which other users' videos don't have
 - All SQLite queries for serving data to the frontend
 - Spawning Python subprocesses for analysis and VOD splitting
 - .spag file export/import (ZIP containing SQLite snapshot)

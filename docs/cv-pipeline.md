@@ -364,6 +364,11 @@ round; the red pending segment is already-lost HP.
    the survivor was at <= 0.20 it may still reach 0 within 30 frames (double KO);
    otherwise nothing after the KO may lower it, even with red shown (KO-screen junk shows
    fake red).
+   **KO fallback:** if neither side reaches 0 this way, each side is refit with full weight
+   (not x0.5) on the credible empty readings after the end of play, when the other side was
+   above 0.20 at the end of play. The HUD is often up for only a few frames between the KO
+   and the slash (set 12 R1: 6 frames after a super cinematic). The refit is adopted only if
+   exactly one side then reaches 0.
 7. **Gaps:** frames between fitted points (up to 120 frames) are linearly interpolated,
    so a bar hidden during a combo keeps going down and never comes back up. Frames after
    the last fitted point that still had a (rejected) reading hold the last value.
