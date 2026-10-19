@@ -77,10 +77,16 @@ All extracted data for a single frame, populated incrementally by extractors.
 @dataclass
 class HealthReading:
     side: Side
-    health_pct: float       # 0.0 to 1.0
-    bar_pixels_filled: int  # Smoothed pixel width
-    bar_pixels_total: int   # Max observed pixel width (100% calibration)
+    health_pct: float        # 0.0 to 1.0; temporally cleaned once HealthAggregator has run
+    bar_pixels_filled: int
+    bar_pixels_total: int    # 719 (full bar)
+    raw_pct: float | None    # per-frame measurement before cleaning (None = gap filled by the cleaner)
+    pending_pct: float       # red "pending" combo damage next to the fill (already-lost HP)
+    confidence: float        # 0..1 per-frame fit quality (occlusion, flashes)
 ```
+
+`FrameData.p1_health_raw` / `p2_health_raw` keep the extractor's per-frame readings after
+the aggregator replaces `p1_health` / `p2_health` with cleaned values.
 
 ### DamageEvent
 
@@ -192,76 +198,37 @@ Determines whether a frame is active gameplay vs. non-gameplay (lobby, loading, 
 
 **Source:** `replanal/extractors/health.py`
 
-The most complex extractor. Reads health percentage for P1 and P2 independently using multi-band Y scanning with multiple color modes.
+Per-frame measurement only: no smoothing and no round state. The temporal rules live in
+`replanal/health_clean.py` and are applied by `HealthAggregator` (see below).
 
-**Required ROIs:** None (reads directly from the full frame at known pixel positions)
+**Bar geometry (1920x1080, same with and without the tournament overlay):** each bar is
+719 px wide and anchored at the screen centre. P1 spans x=149-868 (fill ends at x=867 and
+shrinks towards the portrait); P2 spans x=1052-1771 (fill starts at x=1052). Interior rows
+y=116-139 form the primary band; y=88-112 and y=142-170 are fallback bands for shifted HUDs.
 
-**Pixel regions:**
-- P1 health bar: x=200-900 (fills from portrait edge toward center)
-- P2 health bar: x=1040-1800 (fills from portrait edge toward center)
-- Primary Y band: y=112-142
-- Alternate Y bands (fallback): y=88-112 and y=142-170
-- Full Y range for single HSV conversion: y=88-170
+**Column classification** (a column takes a class when > 50 % of its rows match):
 
-**Color detection modes:**
+| Class | Pixels | Meaning |
+|-------|--------|---------|
+| F (fill) | warm hue (H<=30 or >=160), S>=30, V>=170; or the yellow/green and cool modes for other overlays | current health: pastel pink/beige, orange at low HP |
+| R (pending) | red hue (H<=7 or >=168), S>=180, V 90-205 | the red segment showing combo damage; already lost, not counted as health |
+| W (neutral) | white (S<30, V>=170), or pastel too dark to be lit fill (V 80-170) | sprites, flashes, dimmed bar; ignored |
+| N | anything else | empty (semi-transparent) bar, coloured sprites |
 
-Each mode detects filled columns based on HSV thresholds (>35% of vertical pixels must match):
+Fill-coloured columns that are also fill-coloured just above (y-12..y-5) or below
+(y+5..y+11) the band are not a bar (full-screen, letterboxed super cinematics) and become neutral.
 
-| Mode | Hue | Saturation | Value | Used for |
-|------|-----|-----------|-------|----------|
-| Warm | H < 30 or H > 150 | S > 30 | V > 80 | Standard red/pink/orange bars (P1 and P2) |
-| Cool | H 90-145 | S > 40 | V > 80 | Blue/purple bars (tournament overlays, P2 only) |
-| Yellow/Green | H 25-70 | S > 40 | V > 100 | Yellow/green bars (tournament overlays) |
+**Edge fit:** with index 0 at the anchored end, the health edge `e` maximises
+`#F[:e] - #(R|N)[:e]`, a 1-D step fit in which neutral columns count 0. A sprite crossing
+the bar lowers the confidence instead of cutting the reading, and slivers of a few pixels
+are read (the old 50 px "readable" minimum treated low HP as a KO). The pending width is
+the best R run right after the edge. Per side: `fill_px`, `pending_px`, `consistency`
+(fraction of informative columns agreeing with the fit), `occluded` (neutral fraction) and
+`ambiguity` (best-fit plateau width), with
+`confidence = consistency * (1 - occluded) * (1 - ambiguity)`.
 
-P1 tries warm + yellow/green. P2 tries warm + cool + yellow/green. The mode producing the widest fill wins.
-
-**Anchor validation:**
-
-Prevents false readings from UI elements that happen to have matching pixels:
-- P1: Fill must end at column >= 640 (anchored to right edge, since P1 depletes left-to-right)
-- P2: Fill must start at column <= 40 (anchored to left edge, since P2 depletes right-to-left)
-
-**Activation state machine:**
-
-The extractor requires `_ACTIVATE_FRAMES = 10` consecutive frames where the max fill width exceeds `_ACTIVATE_THRESHOLD = 200` pixels before emitting any readings. This prevents false readings during loading screens.
-
-**Spike rejection:**
-
-After the median buffer warms up (at least `MEDIAN_WINDOW // 2` values), new readings are clamped:
-- Upward cap: `median * 1.05 + 3` pixels (prevents 1-3 frame brightness spikes from supers/transitions)
-- Downward floor: `median * 0.15` (prevents instant drops to 0 from screen flashes)
-- Clamped readings are NOT added to the median buffer
-
-**Stall detection:**
-
-If a raw reading exceeds the median by >10% + 10 pixels, `_last_frame` is NOT advanced. This causes the gap-based reset to fire naturally during transitions, since transition screens produce artificially wide warm regions.
-
-**Rolling median smoothing:**
-
-A 9-frame window (`_MEDIAN_WINDOW = 9`) rolling median smooths frame-to-frame noise. Only non-clamped readings are added to the buffer.
-
-**Monotonic constraint + max drop rate:**
-
-Health can only decrease at most `_MAX_DROP_PER_FRAME = 3%` per frame (90%/second at 30fps). When the bar is gone (zero or clamped), a slower drop rate of 0.2%/frame is used instead.
-
-**Death detection:**
-
-If one player's bar is unreadable for `_DEATH_FRAMES = 10` consecutive frames while the other player is still readable, the round is considered over. `_post_round` is set to `True`, freezing `_last_frame` to trigger a gap-based reset.
-
-Prerequisite: The now-unreadable player must have been readable at some point in the current round (`_seen_p1` / `_seen_p2` flags). This prevents false death detection when a player was never visible.
-
-**Gap-based reset (_RESET_GAP = 15 frames):**
-
-When the current frame number exceeds `_last_frame + 15`, all state is reset:
-- Activation count and flag
-- Median buffers
-- Last emitted percentages (reset to 1.0)
-- Max width calibration (reset to 0)
-- Death detection state
-
-This handles round/set transitions naturally.
-
-**reset_calibration():** Explicit full reset method called between replays.
+**Emission:** nothing when neither bar shows fill or pending red (HUD absent). A side is
+emitted when `consistency >= 0.70`; an empty bar only when the other bar shows the HUD is up.
 
 ### TimerExtractor
 
@@ -346,14 +313,67 @@ Returns `None` (no data) if zero hearts are visible (non-gameplay frame).
 
 ## HealthAggregator
 
-**Source:** `replanal/aggregator.py`
+**Source:** `replanal/aggregator.py`, `replanal/health_clean.py`
 
-Post-processes the sequence of `FrameData` to detect discrete damage events.
+`aggregate(frames)` first cleans the health readings in place (`clean_frames`), then
+detects damage events on the cleaned series. Call it before anything that reads
+`health_pct` (storage, combo detection).
 
-### Pipeline
+### Temporal cleaning (`health_clean.clean_series`)
+
+GGST rules: within a round HP only goes down; it goes back up only to full, at the next
+round; the red pending segment is already-lost HP.
+
+1. **Segments (rounds):** a new segment starts after a gap of > 150 frames with no readings,
+   or after a sustained (15-frame) reset following damage in the round, at least 300 frames
+   after the previous start. A reset means both sides' 9-frame medians read "full", or both
+   rose >= 0.30 above their in-round lows with one of them full. "Full" is
+   `min(0.90, observed full-bar reading - 0.05)` per side: on some overlays the player name
+   hides the far end of the bar (set 03: a full P2 bar reads 0.81 in some rounds). Wallbreaks
+   do not refill the bars in current GGST, so they do not split rounds.
+   **Round intro:** the timer shows its start value (>= 89) while the bars are still empty
+   and filling. A reset moves back to a credible run of start readings (3 in 15 frames)
+   within 150 frames before it, if every timer reading in between is a start value (a
+   frozen in-round timer misread as "93" interleaves with its true "83"s). Otherwise the
+   empty intro bars end the previous round at 0 for both sides.
+2. **Monotone fit per side:** weighted L1 isotonic regression (non-increasing, PAV with
+   weighted medians) over readings with confidence >= 0.35. Short runs of bad readings in
+   either direction are outvoted. A new level needs >= 3.0 total weight (about 4 good
+   frames); lighter blocks merge into their closer-valued neighbour.
+3. **Empty-bar readings** count only when credible: pending red is visible next to the
+   emptied bar, or a first fit without them already had the side at <= 0.20. Otherwise
+   flashes or dark sprites over the HUD produce false KOs. An empty run is never credible
+   if the bar later **comes back** (`_comes_back`): a run of 5 confident readings of
+   0.05-0.80, counted where the other bar reads its normal level (not the post-KO fade,
+   where both read near 0) or where the reading is at most the side's earlier level.
+   Sprites can cover a whole HUD corner for seconds (set 14 R1).
+4. **Opponent in combo:** while the other side shows pending red (it is being comboed) and
+   this side does not, readings below half this side's level just before (from >= 3
+   confident readings) are dropped. The attacker's sprite or super VFX covers its own bar
+   (set 13 R3).
+5. **Round end:** play ends at the earlier of the last run of 5 frames where both bars are
+   read confidently and the last credible round-timer reading (the KO slash hides the
+   timer). After it, readings may confirm a side's level but not lower it, except a reading
+   with pending red next to it (a real hit, e.g. a trade) or a credible empty bar.
+6. **KO lock:** the KO is the first frame where a side's fit reaches 0, or earlier, a
+   **raw KO** (`_raw_ko`): a confident empty reading with pending red on a side already at
+   <= 0.20, where the next 45 frames stay below min(0.015, half its level), the bar does
+   not come back, and the round timer does not count down afterwards (the clock freezes at
+   a KO; a 3 % bar flickers to empty while play goes on). The KO slash often hides the
+   HUD within a frame, so the fit alone never gets there. The loser is 0 from its KO. If
+   the survivor was at <= 0.20 it may still reach 0 within 30 frames (double KO);
+   otherwise nothing after the KO may lower it, even with red shown (KO-screen junk shows
+   fake red).
+7. **Gaps:** frames between fitted points (up to 120 frames) are linearly interpolated,
+   so a bar hidden during a combo keeps going down and never comes back up. Frames after
+   the last fitted point that still had a (rejected) reading hold the last value.
+
+Frames with no cleaned value get `p1_health` / `p2_health = None`.
+
+### Pipeline (damage events)
 
 For each side (P1, P2):
-1. **Extract series:** Build a float array of `health_pct` values; non-gameplay frames become `NaN`
+1. **Extract series:** Build a float array of cleaned `health_pct` values; non-gameplay frames become `NaN`
 2. **Mask transitions:** Detect health jumps UP > 8% between consecutive valid readings (round reset). NaN-out a window of 5 frames before to 15 frames after the jump
 3. **Smooth:** 3-frame moving median filter (configurable via `HealthBarConfig.smoothing_window`)
 4. **Detect events:** Walk the smoothed series looking for health decreases
@@ -367,11 +387,12 @@ Any upward jump > 8% in health between consecutive valid readings is treated as 
 | Parameter | Value | Description |
 |-----------|-------|-------------|
 | `SETTLE_FRAMES` | 6 | Lookahead window for continued decline (200ms at 30fps) |
+| `MAX_COMBO_GAP` | 150 | While pending red is shown, drops up to this many frames apart stay one event |
 | `min_delta` | 0.005 | Minimum health drop to register as an event |
 
 Algorithm:
 1. Scan for any frame where `smoothed[i+1] < smoothed[i] - min_delta`
-2. Walk forward while health continues declining, allowing brief pauses up to `SETTLE_FRAMES` (handles multi-hit combo animations where the bar eases between hits)
+2. Walk forward while health continues declining, allowing pauses up to `SETTLE_FRAMES`, extended while the pending red segment is shown (2 of 5 frames), because the combo is still running
 3. Record `DamageEvent` with pre/post health, frame range, and damage amount
 4. Events are sorted by timestamp across both players
 
@@ -428,7 +449,7 @@ The `init_db()` function uses `ALTER TABLE ... ADD COLUMN` wrapped in try/except
 
 `write_frame_parquet()` writes per-frame data as an Apache Parquet file using PyArrow directly (no pandas dependency). Output path: `<output_dir>/frames/<replay_id>_frames.parquet`.
 
-Schema mirrors the `frame_data` SQLite table with typed Arrow columns (int32, float64).
+Schema mirrors the `frame_data` SQLite table with typed Arrow columns (int32, float64). Parquet-only health columns: `p1/p2_health_raw` (per-frame measurement before cleaning), `p1/p2_pending_pct` and `p1/p2_health_conf`. The SQLite `frame_data` table is unchanged (it must stay in lockstep with the web app, and the `.spag` export copies it with `SELECT *`); its `p1/p2_health_pct` columns now hold the cleaned values.
 
 ---
 

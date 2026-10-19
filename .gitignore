@@ -5,6 +5,7 @@
 
 # Data / output
 data/
+!tests/data/
 output/
 *.db
 
@@ -32,3 +33,5 @@ app/node_modules/
 # OS
 .DS_Store
 Thumbs.db
+*.spag
+*.spagz

@@ -348,9 +348,27 @@ fn detect_rounds_for_replay(
         let junk_window = 150usize; // ~5 seconds at 30fps
         let p1_junk = rolling_median(&p1_norm, junk_window);
         let p2_junk = rolling_median(&p2_norm, junk_window);
+        // A timer reading nearby means we're in a round: both players can
+        // genuinely sit near KO for seconds (e.g. 5% vs 3% at round end).
+        // Menus/lobbies never show the round timer.
+        let mut timer_seen_at: Vec<usize> = Vec::new();
+        for i in 0..n {
+            if timer_raw[i].is_some() {
+                timer_seen_at.push(i);
+            }
+        }
+        // Looks further back than ahead: the end of a round (the last combo
+        // and the KO) often plays with the timer hidden by a sprite or super.
+        let timer_near = |i: usize| -> bool {
+            let lo = i.saturating_sub(junk_window);
+            let hi = i + junk_window / 2;
+            let k = timer_seen_at.partition_point(|&t| t < lo);
+            k < timer_seen_at.len() && timer_seen_at[k] <= hi
+        };
         for i in 0..n {
             if !p1_junk[i].is_nan() && !p2_junk[i].is_nan()
                 && p1_junk[i] < junk_thresh && p2_junk[i] < junk_thresh
+                && !timer_near(i)
             {
                 // Debug: log first few junk regions
                 if junk_count < 5 || (junk_count % 200 == 0) {
@@ -451,7 +469,24 @@ fn detect_rounds_for_replay(
                     let check_end = (i + 90).min(n);
                     let confirmed = (i..check_end)
                         .any(|j| timer_smooth[j].map_or(false, |tv| tv >= 90));
-                    if confirmed {
+                    // Validate: a real round start has both bars refilled.
+                    // Timer OCR can misread mid-round digits as ~90 (e.g. 57
+                    // after a wallbreak read as 92); if the bars clearly stay
+                    // low right after the jump, the "new round" is a misread
+                    // and would split the round before its KO.
+                    let post_min: Vec<f64> = (i..check_end)
+                        .filter(|&j| !p1_norm[j].is_nan() && !p2_norm[j].is_nan())
+                        .map(|j| p1_norm[j].min(p2_norm[j]))
+                        .collect();
+                    let hp_stayed_low = post_min.len() >= 15 && {
+                        let mut sorted = post_min.clone();
+                        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                        sorted[sorted.len() / 2] < 0.50
+                    };
+                    if confirmed && hp_stayed_low {
+                        eprintln!("[ROUND-DBG] timer_start REJECTED (HP did not reset) at i={} t={:.1}s (smooth_timer={}, lowest={})",
+                            i, ts[i]/1000.0, t, lowest_since_start);
+                    } else if confirmed {
                         eprintln!("[ROUND-DBG] timer_start at i={} t={:.1}s (smooth_timer={}, lowest={})",
                             i, ts[i]/1000.0, t, lowest_since_start);
                         timer_starts.push(i);
@@ -722,6 +757,53 @@ fn detect_rounds_for_replay(
             eff
         };
 
+        // Terminal-state check. The Python cleaner makes HP non-increasing
+        // within a round and reads a KO as exactly 0, so each side's minimum
+        // over the round is its final HP. A side that reached 0 while the
+        // other didn't is the loser; otherwise the lower final HP loses.
+        // (Do NOT count "frames below 0.15": a survivor can sit at 3% for
+        // tens of seconds while the opponent is KO'd at the very end.)
+        {
+            let mut p1_min = f64::INFINITY;
+            let mut p2_min = f64::INFINITY;
+            for j in effective_search_start..e {
+                if !p1_norm[j].is_nan() { p1_min = p1_min.min(p1_norm[j]); }
+                if !p2_norm[j].is_nan() { p2_min = p2_min.min(p2_norm[j]); }
+            }
+            if p1_min.is_finite() && p2_min.is_finite() {
+                const KO_HP: f64 = 0.01;
+                let p1_ko = p1_min <= KO_HP;
+                let p2_ko = p2_min <= KO_HP;
+                let diff = (p1_min - p2_min).abs();
+                eprintln!("[WINNER-DBG] {} terminal s={} e={} p1_min={:.3} p2_min={:.3}",
+                    replay_id, s, e, p1_min, p2_min);
+                if p1_ko != p2_ko {
+                    let winner = if p1_ko { "P2" } else { "P1" };
+                    eprintln!("[WINNER-DBG]   → {} wins via single KO", winner);
+                    return Some((winner.to_string(), p1_min, p2_min, true));
+                }
+                if !p1_ko && !p2_ko && diff >= 0.03 {
+                    let winner = if p1_min > p2_min { "P1" } else { "P2" };
+                    eprintln!("[WINNER-DBG]   → {} wins via lower final HP (diff={:.3})", winner, diff);
+                    return Some((winner.to_string(), p1_min, p2_min, diff >= 0.10));
+                }
+                // Both at 0 (double KO / KO animation artifacts) or too close
+                // to call: fall through to the KO-moment heuristics below.
+            }
+        }
+
+        // HP pair to report when the KO-count rules below pick a winner: the
+        // winner's HP when the loser first hit 0, and the loser's minimum.
+        let ko_hp = |p1_loses: bool| -> (f64, f64) {
+            let (lose, win) = if p1_loses { (&p1_norm, &p2_norm) } else { (&p2_norm, &p1_norm) };
+            let ko = (effective_search_start..e).find(|&j| !lose[j].is_nan() && lose[j] <= 0.02);
+            let upto = ko.map(|k| k + 1).unwrap_or(e);
+            let win_hp = (effective_search_start..upto).rev().find(|&j| !win[j].is_nan()).map(|j| win[j]).unwrap_or(1.0);
+            let lose_hp = (effective_search_start..e).filter(|&j| !lose[j].is_nan()).map(|j| lose[j]).fold(f64::INFINITY, f64::min);
+            let lose_hp = if lose_hp.is_finite() { lose_hp } else { 0.0 };
+            if p1_loses { (lose_hp, win_hp) } else { (win_hp, lose_hp) }
+        };
+
         // Early check: count raw frames with HP < 0.15 in last 60%.
         // Filter post-KO garbage: only count if the OTHER player is NOT at full HP.
         // After a KO, the winning player's bar resets to ~1.0 while the loser's
@@ -738,11 +820,13 @@ fn detect_rounds_for_replay(
             replay_id, s, e, s as f64 / 30.0, e as f64 / 30.0, effective_search_start, p1_ko_count, p2_ko_count);
         if p1_ko_count >= 3 && p1_ko_count >= p2_ko_count * 3 + 1 {
             eprintln!("[WINNER-DBG]   → P2 wins via p1_ko_count");
-            return Some(("P2".to_string(), 0.0, 1.0, true));
+            let (a, b) = ko_hp(true);
+            return Some(("P2".to_string(), a, b, true));
         }
         if p2_ko_count >= 3 && p2_ko_count >= p1_ko_count * 3 + 1 {
             eprintln!("[WINNER-DBG]   → P1 wins via p2_ko_count");
-            return Some(("P1".to_string(), 1.0, 0.0, true));
+            let (a, b) = ko_hp(false);
+            return Some(("P1".to_string(), a, b, true));
         }
         // Both players have KO frames but neither dominates — could be KO
         // animation artifact OR wallbreak/comeback. When the two KO moments
@@ -768,16 +852,20 @@ fn detect_rounds_for_replay(
                     if other_at_earlier > 0.15 {
                         // Earlier zero is one-sided — earlier player died
                         if earlier_is_p1 {
-                            return Some(("P2".to_string(), 0.0, 1.0, true));
+                            let (a, b) = ko_hp(true);
+            return Some(("P2".to_string(), a, b, true));
                         } else {
-                            return Some(("P1".to_string(), 1.0, 0.0, true));
+                            let (a, b) = ko_hp(false);
+            return Some(("P1".to_string(), a, b, true));
                         }
                     } else if other_at_later > 0.15 {
                         // Later zero is one-sided — later player died
                         if earlier_is_p1 {
-                            return Some(("P1".to_string(), 1.0, 0.0, true));
+                            let (a, b) = ko_hp(false);
+            return Some(("P1".to_string(), a, b, true));
                         } else {
-                            return Some(("P2".to_string(), 0.0, 1.0, true));
+                            let (a, b) = ko_hp(true);
+            return Some(("P2".to_string(), a, b, true));
                         }
                     }
                 }
@@ -1115,6 +1203,15 @@ fn detect_rounds_for_replay(
         } else {
             n - 1
         };
+        // End the round shortly after its last HP reading, not at the next
+        // round's start or the end of the video: the loading screen (or the
+        // rest of a stream after the last set) is not part of the round, and
+        // a long tail of it would fail the valid-ratio check below.
+        const END_PAD_FRAMES: usize = 30;
+        let e_idx = match (s_idx..e_idx).rev().find(|&j| !p1_norm[j].is_nan() || !p2_norm[j].is_nan()) {
+            Some(last) => (last + 1 + END_PAD_FRAMES).min(e_idx),
+            None => e_idx,
+        };
 
         let total_frames = e_idx - s_idx;
         if total_frames < MIN_ROUND_FRAMES {
@@ -1362,6 +1459,20 @@ fn detect_rounds_for_replay(
                 ri, results[ri].round_start_ms / 1000.0, results[ri].round_end_ms / 1000.0,
                 pre1, pre2, post1, post2, p1_gained, p2_gained, results[ri].winner, results[ri].is_match_start);
 
+            // A clean single KO in the (cleaned, pending-damage-excluded) HP
+            // beats the hearts reading: round-counter OCR misreads on some
+            // overlays (e.g. 11_WFinal R10: P1 at 0.985, P2 KO'd, hearts
+            // read a P2 point).
+            let hp_decisive = results[ri].winner_confident
+                && results[ri].loser_final_hp <= 0.01
+                && results[ri].winner_final_hp > 0.01;
+            if hp_decisive && ((p1_gained && !p2_gained && results[ri].winner != "P1")
+                || (p2_gained && !p1_gained && results[ri].winner != "P2"))
+            {
+                eprintln!("[HEARTS-DBG]   → hearts disagree but HP shows a single KO; keeping {}", results[ri].winner);
+                continue;
+            }
+
             // Match start: hearts reset to 0/0, so compare with 0
             if results[ri].is_match_start {
                 let p1_gained = post1 > 0;
@@ -1396,6 +1507,27 @@ fn detect_rounds_for_replay(
             eprintln!("[HEARTS-DBG] round {} t={:.1}s-{:.1}s: insufficient confidence (pre={:?}/{:?} post={:?}/{:?}) hp_winner={}",
                 ri, results[ri].round_start_ms / 1000.0, results[ri].round_end_ms / 1000.0,
                 pre_p1_data, pre_p2_data, post_p1_data, post_p2_data, results[ri].winner);
+        }
+    }
+
+    // A round cut off by the end of the video has no visible ending: the
+    // loser never reaches 0, or only in the last moments (the KO and slash
+    // take a few seconds), so the winner is a guess. Ask the user.
+    const UNFINISHED_MS: f64 = 2000.0;
+    let video_end_ms = ts[n - 1];
+    for r in results.iter_mut() {
+        if !r.winner_confident || video_end_ms - r.round_end_ms >= UNFINISHED_MS {
+            continue;
+        }
+        let loser = if r.winner == "P1" { &p2_norm } else { &p1_norm };
+        let ko_ms = (0..n)
+            .filter(|&j| ts[j] >= r.round_start_ms && ts[j] <= r.round_end_ms)
+            .find(|&j| !loser[j].is_nan() && loser[j] <= 0.01)
+            .map(|j| ts[j]);
+        if ko_ms.map_or(true, |t| video_end_ms - t < UNFINISHED_MS) {
+            eprintln!("[ROUND-DBG] {} round {} cut off by the end of the video (KO at {:?}); marking uncertain",
+                replay_id, r.round_index, ko_ms.map(|t| t / 1000.0));
+            r.winner_confident = false;
         }
     }
 
@@ -3520,6 +3652,36 @@ mod tests {
         assert!(rounds[0].round_start_ms > 100_000.0,
             "First round starts too early at {:.1}s — lobby not filtered",
             rounds[0].round_start_ms / 1000.0);
+    }
+
+    /// Prints detected rounds for any DB/replay (opened read-only):
+    ///   SPAG_TEST_DB=path/to/analysis.db SPAG_TEST_REPLAY=replay_id \
+    ///     cargo test test_rounds_from_env -- --nocapture
+    /// Skipped (passes) when SPAG_TEST_DB is unset.
+    #[test]
+    fn test_rounds_from_env() {
+        let (Ok(db), Ok(replay)) = (std::env::var("SPAG_TEST_DB"), std::env::var("SPAG_TEST_REPLAY")) else {
+            return;
+        };
+        let conn = rusqlite::Connection::open_with_flags(
+            &db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let rounds = detect_rounds_for_replay(&conn, &replay).unwrap();
+        for r in &rounds {
+            println!(
+                "ROUND {} t={:.1}s-{:.1}s winner={} w_hp={:.3} l_hp={:.3} confident={} match_start={}",
+                r.round_index,
+                r.round_start_ms / 1000.0,
+                r.round_end_ms / 1000.0,
+                r.winner,
+                r.winner_final_hp,
+                r.loser_final_hp,
+                r.winner_confident,
+                r.is_match_start,
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,35 @@
+"""Per-frame health bar measurement.
+
+This extractor only answers "what does THIS frame show?".  It does no
+temporal smoothing and keeps no round state: the temporal rules (HP only goes
+down within a round, it only resets to full between rounds, occlusion spikes
+are ignored) live in ``replanal.health_clean`` and are applied by
+``HealthAggregator`` once the whole video has been read.
+
+Bar layout (GGST HUD at 1920x1080, same with and without the tournament
+overlay): each bar is 719 px wide and is anchored at the centre of the
+screen.  P1's fill ends at x=867 and shrinks towards the portrait on the left;
+P2's fill starts at x=1052 and shrinks towards the right.  Each column of the
+bar is classified as
+
+* F  current health   (pastel pink / beige; orange at low HP)
+* R  pending damage   (the dark red segment that shows damage from a combo
+                       that is still running; it drains when the combo ends)
+* W  neutral: bright colourless pixels (white sprites, super flashes, hit
+     sparks) and pastel pixels too dark to be lit fill (fill dimmed by a
+     flash or shadow).  These carry no information and are ignored.
+* N  anything else: the (semi-transparent) empty part of the bar, or a
+     coloured sprite drawn over the HUD.
+
+The health edge is the split point that best explains the columns as
+"F before, R/N after" (a 1-D step fit), so a sprite crossing part of the bar
+lowers the confidence instead of cutting the reading in half the way the old
+longest-run measurement did.  Pending red is NOT counted as health: in GGST
+that damage is already lost, it is just shown until the combo ends.
+"""
 from __future__ import annotations
 
-from collections import deque
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -10,428 +39,245 @@ from replanal.extractors.base import BaseExtractor
 from replanal.models import FrameContext, FrameData, HealthReading, Side
 
 
+@dataclass
+class BarMeasurement:
+    """Result of measuring one bar in one frame (all widths in pixels)."""
+
+    fill_px: int          # current health, measured from the anchored edge
+    pending_px: int       # red pending-damage segment right after the fill
+    total_px: int         # bar width (100 % health)
+    consistency: float    # fraction of informative columns that agree with the fit
+    occluded: float       # fraction of neutral columns (white / dimmed pastel: no info)
+    ambiguity: float      # width of the best-fit plateau / total (edge uncertainty)
+    mode: str             # colour mode that produced the fit
+
+    @property
+    def fill_pct(self) -> float:
+        return self.fill_px / self.total_px
+
+    @property
+    def pending_pct(self) -> float:
+        return self.pending_px / self.total_px
+
+    @property
+    def confidence(self) -> float:
+        return max(0.0, self.consistency * (1.0 - self.occluded) * (1.0 - self.ambiguity))
+
+
 class HealthBarExtractor(BaseExtractor):
-    """Extracts health percentage from P1 and P2 health bars.
+    """Measures P1/P2 health (and pending combo damage) from the HUD bars."""
 
-    Scans multiple Y bands to handle tournament overlays that shift the
-    HUD vertically.  For each band, tries warm (red/orange), cool
-    (blue/purple), and yellow/green detection.  Takes the best reading
-    across all bands and color modes per player.
+    # Bar spans [x1, x2) at 1920x1080.  Full health fills the whole span.
+    P1_X1, P1_X2 = 149, 868     # anchored at the right end (x2)
+    P2_X1, P2_X2 = 1052, 1771   # anchored at the left end (x1)
+    P1_MAX_W = P1_X2 - P1_X1    # 719
+    P2_MAX_W = P2_X2 - P2_X1    # 719
 
-    P1 and P2 are processed independently — if one player's bar is
-    unreadable (shifted, hidden, or too small), the other's reading is
-    still emitted.
-
-    A rolling median filter smooths out 1-3 frame brightness fluctuations
-    from GGS screen dim/flash effects (supers, round transitions, hit
-    animations) that would otherwise cause false 0% or inflated readings.
-    """
-
-    # x-ranges for health bar measurement.  The bars fill from the
-    # portrait (edge) toward the center.  At low health the remaining
-    # sliver sits near the center, so the range must extend close to
-    # the timer area (~x=960) to catch it.
-    P1_X1, P1_X2 = 155, 868
-    P2_X1, P2_X2 = 1052, 1782
-
-    # Primary Y band for health bars (confirmed from pixel inspection).
-    _PRIMARY_BAND = (112, 142)
-    # Alternate Y bands for shifted HUDs (tried only as fallback).
+    # Rows inside the bar (border rows excluded) for the standard HUD position,
+    # then fallback bands for overlays that shift the HUD vertically.
+    _PRIMARY_BAND = (116, 139)
     _ALT_BANDS = [(88, 112), (142, 170)]
-    # Pre-computed full Y range covering all bands (for single HSV conversion).
-    _FULL_Y1 = 88
-    _FULL_Y2 = 170
+    _FULL_Y1 = 72
+    _FULL_Y2 = 182
+    # Rows checked above a band (relative to its top row) and below it
+    # (relative to its bottom row).
+    _ABOVE = (-12, -5)
+    _BELOW = (5, 11)
 
-    # Minimum run length to consider a player's bar readable
-    _MIN_RUN = 50
+    # A column belongs to a class when more than this fraction of its rows do.
+    _COL_FRAC = 0.5
 
-    # Anchor tolerance: the health bar fill must be anchored to the correct
-    # edge of the region.  P1's bar depletes from the left (portrait side),
-    # so the right end of the fill stays fixed near the right edge.  P2's
-    # bar depletes from the right, so the left start stays near the left edge.
-    # Readings that don't meet this constraint are spurious (e.g. round
-    # transition UI elements that happen to have warm pixels).
-    _P1_ANCHOR_END_MIN = 650   # P1 run must end at column >= this (out of 713)
-    _P2_ANCHOR_START_MAX = 40  # P2 run must start at column <= this (out of 730)
-
-    # Activation: either player must exceed this for N consecutive frames
-    _ACTIVATE_THRESHOLD = 200
-    _ACTIVATE_FRAMES = 10
-
-    # Rolling median window.  Upward spikes (SLASH, LET'S ROCK text) are
-    # already rejected by the spike-rejection cap, so this window only
-    # needs to be large enough to smooth 1-3 frame screen-dim artifacts.
-    # Kept small so real rapid health drops (combos/supers) shift the
-    # median within ~4 frames.
-    _MEDIAN_WINDOW = 9
-
-    # Non-gameplay gap (in frame numbers) that triggers partial state reset.
-    # Must be longer than super/burst VFX occlusions (~2-3s = 60-90 frames)
-    # so the median buffer survives and can reject the post-VFX HP spike.
-    # Real round transitions have gaps > 3-5s (90-150+ frames).
-    _RESET_GAP = 100
-
-    # Max rate health can drop per frame (prevents instant 0% from noise).
-    # 3% per frame ≈ 90% per second at 30fps — well above any real damage rate.
-    _MAX_DROP_PER_FRAME = 0.03
-
-    # Number of consecutive unreadable frames to consider a player "dead"
-    # (bar gone after KO).  Must exceed any brief screen-flash duration.
-    _DEATH_FRAMES = 10
-
-    # Fixed max widths: 100% health = full ROI width
-    P1_MAX_W = P1_X2 - P1_X1  # 868 - 155 = 713
-    P2_MAX_W = P2_X2 - P2_X1  # 1782 - 1052 = 730
+    # A side's reading is emitted when its fit explains at least this
+    # fraction of the informative columns.
+    _MIN_CONSISTENCY = 0.70
+    # Fill widths below this are treated as "bar empty" (KO'd / 0 HP).
+    _EMPTY_PX = 3
+    # An alt band is only used when the primary band fit is this poor.
+    _ALT_BAND_BELOW = 0.80
 
     def __init__(self, config: HealthBarConfig | None = None):
         self.config = config or HealthBarConfig()
-        self._last_frame: int = -9999
-        self._activated: bool = False
-        self._activate_count: int = 0
-        # Rolling median buffers for raw pixel measurements
-        self._p1_buf: deque[int] = deque(maxlen=self._MEDIAN_WINDOW)
-        self._p2_buf: deque[int] = deque(maxlen=self._MEDIAN_WINDOW)
-        # Track last emitted percentages for monotonic constraint + hold
-        self._last_p1_pct: float = 1.0
-        self._last_p2_pct: float = 1.0
-        # Death / post-round detection: when one player's bar disappears
-        # for _DEATH_FRAMES consecutive frames while the other is still
-        # readable, the round is over.  _last_frame stops advancing so
-        # the gap-based reset fires naturally.
-        self._post_round: bool = False
-        self._p1_unreadable_count: int = 0
-        self._p2_unreadable_count: int = 0
-        # Track whether each player has been readable since the last
-        # gap reset.  Prevents re-triggering death detection on a player
-        # that was never visible in this round (e.g. P1 invisible in
-        # round 3 of the Slycoops set).
-        self._seen_p1: bool = False
-        self._seen_p2: bool = False
 
     @property
     def required_rois(self) -> list[str]:
         return []
 
-    def extract(self, ctx: FrameContext, data: FrameData) -> None:
-        frame = ctx.frame_bgr
-
-        # Reset after a non-gameplay gap (round/set transitions).
-        # Also resets max_w so the new round recalibrates its 100%
-        # reference from fresh observations.  This is critical when
-        # transition VFX produce warm pixels at a different width than
-        # the actual health bar (e.g. P2 warm at 414px during SLASH
-        # while P2 at 100% health is 722px in a different round).
-        if ctx.frame_number - self._last_frame > self._RESET_GAP:
-            self._activated = False
-            self._activate_count = 0
-            self._p1_buf.clear()
-            self._p2_buf.clear()
-            self._last_p1_pct = 1.0
-            self._last_p2_pct = 1.0
-            self._post_round = False
-            self._p1_unreadable_count = 0
-            self._p2_unreadable_count = 0
-            self._seen_p1 = False
-            self._seen_p2 = False
-
-        # ── Scan Y bands: primary first, alt bands only as fallback ─────
-        # Convert the full potential range to HSV once, then slice per band.
-        full_strip = frame[self._FULL_Y1:self._FULL_Y2]
-        full_hsv = cv2.cvtColor(full_strip, cv2.COLOR_BGR2HSV)
-
-        def _anchor_filter_p1(candidates: list[tuple[int, int]]) -> tuple[int, int]:
-            """Pick best P1 fill that passes anchor check (end >= 640)."""
-            best_w, best_s = 0, 0
-            for w, s in candidates:
-                if w >= self._MIN_RUN and (s + w) < self._P1_ANCHOR_END_MIN:
-                    continue  # reject: not anchored to right edge
-                if w > best_w:
-                    best_w, best_s = w, s
-            return best_w, best_s
-
-        def _anchor_filter_p2(candidates: list[tuple[int, int]]) -> tuple[int, int]:
-            """Pick best P2 fill that passes anchor check (start <= 40)."""
-            best_w, best_s = 0, 0
-            for w, s in candidates:
-                if w >= self._MIN_RUN and s > self._P2_ANCHOR_START_MAX:
-                    continue  # reject: not anchored to left edge
-                if w > best_w:
-                    best_w, best_s = w, s
-            return best_w, best_s
-
-        def _measure_band(y1: int, y2: int) -> tuple[int, int]:
-            hsv = full_hsv[y1 - self._FULL_Y1 : y2 - self._FULL_Y1]
-            # Each measure returns (run_length, start_index).
-            # Apply anchor validation per-fill before selecting the best,
-            # so an invalid fill can't beat a shorter but valid one.
-            p1_w, p1_s = _anchor_filter_p1([
-                self._measure_warm_fill(hsv, self.P1_X1, self.P1_X2),
-                self._measure_yellow_green_fill(hsv, self.P1_X1, self.P1_X2),
-            ])
-            p2_w, p2_s = _anchor_filter_p2([
-                self._measure_warm_fill(hsv, self.P2_X1, self.P2_X2),
-                self._measure_cool_fill(hsv, self.P2_X1, self.P2_X2),
-                self._measure_yellow_green_fill(hsv, self.P2_X1, self.P2_X2),
-            ])
-            return p1_w, p2_w
-
-        # Try primary band first.
-        p1_w, p2_w = _measure_band(*self._PRIMARY_BAND)
-
-        # Only try alt bands for whichever player is below threshold,
-        # AND only if the primary band showed at least a minimal signal.
-        # Without this guard, transition UI elements in alt bands
-        # produce spurious readings that prevent gap-based state resets.
-        _ALT_MIN_PRIMARY = 20
-        if p1_w < self._MIN_RUN or p2_w < self._MIN_RUN:
-            for y1, y2 in self._ALT_BANDS:
-                p1_alt, p2_alt = _measure_band(y1, y2)
-                if p1_w < self._MIN_RUN and p1_w >= _ALT_MIN_PRIMARY:
-                    p1_w = max(p1_w, p1_alt)
-                if p2_w < self._MIN_RUN and p2_w >= _ALT_MIN_PRIMARY:
-                    p2_w = max(p2_w, p2_alt)
-
-        p1_readable = p1_w >= self._MIN_RUN
-        p2_readable = p2_w >= self._MIN_RUN
-
-        # Track readability for death detection.
-        if p1_readable:
-            self._seen_p1 = True
-            self._p1_unreadable_count = 0
-        else:
-            self._p1_unreadable_count += 1
-        if p2_readable:
-            self._seen_p2 = True
-            self._p2_unreadable_count = 0
-        else:
-            self._p2_unreadable_count += 1
-
-        # Death detection: one player's bar disappeared (KO) while the
-        # other is still readable → round is over.  Stop advancing
-        # _last_frame so the gap-based reset fires naturally.
-        if not self._post_round:
-            if (self._p1_unreadable_count >= self._DEATH_FRAMES
-                    and self._seen_p1 and p2_readable):
-                self._post_round = True
-            elif (self._p2_unreadable_count >= self._DEATH_FRAMES
-                  and self._seen_p2 and p1_readable):
-                self._post_round = True
-
-        # At least one player's bar must be visible for this to be gameplay.
-        if not p1_readable and not p2_readable:
-            return
-
-        # ── Activation (require N consecutive qualifying frames) ──────────
-        if not self._activated:
-            # Always advance _last_frame during warmup so the gap counter
-            # doesn't fire while activation is building up.
-            self._last_frame = ctx.frame_number
-            if max(p1_w, p2_w) >= self._ACTIVATE_THRESHOLD:
-                self._activate_count += 1
-                if self._activate_count >= self._ACTIVATE_FRAMES:
-                    self._activated = True
-            else:
-                self._activate_count = 0
-
-        if not self._activated:
-            return
-
-        # ── Spike-rejection constraint (upward AND downward) ──────────
-        # Skip spike rejection while buffer is warming up after a gap reset,
-        # so the buffer can establish a true baseline from fresh readings.
-        _FLOOR_FACTOR = 0.15
-        _WARMUP_MIN = self._MEDIAN_WINDOW // 2
-        # Stall threshold for _last_frame gating: if raw reading exceeds
-        # the median by more than this factor, it's treated as a transition
-        # signal and _last_frame is NOT advanced.  Higher than the 5% spike
-        # cap to avoid stalling on normal frame-to-frame noise.
-        _STALL_FACTOR = 1.10
-
-        p1_was_clamped = False
-        p2_was_clamped = False
-        p1_significantly_above = False
-        p2_significantly_above = False
-        p1_raw, p2_raw = p1_w, p2_w  # save pre-clamped values
-
-        if p1_readable and len(self._p1_buf) >= _WARMUP_MIN:
-            prev_p1 = int(np.median(list(self._p1_buf)))
-            cap_p1 = int(prev_p1 * 1.05) + 3
-            floor_p1 = int(prev_p1 * _FLOOR_FACTOR)
-            if p1_w > cap_p1:
-                p1_w = cap_p1
-                p1_was_clamped = True
-            elif p1_w < floor_p1:
-                p1_was_clamped = True
-            if p1_raw > int(prev_p1 * _STALL_FACTOR) + 10:
-                p1_significantly_above = True
-        if p2_readable and len(self._p2_buf) >= _WARMUP_MIN:
-            prev_p2 = int(np.median(list(self._p2_buf)))
-            cap_p2 = int(prev_p2 * 1.05) + 3
-            floor_p2 = int(prev_p2 * _FLOOR_FACTOR)
-            if p2_w > cap_p2:
-                p2_w = cap_p2
-                p2_was_clamped = True
-            elif p2_w < floor_p2:
-                p2_was_clamped = True
-            if p2_raw > int(prev_p2 * _STALL_FACTOR) + 10:
-                p2_significantly_above = True
-
-        # ── _last_frame gating ────────────────────────────────────────
-        # Only advance _last_frame if at least one readable player has
-        # a reading within 10% of its buffer median.  When ALL readable
-        # bars are significantly above their median (transition screen
-        # warm pixels or round-start refill), _last_frame stalls, and
-        # the gap-based reset at the top of extract() eventually fires.
-        #
-        # Post-round override: after death detection triggers, _last_frame
-        # is frozen regardless of readings, ensuring the gap reset fires.
-        if not self._post_round:
-            any_trustworthy = (
-                (p1_readable and not p1_significantly_above)
-                or (p2_readable and not p2_significantly_above)
-            )
-            if any_trustworthy:
-                self._last_frame = ctx.frame_number
-
-        # Fixed max widths: 100% health = full ROI width
-        p1_max = self.P1_MAX_W
-        p2_max = self.P2_MAX_W
-
-        # ── P1 processing ──────────────────────────────────────────────
-        if p1_readable:
-            if not p1_was_clamped:
-                self._p1_buf.append(p1_w)
-            p1_smooth = int(np.median(list(self._p1_buf))) if self._p1_buf else p1_w
-            p1_pct = p1_smooth / p1_max if p1_max > 0 else 0.0
-
-            _SLOW_DROP = 0.002
-            p1_bar_gone = (p1_w == 0) or p1_was_clamped
-            if self._last_p1_pct > 0:
-                drop = _SLOW_DROP if p1_bar_gone else self._MAX_DROP_PER_FRAME
-                if p1_pct < self._last_p1_pct - drop:
-                    p1_pct = self._last_p1_pct - drop
-
-            p1_pct = max(0.0, min(1.0, p1_pct))
-            self._last_p1_pct = p1_pct
-            data.p1_health = HealthReading(
-                side=Side.P1,
-                health_pct=p1_pct,
-                bar_pixels_filled=p1_smooth,
-                bar_pixels_total=p1_max,
-            )
-
-        # ── P2 processing ──────────────────────────────────────────────
-        if p2_readable:
-            if not p2_was_clamped:
-                self._p2_buf.append(p2_w)
-            p2_smooth = int(np.median(list(self._p2_buf))) if self._p2_buf else p2_w
-            p2_pct = p2_smooth / p2_max if p2_max > 0 else 0.0
-
-            _SLOW_DROP = 0.002
-            p2_bar_gone = (p2_w == 0) or p2_was_clamped
-            if self._last_p2_pct > 0:
-                drop = _SLOW_DROP if p2_bar_gone else self._MAX_DROP_PER_FRAME
-                if p2_pct < self._last_p2_pct - drop:
-                    p2_pct = self._last_p2_pct - drop
-
-            p2_pct = max(0.0, min(1.0, p2_pct))
-            self._last_p2_pct = p2_pct
-            data.p2_health = HealthReading(
-                side=Side.P2,
-                health_pct=p2_pct,
-                bar_pixels_filled=p2_smooth,
-                bar_pixels_total=p2_max,
-            )
-
-    # ── Fill width measurement ───────────────────────────────────────────
-
-    def _measure_warm_fill(self, hsv: np.ndarray, x1: int, x2: int) -> tuple[int, int]:
-        """Measure fill width using warm pixel detection (red/pink/orange bars).
-
-        Warm pixels: H < 30 or H > 150, S > 30, V > 80.
-        A column counts as "filled" if >35% of its vertical pixels are warm.
-        Returns (run_length, start_index) of the longest continuous run.
-        """
-        h_ch = hsv[:, x1:x2, 0]
-        s_ch = hsv[:, x1:x2, 1]
-        v_ch = hsv[:, x1:x2, 2]
-
-        warm = ((h_ch < 30) | (h_ch > 150)) & (s_ch > 30) & (v_ch > 80)
-        col_ratio = np.mean(warm, axis=0)
-        is_filled = col_ratio > 0.35
-
-        return self._longest_run(is_filled)
-
-    def _measure_yellow_green_fill(self, hsv: np.ndarray, x1: int, x2: int) -> tuple[int, int]:
-        """Measure fill width for yellow/green bars.
-
-        Some tournament overlays render health bars in yellow or green
-        (H approx 25-70).  Uses S > 40, V > 100 to distinguish from
-        dark background.
-        Returns (run_length, start_index).
-        """
-        h_ch = hsv[:, x1:x2, 0]
-        s_ch = hsv[:, x1:x2, 1]
-        v_ch = hsv[:, x1:x2, 2]
-
-        filled = (h_ch >= 25) & (h_ch <= 70) & (s_ch > 40) & (v_ch > 100)
-        col_ratio = np.mean(filled, axis=0)
-        is_filled = col_ratio > 0.35
-
-        return self._longest_run(is_filled)
-
-    def _measure_cool_fill(self, hsv: np.ndarray, x1: int, x2: int) -> tuple[int, int]:
-        """Measure fill width for blue/purple bars.
-
-        In some tournament overlays, the P2 health bar is rendered in blue/purple
-        (H approx 90-145). The filled portion has S > 40, V > 80 while the depleted
-        portion is dark (V < 50).
-        Returns (run_length, start_index).
-        """
-        h_ch = hsv[:, x1:x2, 0]
-        s_ch = hsv[:, x1:x2, 1]
-        v_ch = hsv[:, x1:x2, 2]
-
-        is_blue = (h_ch >= 90) & (h_ch <= 145) & (s_ch > 40)
-        filled = is_blue & (v_ch > 80)
-
-        col_ratio = np.mean(filled, axis=0)
-        is_filled = col_ratio > 0.35
-
-        return self._longest_run(is_filled)
+    # ── Pixel classification ───────────────────────────────────────────
 
     @staticmethod
-    def _longest_run(is_filled: np.ndarray) -> tuple[int, int]:
-        """Find longest continuous run of True values.
+    def _classify(hsv: np.ndarray, mode: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Per-pixel masks (fill, pending_red, white) for one colour mode."""
+        h = hsv[..., 0]
+        s = hsv[..., 1]
+        v = hsv[..., 2]
+        red_hue = (h <= 7) | (h >= 168)
+        # Pending damage: saturated, mid-brightness red (measured: H 0/179,
+        # S 255, V 140-165).  Current-health orange at low HP is H 13-20,
+        # S ~240, V ~230, and the pastel fill is S 40-150, V > 200.
+        pending = red_hue & (s >= 180) & (v >= 90) & (v <= 205)
+        warm_hue = (h <= 30) | (h >= 160)
+        # Neutral (no information): white sprites / flashes, and pastel pixels
+        # that are too dark to be lit fill -- the fill dimmed by a super flash
+        # or a shadow looks like this, and so does the anchored end of the
+        # bar under some VFX.  Counting them as "empty" produced false zeros.
+        white = ((s < 30) & (v >= 170)) | (warm_hue & (s >= 30) & (s <= 170) & (v >= 80) & (v < 170))
+        if mode == "warm":
+            fill = warm_hue & (s >= 30) & (v >= 170) & ~pending
+        elif mode == "yellow_green":
+            fill = (h >= 25) & (h <= 70) & (s > 40) & (v > 100)
+        elif mode == "cool":
+            fill = (h >= 90) & (h <= 145) & (s > 40) & (v > 80)
+        else:  # pragma: no cover
+            raise ValueError(mode)
+        return fill, pending, white
 
-        Returns (length, start_index) of the longest run.
+    def measure_bar(
+        self,
+        hsv_band: np.ndarray,
+        side: Side,
+        modes: tuple[str, ...] | None = None,
+        hsv_above: np.ndarray | None = None,
+        hsv_below: np.ndarray | None = None,
+    ) -> BarMeasurement:
+        """Fit the health edge for one side on one HSV band (rows x 1920 cols).
+
+        ``hsv_above`` / ``hsv_below`` (a few rows just outside the bar) are used
+        to reject fill-coloured columns that are not a bar at all: the bar has
+        a finite height, so lit fill must not continue above or below it.
+        Full-screen super cinematics in orange/yellow otherwise read as two
+        full bars (they are letterboxed, so "above" alone is not enough).
         """
-        best = best_start = 0
-        current = start = 0
-        for i, val in enumerate(is_filled):
-            if val:
-                if current == 0:
-                    start = i
-                current += 1
-                if current > best:
-                    best = current
-                    best_start = start
+        if side == Side.P1:
+            x1, x2 = self.P1_X1, self.P1_X2
+        else:
+            x1, x2 = self.P2_X1, self.P2_X2
+        region = hsv_band[:, x1:x2]
+        outside = [a[:, x1:x2] for a in (hsv_above, hsv_below) if a is not None]
+        if side == Side.P1:
+            region = region[:, ::-1]  # index 0 = anchored (centre) end
+            outside = [a[:, ::-1] for a in outside]
+        total = region.shape[1]
+        if modes is None:
+            modes = ("warm", "yellow_green", "cool") if side == Side.P2 else ("warm", "yellow_green")
+
+        best: BarMeasurement | None = None
+        best_key = None
+        for mode in modes:
+            fill, pending, white = self._classify(region, mode)
+            F = fill.mean(axis=0) > self._COL_FRAC
+            R = pending.mean(axis=0) > self._COL_FRAC
+            W = (white.mean(axis=0) > self._COL_FRAC) & ~F & ~R
+            if outside:
+                not_bar = np.zeros_like(F)
+                for a in outside:
+                    a_fill, _, _ = self._classify(a, mode)
+                    not_bar |= a_fill.mean(axis=0) > self._COL_FRAC
+                W = W | ((F | R) & not_bar)
+                F = F & ~not_bar
+                R = R & ~not_bar
+            m, fit_score = self._fit_columns(F, R, W, total, mode)
+            # Prefer the colour mode with the most fill evidence, then the best fit.
+            key = (fit_score, m.consistency)
+            if best is None or key > best_key:
+                best, best_key = m, key
+        assert best is not None
+        return best
+
+    @staticmethod
+    def _fit_columns(F: np.ndarray, R: np.ndarray, W: np.ndarray, total: int, mode: str) -> tuple[BarMeasurement, int]:
+        """Step fit: choose e maximising  #F[:e] + #notF[e:]  (white columns are neutral)."""
+        score = np.where(F, 1, np.where(W, 0, -1)).astype(np.int32)
+        c = np.concatenate([[0], np.cumsum(score)])  # c[e] = sum(score[:e])
+        best = c.max()
+        plateau = np.flatnonzero(c == best)
+        lo, hi = int(plateau[0]), int(plateau[-1])
+        e = (lo + hi) // 2
+
+        informative = int((~W).sum())
+        n_F_before = int(F[:e].sum())
+        n_notF_after = int((~F[e:] & ~W[e:]).sum())
+        consistency = (n_F_before + n_notF_after) / informative if informative else 0.0
+        occluded = float(W.mean())
+        ambiguity = (hi - lo) / total
+
+        # Pending red: contiguous-ish run of R right after the edge.
+        pending_px = 0
+        if e < total:
+            tail = np.where(R[e:], 1, np.where(W[e:], 0, -1)).astype(np.int32)
+            ct = np.concatenate([[0], np.cumsum(tail)])
+            p = int(np.argmax(ct))
+            if ct[p] >= 3:
+                pending_px = p
+        return BarMeasurement(
+            fill_px=int(e),
+            pending_px=pending_px,
+            total_px=total,
+            consistency=float(consistency),
+            occluded=occluded,
+            ambiguity=float(ambiguity),
+            mode=mode,
+        ), int(best)
+
+    def measure_frame(self, frame_bgr: np.ndarray) -> tuple[BarMeasurement, BarMeasurement]:
+        """Measure both bars, trying alt bands for a side whose primary fit is poor."""
+        full = cv2.cvtColor(frame_bgr[self._FULL_Y1:self._FULL_Y2], cv2.COLOR_BGR2HSV)
+
+        def band(y1: int, y2: int) -> np.ndarray:
+            return full[y1 - self._FULL_Y1:y2 - self._FULL_Y1]
+
+        def above(y1: int, _y2: int) -> np.ndarray:
+            return band(y1 + self._ABOVE[0], y1 + self._ABOVE[1])
+
+        def below(_y1: int, y2: int) -> np.ndarray:
+            return band(y2 + self._BELOW[0], y2 + self._BELOW[1])
+
+        primary = band(*self._PRIMARY_BAND)
+        out = []
+        for side in (Side.P1, Side.P2):
+            m = self.measure_bar(primary, side, hsv_above=above(*self._PRIMARY_BAND),
+                                 hsv_below=below(*self._PRIMARY_BAND))
+            if m.consistency < self._ALT_BAND_BELOW or m.fill_px < self._EMPTY_PX:
+                for y1, y2 in self._ALT_BANDS:
+                    alt = self.measure_bar(band(y1, y2), side, hsv_above=above(y1, y2),
+                                           hsv_below=below(y1, y2))
+                    # Only switch to an alt band for a clearly better, non-empty fit.
+                    if alt.fill_px >= 50 and alt.consistency > max(m.consistency, self._ALT_BAND_BELOW):
+                        m = alt
+            out.append(m)
+        return out[0], out[1]
+
+    # ── Extractor entry point ──────────────────────────────────────────
+
+    def extract(self, ctx: FrameContext, data: FrameData) -> None:
+        m1, m2 = self.measure_frame(ctx.frame_bgr)
+
+        has1 = m1.fill_px >= self._EMPTY_PX or m1.pending_px >= self._EMPTY_PX
+        has2 = m2.fill_px >= self._EMPTY_PX or m2.pending_px >= self._EMPTY_PX
+        # No fill or pending red on either side: HUD absent (menus, cutscenes,
+        # full-screen flashes).  Emit nothing.
+        if not has1 and not has2:
+            return
+
+        for side, m, has, other_has in ((Side.P1, m1, has1, has2), (Side.P2, m2, has2, has1)):
+            if m.consistency < self._MIN_CONSISTENCY:
+                continue
+            # An empty bar is only believable when the other bar shows the
+            # HUD is on screen (a KO'd player's bar next to a live one).
+            if not has and not other_has:
+                continue
+            reading = HealthReading(
+                side=side,
+                health_pct=m.fill_pct,
+                bar_pixels_filled=m.fill_px,
+                bar_pixels_total=m.total_px,
+                raw_pct=m.fill_pct,
+                pending_pct=m.pending_pct,
+                confidence=m.confidence,
+            )
+            if side == Side.P1:
+                data.p1_health = reading
             else:
-                current = 0
-        return best, best_start
+                data.p2_health = reading
 
     def reset_calibration(self) -> None:
-        """Reset all state (call between replays)."""
-        self._max_w = (0, 0)
-        self._activated = False
-        self._activate_count = 0
-        self._p1_buf.clear()
-        self._p2_buf.clear()
-        self._last_frame = -9999
-        self._last_p1_pct = 1.0
-        self._last_p2_pct = 1.0
-        self._post_round = False
-        self._p1_unreadable_count = 0
-        self._p2_unreadable_count = 0
-        self._seen_p1 = False
-        self._seen_p2 = False
+        """Kept for API compatibility; the extractor is stateless."""

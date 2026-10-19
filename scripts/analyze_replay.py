@@ -20,7 +20,8 @@ from replanal.extractors.scene import SceneDetector
 from replanal.extractors.tension import TensionExtractor
 from replanal.extractors.timer import TimerExtractor
 from replanal.pipeline import ReplayPipeline
-from replanal.storage import init_db, write_damage_events, write_frame_data, write_frame_parquet, write_replay
+from replanal.extractors.combo import ComboCounterExtractor, combos_to_records, derive_combos
+from replanal.storage import init_db, write_combos, write_damage_events, write_frame_data, write_frame_parquet, write_replay
 from replanal.video import get_video_info
 from replanal.viz import save_health_timeline
 
@@ -45,7 +46,8 @@ def main():
     timer_ext = TimerExtractor()
     tension_ext = TensionExtractor()
     heart_ext = RoundCounterExtractor()
-    pipeline = ReplayPipeline(config, [scene_det, health_ext, timer_ext, tension_ext, heart_ext])
+    combo_ext = ComboCounterExtractor()
+    pipeline = ReplayPipeline(config, [scene_det, health_ext, timer_ext, tension_ext, heart_ext, combo_ext])
 
     frames = pipeline.process_video(video_path)
     print(f"  Processed {len(frames)} frames")
@@ -68,7 +70,17 @@ def main():
     write_replay(conn, replay_id, video_path, info["duration_ms"], info["frame_count"])
     write_frame_data(conn, replay_id, frames)
     write_damage_events(conn, replay_id, events)
+
+    # Combos from the on-screen hit counter (uses the cleaned health above)
+    combos = derive_combos(frames)
+    print(f"  Detected {len(combos)} combos (hit counter)")
+    write_combos(conn, replay_id, combos)
     conn.close()
+    import json
+
+    combos_path = output_dir / f"{replay_id}_combos.json"
+    combos_path.write_text(json.dumps(combos_to_records(combos), indent=1))
+    print(f"  Combos -> {combos_path}")
     print(f"  Results -> {db_path}")
 
     # Write per-frame parquet

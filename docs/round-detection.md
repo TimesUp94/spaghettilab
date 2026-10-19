@@ -50,6 +50,7 @@ Rolling median for `Option<i32>` values. Outputs `None` when no values exist in 
 - Compute rolling median of both players' HP with a 150-frame window (~5s)
 - If both players' rolling median HP stays below 0.15 for sustained periods, set both to NaN
 - Threshold is intentionally low (0.15) to avoid false positives during legitimate close rounds
+- Frames with a round-timer reading from 150 frames before to 75 frames after are kept: both players can sit near KO for seconds, and the last combo and KO often play with the timer hidden by a sprite or super (set 11 R13)
 
 ### Pass 2: Non-Gameplay Detection (No Timer)
 
@@ -167,6 +168,8 @@ From consecutive boundary pairs, create spans with:
 - `e_idx`: end frame index (next boundary or end of data)
 - `is_match_start`: inherited from match boundary mapping
 
+Each span's end is trimmed to 30 frames after its last HP reading: the loading screen, or the rest of a stream after the last set, is not part of the round (set 07's final round was dropped by the valid-ratio check below because 255 s of stream followed it).
+
 **Filtering:**
 - Spans shorter than `MIN_ROUND_FRAMES` (450 frames, ~15s) are dropped
 - Spans with less than 30% valid data ratio (frames where at least one player has HP) are dropped
@@ -211,12 +214,21 @@ Scans the post-40% portion of the round for mid-round wallbreaks:
 - **Post-valid requirement:** At least 20 valid frames must exist after the reset (real wallbreaks have continued gameplay; KO animations go to NaN quickly)
 - If a valid wallbreak is found, `effective_search_start` advances past it, excluding pre-wallbreak damage from KO detection
 
+### Step 1b: Terminal State
+
+The cleaned series (see `docs/cv-pipeline.md`) is non-increasing within a round and reads a KO as exactly 0, so each side's minimum over the search window is its final HP:
+- Exactly one side at <= 0.01 -> the other side wins (confident)
+- Neither at <= 0.01 and the final HPs differ by >= 0.03 -> the lower side loses (confident if the difference is >= 0.10)
+- Otherwise (both at 0, or too close) fall through to the steps below
+
 ### Step 2: KO Counting
 
 Count frames where each player's HP < 0.15 while the other player's HP < 0.90 (filtering post-KO garbage where the winner's bar has reset to ~1.0):
 
 - If `p1_ko_count >= 3` AND `p1_ko_count >= p2_ko_count * 3 + 1` -> P2 wins (P1 was KO'd)
 - If `p2_ko_count >= 3` AND `p2_ko_count >= p1_ko_count * 3 + 1` -> P1 wins (P2 was KO'd)
+
+Steps 2 and 3 report the winner's HP at the loser's first frame at <= 0.02 and the loser's minimum (they used to report a hard-coded 1.0 / 0.0).
 
 ### Step 3: Dual KO Handling
 
@@ -272,6 +284,7 @@ When `|combined| < 0.10` (very ambiguous):
 `winner_confident` is `false` when:
 - The winner was determined by the post-round tiebreaker
 - The combined signal was too weak
+- The round is cut off by the end of the video: it ends within 2 s of the last frame and the loser never reaches 0.01, or only within the last 2 s (the KO and slash are not visible)
 
 ---
 
@@ -281,7 +294,9 @@ After all rounds are determined by HP analysis, round counter hearts provide a g
 
 ### Why This is Needed
 
-GGS pending combo damage appears as a lighter bar segment that warm pixel detection still counts as health. This causes HP-based winner detection to misidentify winners when a lethal combo kills a player who appeared to have more health.
+GGS pending combo damage appears as a red bar segment that the old warm-pixel extractor counted as health. This caused HP-based winner detection to misidentify winners when a lethal combo killed a player who appeared to have more health. Since the health extractor rewrite (see `docs/cv-pipeline.md`, HealthBarExtractor), the red segment is measured separately and is not counted as health, and `health_pct` is cleaned to be non-increasing within a round. The hearts override is still useful as ground truth.
+
+The hearts are part of the Spaghetti Showdown stream overlay and are missing from other users' videos, so winner logic must not depend on them. With cleaned HP, the override is skipped when HP shows a single KO (winner confident, loser <= 0.01, winner > 0.01).
 
 ### Algorithm
 

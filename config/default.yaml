@@ -38,6 +38,32 @@ rois:
     y1: 1000
     x2: 1660
     y2: 1040
+  # Combo counter (replanal/extractors/combo.py). The counter is drawn on the
+  # attacker's HUD side. *_combo_counter = search area for the spelled-out
+  # word ("two".."nine", 2-9 hits); *_combo_big = search area of the huge
+  # two-digit counter shown from 10 hits on (tens + ones glyph, incl. the
+  # zoom-in on each hit). Measured on set 17; the tens-glyph slot inside
+  # these ROIs is in combo.py (BIG_TENS_BOX), so move both together.
+  p1_combo_counter:
+    x1: 180
+    y1: 180
+    x2: 900
+    y2: 450
+  p2_combo_counter:
+    x1: 1100
+    y1: 180
+    x2: 1910
+    y2: 450
+  p1_combo_big:
+    x1: 40
+    y1: 0
+    x2: 1360
+    y2: 1000
+  p2_combo_big:
+    x1: 860
+    y1: 0
+    x2: 1920
+    y2: 1000
 
 health_bar:
   background_threshold: 80

@@ -98,6 +98,48 @@ def write_damage_events(conn: sqlite3.Connection, replay_id: str, events: list[D
     conn.commit()
 
 
+def write_combos(conn: sqlite3.Connection, replay_id: str, combos: list) -> None:
+    """Write the combo list (replanal.extractors.combo.Combo) to a ``combos`` table.
+
+    Kept in its own table on purpose: ``frame_data`` is copied with
+    ``SELECT *`` into a fixed column list by the desktop app's .spag export and
+    must stay in lockstep with the web app, so new per-frame columns would break
+    export. The desktop app does not read or export this table (yet).
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS combos (
+            combo_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            replay_id    TEXT REFERENCES replays(replay_id),
+            attacker_side INTEGER,
+            frame_start  INTEGER,
+            frame_end    INTEGER,
+            start_ms     REAL,
+            end_ms       REAL,
+            max_hits     INTEGER,
+            hp_before    REAL,
+            hp_after     REAL,
+            damage_pct   REAL
+        )
+    """)
+    conn.execute("DELETE FROM combos WHERE replay_id = ?", (replay_id,))
+    conn.executemany(
+        "INSERT INTO combos (replay_id, attacker_side, frame_start, frame_end, start_ms, end_ms, max_hits, hp_before, hp_after, damage_pct) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (replay_id, c.attacker.value, c.frame_start, c.frame_end, c.start_ms, c.end_ms, c.max_hits, c.hp_before, c.hp_after, c.damage)
+            for c in combos
+        ],
+    )
+    conn.commit()
+
+
+def _raw_attr(reading, attr: str):
+    """Attribute of a raw HealthReading, or None when there was no reading."""
+    if reading is None:
+        return None
+    v = getattr(reading, attr, None)
+    return None if v is None else float(v)
+
+
 def write_frame_parquet(output_dir: Path, replay_id: str, frames: list[FrameData]) -> Path:
     """Write per-frame data as a parquet file. Returns the output path."""
     import sys
@@ -128,6 +170,16 @@ def write_frame_parquet(output_dir: Path, replay_id: str, frames: list[FrameData
             ("p2_rounds_won", pa.int32()),
             ("p1_tension_pct", pa.float64()),
             ("p2_tension_pct", pa.float64()),
+            ("combo_side", pa.int32()),
+            ("combo_count", pa.int32()),
+            # Per-frame health measurement before temporal cleaning
+            # (p1/p2_health_pct above are the cleaned values).
+            ("p1_health_raw", pa.float64()),
+            ("p2_health_raw", pa.float64()),
+            ("p1_pending_pct", pa.float64()),
+            ("p2_pending_pct", pa.float64()),
+            ("p1_health_conf", pa.float64()),
+            ("p2_health_conf", pa.float64()),
         ])
 
         arrays = [
@@ -140,6 +192,14 @@ def write_frame_parquet(output_dir: Path, replay_id: str, frames: list[FrameData
             pa.array([f.p2_rounds_won for f in frames], type=pa.int32()),
             pa.array([f.p1_tension_pct for f in frames], type=pa.float64()),
             pa.array([f.p2_tension_pct for f in frames], type=pa.float64()),
+            pa.array([f.combo_side.value if f.combo_side else None for f in frames], type=pa.int32()),
+            pa.array([f.combo_count for f in frames], type=pa.int32()),
+            pa.array([_raw_attr(f.p1_health_raw, "raw_pct") for f in frames], type=pa.float64()),
+            pa.array([_raw_attr(f.p2_health_raw, "raw_pct") for f in frames], type=pa.float64()),
+            pa.array([_raw_attr(f.p1_health_raw, "pending_pct") for f in frames], type=pa.float64()),
+            pa.array([_raw_attr(f.p2_health_raw, "pending_pct") for f in frames], type=pa.float64()),
+            pa.array([_raw_attr(f.p1_health_raw, "confidence") for f in frames], type=pa.float64()),
+            pa.array([_raw_attr(f.p2_health_raw, "confidence") for f in frames], type=pa.float64()),
         ]
 
         table = pa.Table.from_arrays(arrays, schema=schema)

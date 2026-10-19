@@ -9,8 +9,16 @@ Spaghetti Lab is a fighting game replay analysis tool (primarily Guilty Gear Str
 ## Build & Run Commands
 
 ```bash
-# Python dependencies
-pip install opencv-python numpy pyyaml pyarrow easyocr
+# Python dependencies (editable install; extras: ocr, viz, dev)
+pip install -e ".[ocr,dev]"
+
+# Python tests (pytest, testpaths = tests/)
+pytest
+pytest -k test_reads_health_from_ggs_frame   # single test
+
+# Re-run health cleaning / damage events / combos from a frames parquet, no video
+# decode (after changing replanal/health_clean.py, aggregator.py or combo grouping)
+python scripts/reclean_replay.py output/<id>/frames/<id>_frames.parquet --video-path <mp4> --duration-ms <ms> --frame-count <n> --output <dir>
 
 # Frontend dev (from app/)
 cd app && npm install
@@ -30,14 +38,20 @@ cargo build
 npx tsc --noEmit
 
 # Rust tests (from app/src-tauri/)
-cargo test -- --nocapture   # --nocapture to see eprintln debug output
+cargo test -- --nocapture                      # --nocapture to see eprintln debug output
+cargo test test_slycoops_rounds -- --nocapture # single test
+# NOTE: Rust tests are round-detection debug harnesses that open the hardcoded
+# C:/Projects/replanal/output/analysis.db and print rounds; they fail without that DB.
 
 # Release (from repo root)
 ./release.sh                      # auto-version YYYY.M.DD-preview.N
 ./release.sh 2026.4.1-preview.1   # explicit version
 ./release.sh --skip-build         # reuse existing artifacts
 ./release.sh --skip-push          # don't git push or create GH release
+.\release.ps1                     # PowerShell equivalent
 ```
+
+`.github/workflows/release.yml` (manual `workflow_dispatch`) builds cross-platform bundles: Windows NSIS, macOS dmg (arm64 + x64), Linux deb/AppImage.
 
 ## Architecture
 
@@ -64,12 +78,12 @@ Video (1080p @30fps)
 
 **Rust (`app/src-tauri/src/lib.rs`):** Single large file containing all Tauri commands and the round detection algorithm. Key responsibilities:
 - Round boundary detection using four signals: timer jumps, HP resets, gap-based resets, and data gaps
-- Winner determination via KO counting, HP clustering, min-HP fallback, and post-round tiebreaker
+- Winner determination: terminal state of the cleaned HP first (a side at 0 loses, else the lower final HP), then the older KO counting, HP clustering, min-HP fallback and post-round tiebreaker
 - Uncertain winner detection with manual override (stored in `winner_overrides` table)
 - Non-gameplay filtering (no timer for 20+ seconds → NaN-out HP data)
 - Wallbreak detection (distinguishes mid-round stage transitions from KO animations)
 - Match grouping (first-to-2 round wins), comeback detection
-- Hearts-based winner override from round counter extraction (raw data, not smoothed)
+- Hearts-based winner override from round counter extraction (raw data, not smoothed). The hearts only exist in the Spaghetti Showdown stream overlay, so never make them the primary signal
 - All SQLite queries for serving data to the frontend
 - Spawning Python subprocesses for analysis and VOD splitting
 - .spag file export/import (ZIP containing SQLite snapshot)
@@ -83,11 +97,15 @@ Video (1080p @30fps)
 - **Non-gameplay detection:** If the round timer is absent for 20+ consecutive seconds, the region is classified as non-gameplay (lobby, character select) and HP data is NaN-ed out.
 - **Uncertain winners:** When HP signals are ambiguous (combined signal < 0.10), rounds are marked `winner_confident: false`. Users can override via the UI, stored in `winner_overrides` SQLite table.
 - **Quad ROIs:** VOD splitter name tag regions use 4-point quads (parallelograms) for skewed text in GGS. Perspective-warped to rectangles before OCR.
-- **`.spag` files:** ZIP archives containing an SQLite snapshot. Registered as file association.
+- **`.spag` / `.spagz` files:** `.spag` is a ZIP with an SQLite snapshot (plus video); `.spagz` is the lightweight variant (analysis DB only, no video — stores `video_url` so YouTube/Twitch sessions re-embed on reopen). Both registered as file associations.
+- **Annotate mode:** Lightweight session from a YouTube/Twitch URL (`create_quick_session`, `AnnotateSetup`/`AnnotateView`) — embeds the video via IFrame API for timestamped notes, drawings and the review questionnaire, without running the CV pipeline. `VideoPlayer` abstracts playback over both `<video>` and embeds.
+- **Questionnaire:** Templates in `app/src/lib/questionnaireTemplate.ts`; answers keyed by `(replay_id, question_key)` with template-id-prefixed keys (e.g. `ggst.roundstart.main_options`).
 
 ### Database Schema
 
-SQLite with tables: `replays`, `frame_data` (per-frame health/tension/timer/rounds), `damage_events`, `notes` (user annotations), `winner_overrides` (manual winner corrections).
+SQLite with tables: `replays`, `frame_data` (per-frame health/tension/timer/rounds), `damage_events`, `notes` (user annotations), `drawings` (timestamped video drawings), `winner_overrides` (manual winner corrections), `questionnaire_answers`.
+
+Schema is versioned via `PRAGMA user_version` (`SCHEMA_VERSION` + `ensure_schema_version()` in `lib.rs`, run on open_spag/open_spagz). When changing the schema: bump `SCHEMA_VERSION`, add a migration, and update **both** table-copy paths used for export (`export_spag` and `copy_replay_tables_to_dst`) — missing columns there has broken exports before. The schema must stay in lockstep with the web app (FGCScoreboard `app/components/spaghetti-lab`) so `.spag`/`.spagz` files round-trip between both.
 
 ## Configuration
 
