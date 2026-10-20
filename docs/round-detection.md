@@ -10,10 +10,19 @@ Round detection and winner determination runs entirely in the Rust/Tauri backend
 |----------|-------|-------------|
 | `HP_CEILING` | 0.875 | Health normalization ceiling. Raw health values from the CV pipeline are divided by this to get 0.0-1.0 range. Accounts for the fact that health bars in GGS top out at ~87.5% of the pixel range. |
 | `MIN_ROUND_FRAMES` | 450 | ~15 seconds at 30fps. Minimum frame count for a valid round. Also used as minimum gap between detected boundaries. |
+| `LEAD_PARTIAL_MIN_FRAMES` | 240 | ~8 seconds. Minimum length of a leading partial round that ends in a KO (see below). |
 | `COMEBACK_DEFICIT` | 0.35 | Max deficit threshold for comeback detection. A round where the winner was behind by >= 35% at any point is flagged as a comeback. |
 | `DEFICIT_SMOOTH_WINDOW` | 91 | ~3 seconds. Heavy smoothing window for deficit/comeback tracking. Wider than the standard smoothing to suppress HP extraction noise that creates false deficits. |
 | `TIMER_SMOOTH_WINDOW` | 61 | ~2 seconds. Rolling median window for timer noise filtering. Applied to forward-filled timer values. |
 | `HP_RESET_WINDOW` | 90 | ~3 seconds. Rolling median window for HP reset detection. |
+
+**Sample rate:** all sample-count windows (the constants above and the literal windows below)
+are written for 30 samples per second, which is what the pipeline produces (it reads every
+`round(fps/30)`-th video frame). `sample_rate_scale(ts)` measures the rate from the median
+timestamp step and `scale_frames` converts each window, so data sampled at another rate keeps
+the same windows in seconds. The scale is exactly 1.0 within 5 % of 30/s, so 30/s data gives
+the same result as before. (Checked by duplicating every row of the harness data to 60/s and
+dropping every other row to 15/s: 159 rounds -> 160 / 158, against 162 / 155 without scaling.)
 
 ---
 
@@ -83,8 +92,14 @@ Three smoothing passes are computed for different purposes:
 Detects new rounds by watching for timer resets.
 
 **Preprocessing:**
-1. Forward-fill timer values (carry last known value through gaps)
-2. Apply 61-frame rolling median to filter OCR noise
+1. Drop unsupported start readings (`supported_timer`): a reading >= 88 needs at least 2 other
+   readings within ±1 s of the same or an adjacent value. The timer shows each value for about
+   a second; a single misread "97" on a super flash, forward-filled across the HUD gap after it,
+   made a fake round start (yt_KWXz7dmt2Pk 575 s). Lower readings are kept as they are (an
+   isolated low reading cannot start a round). Junk and non-gameplay detection still use the
+   raw readings.
+2. Forward-fill timer values (carry last known value through gaps)
+3. Apply 61-frame rolling median to filter OCR noise
 
 **Detection:**
 - Track `lowest_since_start` (lowest smoothed timer seen since last boundary)
@@ -119,15 +134,10 @@ Detects character select / game boundaries from large data gaps.
 - When the gap between consecutive valid frames exceeds 5000ms (5 seconds), a game break is recorded
 - Game breaks are unambiguous boundaries and are exempt from the wallbreak timer filter
 
-### Signal 4: Match Boundaries (Timer >= 97 + Both 0 Wins)
+### (Former Signal 4: match boundaries)
 
-Detects the start of a new match (game) within a set.
-
-**Detection:**
-- Forward-fill round counter data for both players
-- Use smoothed timer values
-- When `timer >= 97` AND `p1_rounds_won == 0` AND `p2_rounds_won == 0` AND either player previously had wins, a new match has started
-- Must be >= `MIN_ROUND_FRAMES` from the last match boundary
+Match starts no longer create boundaries: a hearts reading alone must never split a round. They
+are set per round from the hearts once the rounds are known (see Round-Counter Hearts below).
 
 ---
 
@@ -135,7 +145,7 @@ Detects the start of a new match (game) within a set.
 
 ### 1. Collect All Boundaries
 
-All four signal types are merged into a single sorted, deduplicated list of frame indices.
+The timer, HP-reset, gap-reset and game-break signals are merged into a single sorted, deduplicated list of frame indices.
 
 ### 2. Wallbreak Filter
 
@@ -153,9 +163,7 @@ Boundaries within 10 seconds of each other (by timestamp) are merged, keeping th
 
 If the first valid data frame is more than `MIN_ROUND_FRAMES` before the first boundary, it is inserted as a boundary (the replay may start mid-round).
 
-### 5. Match Start Mapping
-
-Each deduplicated boundary is checked against the match boundary set: a boundary is a match start if any Signal 4 boundary is within ~10 seconds (300 frame indices).
+**Leading partial round:** a video can open mid-round, or with its first round start unreadable (e.g. the stream shows the game scaled down for the first seconds, so no timer is read and that stretch counts as non-gameplay). When the span from the first valid frame to the first boundary is shorter than `MIN_ROUND_FRAMES` but at least `LEAD_PARTIAL_MIN_FRAMES` (240, ~8 s), it is still kept as round 0 if it ends in a KO: the *first* frame where one side's cleaned HP is <= 0.005 while the other is > 0.02 must lie in the last 40% of the span and at least ~8 s after its start. Such a span also bypasses the 15 s span minimum and the 12 s sub-span minimum (8 s instead). A video that opens on the last seconds of a round (KO and win pose only, e.g. `03_UF` at 0-5 s) is not kept.
 
 ---
 
@@ -166,9 +174,9 @@ Each deduplicated boundary is checked against the match boundary set: a boundary
 From consecutive boundary pairs, create spans with:
 - `s_idx`: start frame index
 - `e_idx`: end frame index (next boundary or end of data)
-- `is_match_start`: inherited from match boundary mapping
+- `is_match_start`: always set later, per round, from the hearts (see Round-Counter Hearts)
 
-Each span's end is trimmed to 30 frames after its last HP reading: the loading screen, or the rest of a stream after the last set, is not part of the round (set 07's final round was dropped by the valid-ratio check below because 255 s of stream followed it).
+Each span's end is trimmed to 30 frames after its last HP reading: the loading screen, or the rest of a stream after the last set, is not part of the round (set 07's final round was dropped by the valid-ratio check below because 255 s of stream followed it). A short trailing block of readings (under 2 s, no timer reading) after a HUD gap of 3 s or more is ignored when finding that last reading: it is the next round's intro, whose bars read before the timer appears (set 09_UF R11 ran 6.6 s into the "Duel 1" screen).
 
 **Filtering:**
 - Spans shorter than `MIN_ROUND_FRAMES` (450 frames, ~15s) are dropped
@@ -291,29 +299,59 @@ When `|combined| < 0.10` (very ambiguous):
 
 ---
 
-## Hearts-Based Winner Override
+## Round-Counter Hearts: Match Starts and Winner Check
 
-After all rounds are determined by HP analysis, round counter hearts provide a ground-truth correction.
+The two hearts on each side of the timer are the game's own HUD (same pixels on any 1080p GGST
+video, verified on non-overlay YouTube replays); only the name/score banner above them belongs
+to the Spaghetti Showdown stream overlay and must never be read. A side loses a heart for each
+round the opponent wins in the current match (`p1_rounds_won` = hearts P2 lost).
 
-### Why This is Needed
+**Timing:** the HUD updates the hearts at the start of the next round. The state read early in
+round k is the result of the rounds before k; between rounds (and in the seconds before a round
+starts) the previous state is still shown. The old windows (150 frames before the round start
+vs. between the round end and the next start) therefore compared two readings of the same state
+and, with the rewritten hearts reader, credited the previous round's result to the next one.
 
-GGS pending combo damage appears as a red bar segment that the old warm-pixel extractor counted as health. This caused HP-based winner detection to misidentify winners when a lethal combo killed a player who appeared to have more health. Since the health extractor rewrite (see `docs/cv-pipeline.md`, HealthBarExtractor), the red segment is measured separately and is not counted as health, and `health_pct` is cleaned to be non-increasing within a round. The hearts override is still useful as ground truth.
+**State of a round:** the mode of the raw (not forward-filled) readings with both sides read, from
+0.5 s to 10 s after the round start (clipped to the round end); the mode needs >= 1 s of readings
+(30 at 30/s) and >= 80 % of all readings, else unknown.
 
-The hearts are the game's own HUD (same pixels on any 1080p GGST video, verified on non-overlay YouTube replays); only the score banner above them belongs to the Spaghetti Showdown stream overlay and must never be read. The extractor still misreads lost (grey) hearts, so winner logic must not depend on them. With cleaned HP, the override is skipped when HP shows a single KO (winner confident, loser <= 0.01, winner > 0.01).
+**HUD gap + timer intro:** a match (like every round) starts after the HUD has been off screen:
+>= 1 s with no timer reading, looked for from 15 s before to 5 s after the round's first HP
+reading (the start of the video counts as a gap). After at least one such gap, a supported timer
+reading >= 97 must follow within 5 s (the timer's intro value is 99). Any gap in the window may
+supply it: an effect can hide the timer for > 1 s just after the intro (14_Grands R10).
 
-### Algorithm
+**Match start:** HUD gap + timer intro, and
+- hearts state known: 0/0 (both sides full for >= 1 s), and the previous round's state is not 0/0
+  (or this is the first round);
+- hearts state unknown (unreadable): the previous round ended a first-to-2 match, i.e. the latest
+  known hearts state since the last match start (or 0/0 at that start) plus the HP winners of the
+  rounds since gives a side 2 wins.
 
-Uses **RAW** round counter data (not forward-filled or smoothed) to avoid propagating sparse noisy spikes (e.g., lobby UI reading as `p1rw=1`).
+The old hearts reader read 0/0 nearly everywhere and the old timer reader never read 97-99, so data
+from the old readers still flags no match starts. The hearts never add, move or split round
+boundaries; those come only from HP/timer resets and data gaps.
 
-For each round:
-1. Compute hearts **before** the round: mode of raw `p1_rounds_won` / `p2_rounds_won` in 150 frames preceding round start
-2. Compute hearts **after** the round: mode in the window between round end and next round start
-3. **Confidence threshold:** The mode value must account for >= 40% of valid frames in the window (filters noisy OCR from lobby/transition screens)
-4. Compare pre vs. post:
-   - If P1's wins increased but P2's didn't -> P1 won this round
-   - If P2's wins increased but P1's didn't -> P2 won this round
-   - If this disagrees with the HP-based winner, **override** the winner and swap `winner_final_hp` / `loser_final_hp`
-5. For match-start rounds (both pre-hearts are 0), compare post-hearts against 0 instead of pre-values
+**Winner check:** compare the state of round k with that of round k+1:
+- one side up by exactly one, the other unchanged: that side won round k;
+- round k+1 back at 0/0 (a new match): round k ended the match, won by the side that already had
+  a round (from 1-0 or 0-1; from 1-1 either side could have won, no check);
+- anything else (unknown states, missed or split rounds): no check.
+
+The hearts are a secondary signal; HP and timer stay primary:
+- hearts agree with an uncertain HP winner: the round becomes confident;
+- hearts disagree with an uncertain HP winner: tie-break, the hearts' side wins
+  (`winner_final_hp` / `loser_final_hp` swapped) but the round stays uncertain;
+- hearts disagree with a confident HP winner: the HP winner is kept and the round is marked
+  uncertain, so the user is asked.
+The last round of a video has no next state and is never checked.
+
+**Results** (re-extracted data, `output/reanalysis2/merged.db` and `yt/`; dumps in
+`output/round_fix/v65`, `v65_yt`): match starts are identical to v62 on all 18 videos (64 on our
+15 replays, 0 first-to-2 violations; KWX 6 matches, Pbs 3, gbt 2, checked against the in-game
+hearts and the YouTube score strip). The only change: 05_UF R3 (double KO, P1?) becomes confident
+P1, which the next round's hearts and the stream show. 11_WFinal R12 stays P1? via the tie-break.
 
 ---
 

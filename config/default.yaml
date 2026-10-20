@@ -2,8 +2,12 @@ resolution:
   width: 1920
   height: 1080
 
+# Fallback fps, used only when the video reports none (timestamps come from
+# the video's own fps).
 fps: 30
-sample_every_n_frames: 1
+# auto = every round(video_fps / 30) frames (60 fps -> 2), so ~30 samples/s;
+# an integer forces a fixed step.
+sample_every_n_frames: auto
 
 # ROI coordinates (confirmed from pixel inspection at 1920x1080).
 # Videos are auto-resized to 1920x1080 before extraction.

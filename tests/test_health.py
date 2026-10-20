@@ -333,3 +333,90 @@ def test_short_ko_before_slash_reaches_zero():
     r = clean_series(p1, p2, c1, c2, np.zeros(n), np.zeros(n), timer)
     assert r.p2[205] == 0.0
     assert abs(np.nanmin(r.p1) - 0.873) < 1e-9
+
+
+def test_timer_intro_starts_round_when_a_bar_never_reads_full():
+    # yt_KWXz7dmt2Pk ~490 s: on a bright stage a full P1 bar reads 0.62 with
+    # confidence 0.05, so the bars are never both seen full.  The round
+    # timer reappears after the KO and reads its start value for seconds.
+    n1, gap, n2 = 400, 60, 400
+    p1 = np.concatenate([np.full(n1, 0.3), np.full(gap, np.nan), np.full(n2, 0.62)])
+    p2 = np.concatenate([np.linspace(1.0, 0.05, n1), np.full(gap, np.nan), np.full(n2, 1.0)])
+    c1 = np.concatenate([np.full(n1, 0.8), np.zeros(gap), np.full(n2, 0.05)])
+    c2 = np.concatenate([np.full(n1, 0.8), np.zeros(gap), np.full(n2, 0.95)])
+    timer = np.concatenate([np.full(n1, 70.0), np.full(gap, np.nan), np.full(120, 99.0),
+                            np.full(n2 - 120, 90.0)])
+    r = clean_series(p1, p2, c1, c2, None, None, timer)
+    assert any(n1 <= s <= n1 + gap for s in r.resets)
+    # Round 2 is not fitted together with round 1: P2 is back at full.
+    assert abs(r.p2[-1] - 1.0) < 1e-9
+    assert np.nanmin(r.p2[:n1]) < 0.1
+
+
+def test_timer_intro_needs_a_countdown_before_it():
+    # The same bars, but the segment's timer never left its start values
+    # (still the first seconds of a round): no reset from the intro rule.
+    n1, gap, n2 = 400, 60, 400
+    p1 = np.concatenate([np.full(n1, 0.3), np.full(gap, np.nan), np.full(n2, 0.62)])
+    p2 = np.concatenate([np.linspace(1.0, 0.05, n1), np.full(gap, np.nan), np.full(n2, 1.0)])
+    c1 = np.concatenate([np.full(n1, 0.8), np.zeros(gap), np.full(n2, 0.05)])
+    c2 = np.concatenate([np.full(n1, 0.8), np.zeros(gap), np.full(n2, 0.95)])
+    timer = np.concatenate([np.full(n1, 95.0), np.full(gap, np.nan), np.full(n2, 99.0)])
+    r = clean_series(p1, p2, c1, c2, None, None, timer)
+    assert not any(n1 <= s <= n1 + gap for s in r.resets)
+
+
+def test_near_double_ko_survivor_is_the_bar_shown_after_the_ko():
+    # yt_PbsXLfP7C1M R0: P1 at 1.7 %, P2 at 12.7 %.  In the last exchange
+    # P1's sliver reads empty (with red) and P2 is hit to 1.7 %; after the KO
+    # cinematic the HUD shows P1's sliver and P2's empty bar: P2 lost.
+    n = 400
+    p1 = np.full(n, 0.017)
+    p2 = np.full(n, 0.127)
+    c1 = np.full(n, 0.9)
+    c2 = np.full(n, 0.9)
+    q1 = np.zeros(n)
+    q2 = np.zeros(n)
+    p1[200:230] = 0.0
+    q1[200:215] = 0.8
+    p2[200:230] = 0.017
+    q2[200:215] = 0.7
+    p1[230:330] = np.nan                        # KO cinematic and slash
+    p2[230:330] = np.nan
+    c1[230:330] = 0.0
+    c2[230:330] = 0.0
+    p2[330:345] = 0.0                           # HUD back: P1 shown, P2 empty
+    p1[345:] = np.nan
+    p2[345:] = np.nan
+    timer = np.full(n, np.nan)
+    timer[:200] = 80
+    r = clean_series(p1, p2, c1, c2, q1, q2, timer)
+    assert abs(r.p1[344] - 0.017) < 1e-9
+    assert r.p2[344] == 0.0
+
+
+def test_survivor_shown_after_ko_is_not_a_double_ko():
+    # 05_UF R6: P1 (2.5 %) is KO'd; P2's 5 % bar reads empty under the KO
+    # cinematic, then the HUD shows it again next to P1's empty bar.
+    n = 400
+    p1 = np.full(n, 0.025)
+    p2 = np.full(n, 0.05)
+    c1 = np.full(n, 0.9)
+    c2 = np.full(n, 0.8)
+    q1 = np.zeros(n)
+    p1[200:] = 0.0
+    q1[200:205] = 0.3
+    p2[210:225] = 0.0                           # junk under the cinematic
+    p1[225:300] = np.nan
+    p2[225:300] = np.nan
+    c1[225:300] = 0.0
+    c2[225:300] = 0.0
+    p1[300:320] = 0.0                           # HUD back: P2 shown, P1 empty
+    p2[300:320] = 0.05
+    p1[320:] = np.nan
+    p2[320:] = np.nan
+    timer = np.full(n, np.nan)
+    timer[:200] = 80
+    r = clean_series(p1, p2, c1, c2, q1, np.zeros(n), timer)
+    assert r.p1[319] == 0.0
+    assert abs(r.p2[319] - 0.05) < 1e-9

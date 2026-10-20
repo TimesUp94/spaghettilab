@@ -15,12 +15,25 @@ class HealthBarConfig:
     smoothing_window: int = 3
 
 
+def _parse_sample_every(value) -> int | None:
+    """``None``/``"auto"`` -> None (auto), else a positive int."""
+    if value is None or (isinstance(value, str) and value.strip().lower() == "auto"):
+        return None
+    n = int(value)
+    if n < 1:
+        raise ValueError(f"sample_every_n_frames must be >= 1 or 'auto', got {value!r}")
+    return n
+
+
 @dataclass
 class PipelineConfig:
     width: int = 1920
     height: int = 1080
-    fps: int = 30
-    sample_every_n_frames: int = 1
+    # Fallback only: timestamps use the video's own fps (cv2.CAP_PROP_FPS);
+    # this is used when the container reports none.
+    fps: float = 30
+    # None = auto: every round(video_fps / 30) frames, i.e. ~30 samples/s.
+    sample_every_n_frames: int | None = None
     rois: dict[str, ROIRect] = field(default_factory=dict)
     health_bar: HealthBarConfig = field(default_factory=HealthBarConfig)
 
@@ -50,7 +63,7 @@ class PipelineConfig:
             width=resolution.get("width", 1920),
             height=resolution.get("height", 1080),
             fps=raw.get("fps", 30),
-            sample_every_n_frames=raw.get("sample_every_n_frames", 1),
+            sample_every_n_frames=_parse_sample_every(raw.get("sample_every_n_frames")),
             rois=rois,
             health_bar=health_bar,
         )

@@ -31,14 +31,21 @@ def main():
     parser.add_argument("video", help="Path to replay MP4")
     parser.add_argument("--config", default=str(ROOT / "config" / "default.yaml"))
     parser.add_argument("--output", default=str(ROOT / "output"))
+    parser.add_argument(
+        "--sample-every", type=int, default=None,
+        help="Process every Nth frame (default: config, 'auto' = round(video fps / 30))",
+    )
     args = parser.parse_args()
 
     video_path = args.video
     config = PipelineConfig.from_yaml(Path(args.config))
+    if args.sample_every is not None:
+        config.sample_every_n_frames = max(1, args.sample_every)
 
     print(f"Analyzing: {video_path}")
-    info = get_video_info(video_path)
-    print(f"  Resolution: {info['width']}x{info['height']}, FPS: {info['fps']:.0f}, Frames: {info['frame_count']}")
+    info = get_video_info(video_path, config.fps, config.sample_every_n_frames)
+    print(f"  Resolution: {info['width']}x{info['height']}, FPS: {info['effective_fps']:.2f}, Frames: {info['frame_count']}")
+    print(f"  Sampling every {info['sample_every']} frame(s) = {info['effective_fps'] / info['sample_every']:.1f} samples/s")
 
     # Build pipeline with all extractors
     scene_det = SceneDetector()

@@ -46,8 +46,8 @@ Immutable context passed to every extractor for a single frame.
 | Field | Type | Description |
 |-------|------|-------------|
 | `video_path` | `str` | Path to source video |
-| `frame_number` | `int` | Absolute frame index |
-| `timestamp_ms` | `float` | Computed as `(frame_number / fps) * 1000.0` |
+| `frame_number` | `int` | Index of the frame in the source video (0, 2, 4, ... on a 60 fps video) |
+| `timestamp_ms` | `float` | `(frame_number / video_fps) * 1000.0` (real video time) |
 | `frame_bgr` | `np.ndarray` | Full frame in BGR format, always resized to 1920x1080 |
 | `rois` | `dict[str, np.ndarray]` | Pre-cropped ROI images keyed by name |
 
@@ -116,8 +116,8 @@ Aggregated from health deltas across frames.
 |-------|---------|-------------|
 | `width` | 1920 | Expected frame width |
 | `height` | 1080 | Expected frame height |
-| `fps` | 30 | Assumed frame rate |
-| `sample_every_n_frames` | 1 | Process every Nth frame (2 = 15fps) |
+| `fps` | 30 | Fallback only, when the video reports no fps (`CAP_PROP_FPS` = 0) |
+| `sample_every_n_frames` | auto | `auto` = `max(1, round(video_fps / 30))` (60 fps -> 2), so ~30 samples/s; an integer forces a step |
 | `rois` | `{}` | Named ROI rectangles from YAML |
 | `health_bar` | `HealthBarConfig()` | Health bar extraction config |
 
@@ -145,20 +145,30 @@ The pipeline pre-crops all ROIs once per frame before running extractors, stored
 
 **Source:** `replanal/video.py`
 
-### iter_frames(video_path, fps=30, sample_every=1)
+### iter_frames(video_path, fps=None, sample_every=None, max_frames=None)
 
 Generator that yields `(frame_number, timestamp_ms, frame_bgr)` tuples.
 
 - Opens video with `cv2.VideoCapture`
 - Non-1920x1080 frames are resized to 1920x1080 with `cv2.resize`
-- `sample_every` controls frame skipping (e.g., 2 = process every other frame)
-- Timestamp is computed as `(frame_number / fps) * 1000.0`
+- The fps comes from the video (`CAP_PROP_FPS`); the `fps` argument (config `fps`) is only a fallback when the video reports 0
+- `sample_every=None` (auto) steps `max(1, round(video_fps / 30))` frames, so the
+  sample rate stays ~30/s: 60 fps YouTube replays are read every 2nd frame. Downstream
+  code (health cleaning, combo grouping, the Rust round detector) counts in samples
+  and assumes ~30 samples/s. Skipped frames use `cap.grab()` (no BGR copy)
+- `ComboCounterExtractor`'s `stride` (default 2) also counts samples: it derives the
+  spacing between sampled frame numbers (1 at 30 fps, 2 for a 60 fps video read every 2nd
+  frame) and reads the counter on every 2nd *sample*, not every even source frame
+- `frame_number` is the source-video frame index; timestamp is `(frame_number / video_fps) * 1000.0`.
+  30 fps videos give exactly the same frames and timestamps as before
+- `max_frames` stops after that many source frames
 - `VideoCapture` is released in a `finally` block
 
-### get_video_info(video_path) -> dict
+### get_video_info(video_path, fallback_fps=None, sample_every=None) -> dict
 
 Returns metadata dictionary:
-- `width`, `height`, `fps`, `frame_count`, `duration_ms`
+- `width`, `height`, `fps` (as reported), `frame_count`, `duration_ms`
+- `effective_fps` (reported or fallback) and `sample_every` (resolved step) used by the pipeline
 
 ---
 
@@ -234,25 +244,33 @@ emitted when `consistency >= 0.70`; an empty bar only when the other bar shows t
 
 **Source:** `replanal/extractors/timer.py`
 
-Reads the two-digit round timer (0-99) using Otsu thresholding and template matching.
+Reads the two-digit round timer (0-99) by in-place grey template matching of each digit cell.
+Returns `None` rather than guess: a missing reading is cheap for the cleaner, a wrong one is not.
 
 **Required ROIs:** `timer_digits`
 
 **Algorithm:**
 
-1. Convert ROI to grayscale
-2. Check background darkness (>25% of pixels below gray level 50); reject if too bright (transition/effect)
-3. Apply Otsu threshold to segment digit pixels from dark background
-4. Check fill ratio: must be 15%-45% (expected range for two digits)
-5. Split mask into left half (tens digit) and right half (ones digit)
-6. For each half:
-   - Find bounding box of white pixels
-   - Crop and resize to standard 30x50 template size (`TEMPLATE_W x TEMPLATE_H`)
-   - Binary threshold at 127
-   - Match against all pre-extracted digit templates (0-9) stored in `data/templates/timer_digits.npz`
-   - Matching metric: normalized pixel agreement `sum(resized == template) / (W * H)`
-   - Confidence threshold: 0.70 (reject if best score < 0.70)
-7. Return `tens * 10 + ones` as `data.timer_value`
+1. Grey ROI, scaled to the 80x55 reference size and zero-padded by 8 px.
+2. The two digits sit at fixed, staggered cells (the ones digit is drawn ~12 px lower than the
+   tens). Each cell is searched within +-4 px of its nominal box (46x36) with normalised
+   cross-correlation (`TM_CCOEFF_NORMED`) against ten grey glyph templates shared by both cells.
+3. A cell is accepted when the best score is >= 0.65, beats the runner-up digit by >= 0.10, and
+   every quadrant of the matched patch agrees with the glyph (RMS of the normalised difference
+   <= 0.95 for tens, 1.2 for ones). The quadrant check rejects partly covered digits (a 5 with its
+   top covered correlates with 3, a 7 with its bar hidden with 1).
+4. If a cell fails at full size but looked digit-like (score >= 0.5), glyphs squashed to 90% / 80%
+   height towards the baseline are tried: a new digit grows up from the baseline for a few frames
+   after each tick.
+5. Both cells read -> `tens * 10 + ones`; otherwise `timer_value` stays `None`.
+
+Templates (`replanal/extractors/timer_glyphs.npz`, shipped with the package) are averaged, aligned
+crops from the hand-labelled set in `tests/data/timer/` (overlay VODs + 60 fps non-overlay YouTube
+replays), rebuilt and scored with `scripts/build_timer_templates.py`. On held-out videos: 100% exact
+on clean crops, 0 wrong values (the old Otsu/half-split reader: 41% exact, 45% wrong, e.g. 98->90,
+67->82, 65->85). Cost ~1.3 ms per read (old: ~0.16 ms). Values below 28 never occur in the labelled
+VODs, so tens digits 0/1 and the single-digit display (< 10) are unverified; an unrecognised
+display reads `None`.
 
 ### TensionExtractor
 
@@ -285,29 +303,25 @@ Reads P1 and P2 tension gauge percentage from the green-hued tension bars.
 
 **Source:** `replanal/extractors/round_counter.py`
 
-Counts rounds won by each player by examining heart indicators above the health bars.
+Counts rounds won by each player from the two hearts per side next to the round timer. They are game-native HUD (same pixels with or without our stream overlay; the overlay's name/score banner above them is never read). Red = alive, grey = lost; the outer heart is lost first and a lost heart is drawn smaller and ~4 px lower.
 
 **Required ROIs:** None (reads directly from the full frame at known positions)
 
 **Heart positions (1920x1080 coordinates):**
-- P1 hearts: inner (843, 83), outer (799, 88)
-- P2 hearts: inner (1077, 83), outer (1121, 88)
+- P1 hearts: inner (843, 86), outer (799, 91); grey outer heart centred at (799, 94)
+- P2 hearts: inner (1077, 86), outer (1121, 91); grey outer heart centred at (1120, 94)
 
-**Detection method:**
+**Detection method** (`read_lost_hearts(frame, side)`, per side):
 
-For each heart position, samples a 20x20 pixel region (`SAMPLE_HALF = 10`):
-
-1. Convert frame to HSV, extract saturation (S) and value (V) channels
-2. Check visibility: mean V < 40 = too dark, heart not visible (skip)
-3. Classify:
-   - Low saturation (mean S < 60) + bright (mean V > 100) = **white heart** (round lost)
-   - Otherwise = **red heart** (active / round not lost)
+1. The inner heart must be a visible red heart: median of a small box on it has (R-G)/R >= 0.6, and at least 3 of 4 boxes just outside it (below both bottom corners, above it, the gap between the hearts) are clearly less red. Red screen fills and the dark-red lobby stripes fail this.
+2. The outer heart is compared against that still-red heart: red if similarly red and bright (R within 0.5-2.2x, the inner heart pulses), lost/grey if its median inside the grey-heart outline is neutral (or pinkish while the surroundings are red-tinted), not yellow, at most 2x the red heart's brightness, uniform, and the ring around the outline differs from it on at least 3 of 4 sides (top, left, right, below the tip).
+3. Anything else returns `None` for that side (white flash, HUD hidden by a super cinematic or fade, occluding effects) instead of a count. Two lost hearts are only accepted when both are clean neutral-grey islands; in practice the HUD fades out right after the match-deciding KO, so 2 is almost never seen.
 
 **Scoring logic:**
-- `rounds_won_by_P1 = number of white hearts on P2's side` (P2 lost those rounds)
-- `rounds_won_by_P2 = number of white hearts on P1's side`
+- `rounds_won_by_P1 = lost hearts on P2's side` (P2 lost those rounds)
+- `rounds_won_by_P2 = lost hearts on P1's side`
 
-Returns `None` (no data) if zero hearts are visible (non-gameplay frame).
+Values are written only when both sides are readable. Accuracy on the labeled set in `tests/data/hearts` (804 frames, our VODs + 3 non-overlay YouTube replays, per-side readings): 98.7% correct / 0% wrong on the held-out videos, 97.9% / 0.12% overall (the previous S<60/V>100 classifier: 57.5% / 42.0%).
 
 ---
 
@@ -336,6 +350,17 @@ round; the red pending segment is already-lost HP.
    within 150 frames before it, if every timer reading in between is a start value (a
    frozen in-round timer misread as "93" interleaves with its true "83"s). Otherwise the
    empty intro bars end the previous round at 0 for both sides.
+   **Timer-intro reset** (fallback, `_timer_intros` / `_intro_reset`): when a bar never
+   reads full (a bright stage washes out the P1 bar, which reads 0.62 with confidence 0.05;
+   the replay input display covers the outer part of both bars), the round timer still
+   restarts. After a gap of > 30 frames without a timer reading, a run of >= 20 readings in
+   the next 90 frames, >= 90 % of them start values (>= 89), starts a new segment if the
+   segment had a credible in-round reading (< 89), is >= 300 frames old and had damage, and
+   the raw bars over those 90 frames (any confidence, median) rose: one side >= 0.30 above
+   its low in the segment, the other not below its low - 0.05. It is checked 90 frames
+   after the intro, so the regular rule gets the first chance; the reset moves back to just
+   after the last confident low reading of the old round (the bars fill before the timer
+   shows).
 2. **Monotone fit per side:** weighted L1 isotonic regression (non-increasing, PAV with
    weighted medians) over readings with confidence >= 0.35. Short runs of bad readings in
    either direction are outvoted. A new level needs >= 3.0 total weight (about 4 good
@@ -364,6 +389,15 @@ round; the red pending segment is already-lost HP.
    the survivor was at <= 0.20 it may still reach 0 within 30 frames (double KO);
    otherwise nothing after the KO may lower it, even with red shown (KO-screen junk shows
    fake red).
+   **Survivor shown after the KO** (`_near_double_ko_survivor`): when the survivor is at
+   <= 0.20 just after the KO, the last run of 5 frames within 210 frames after the KO in
+   which one bar shows its level (>= 0.01, between its level after and before the KO,
+   confidence >= 0.35) while the other reads empty (confidence >= 0.6) names the survivor.
+   That side keeps its level: its later empty readings are KO-cinematic junk, not a double
+   KO (05_UF R6). If it is the side the fit KO'd first and both were at <= 0.03 (a
+   near-double KO; a 1-px sliver flickers to empty), the loser is swapped (yt_Pbs R0). The
+   210-frame limit keeps out the next round's intro screen, whose junk reads like a sliver
+   next to an empty bar (14_Grands R1).
    **KO fallback:** if neither side reaches 0 this way, each side is refit with full weight
    (not x0.5) on the credible empty readings after the end of play, when the other side was
    above 0.20 at the end of play. The HUD is often up for only a few frames between the KO

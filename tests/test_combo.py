@@ -168,3 +168,22 @@ def test_derive_combos_resumes_big_count_after_cinematic():
     frames.extend(_frame(len(frames)) for _ in range(5))
     combos = derive_combos(frames)
     assert [(c.attacker, c.max_hits) for c in combos] == [(Side.P2, 11)]
+
+
+def test_stride_counts_samples_not_source_frames(default_config):
+    """A 60 fps video read every 2nd frame has only even frame numbers; the
+    stride must still skip every other *sample*, not read all of them."""
+    ext = ComboCounterExtractor(stride=2)
+    if not ext.enabled:
+        pytest.skip("combo templates not built")
+    calls = []
+    real = ext.read_side
+    ext.read_side = lambda rois, side: (calls.append(side), real(rois, side))[1]
+    d0 = _read(ext, default_config, FRAMES / "set17_f09000_x860.jpg", frame_number=200)
+    d1 = _read(ext, default_config, FRAMES / "set17_f10330_x0.jpg", frame_number=202)
+    assert (d0.combo_side, d0.combo_count) == (Side.P2, 3)
+    # frame 202 is the next sample: skipped, reading carried over
+    assert (d1.combo_side, d1.combo_count) == (Side.P2, 3)
+    assert len(calls) == 2  # one read (both sides) for two samples
+    _read(ext, default_config, FRAMES / "set17_f10330_x0.jpg", frame_number=204)
+    assert len(calls) == 4

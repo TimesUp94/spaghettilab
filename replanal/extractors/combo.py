@@ -255,6 +255,11 @@ class ComboCounterExtractor(BaseExtractor):
         self.stride = max(1, int(stride))
         self._held: tuple[Side, int] | None = None
         self._held_frame = -10**9
+        # Spacing between consecutive sampled frame numbers (1 at 30 fps,
+        # 2 when a 60 fps video is read every 2nd frame). The stride counts
+        # samples, not source frames.
+        self._step = 0
+        self._prev_frame: int | None = None
         tm = load_templates(templates_path)
         words = {int(k[1:]): v for k, v in tm.items() if k.startswith("w")}
         # "g<digit>[variant]" -> keyed "<digit>[variant]"
@@ -294,8 +299,15 @@ class ComboCounterExtractor(BaseExtractor):
     def extract(self, ctx: FrameContext, data: FrameData) -> None:
         if not self.enabled:
             return
-        if self.stride > 1 and ctx.frame_number % self.stride:
-            if self._held is not None and ctx.frame_number - self._held_frame < self.stride:
+        if self._prev_frame is not None:
+            d = ctx.frame_number - self._prev_frame
+            if d > 0 and (self._step == 0 or d < self._step):
+                self._step = d
+        self._prev_frame = ctx.frame_number
+        step = self._step or 1
+        idx = ctx.frame_number // step
+        if self.stride > 1 and idx % self.stride:
+            if self._held is not None and idx - self._held_frame // step < self.stride:
                 data.combo_side, data.combo_count = self._held
             return
         self._held_frame = ctx.frame_number
