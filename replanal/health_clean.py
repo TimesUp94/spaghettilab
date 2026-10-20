@@ -75,9 +75,18 @@ KO_PCT = 0.005
 KO_CONFIRM = 3
 KO_WIN = 10
 # ... and the side's readings over the next KO_AFTER frames must stay below
-# min(KO_NEAR, half its level before the KO).
+# min(KO_NEAR, half its level before the KO).  Readings at or below KO_FLOOR
+# count as empty there: over an empty bar the KO cinematic reads a steady
+# 1-11 px (<= 0.0153) of junk fill.
 KO_AFTER = 45
 KO_NEAR = 0.015
+KO_FLOOR = 0.016
+# The empty reading itself needs END_CONF, or only MIN_CONF when the red
+# pending segment covers the side's whole remaining level (within END_TOL)
+# and the frame before read the bar with fill at END_CONF: the green was
+# visibly there and the red is drawn where it was, so the HUD is not hidden.
+# (Without that confident frame before, a sliver under a busy super
+# background reads empty with middling confidence while the combo goes on.)
 OPP_OK_TOL = 0.10
 # A bar "comes back" (see _comes_back) only with at least this much fill:
 # static transition screens read a steady few percent.
@@ -499,13 +508,20 @@ def _raw_ko(p: np.ndarray, c: np.ndarray, q: np.ndarray | None, lo: int, hi: int
     """
     pv = p[lo:hi]
     cv = c[lo:hi]
-    cand = (~np.isnan(pv) & (pv <= EMPTY_PCT) & (cv >= END_CONF)
+    qv = np.zeros(len(pv)) if q is None else np.nan_to_num(q[lo:hi])
+    red = qv >= PENDING_MIN
+    # Fit level just before each frame.
+    prev = np.concatenate([fit[:1], fit[:-1]])
+    prev = np.where(np.isnan(prev), fit, prev)
+    shown_before = np.zeros(len(pv), dtype=bool)
+    shown_before[1:] = (cv[:-1] >= END_CONF) & (np.nan_to_num(pv[:-1]) > EMPTY_PCT)
+    covers = (red & shown_before
+              & (np.nan_to_num(pv) + qv >= np.nan_to_num(prev, nan=np.inf) - END_TOL))
+    cand = (~np.isnan(pv) & (pv <= EMPTY_PCT) & ((cv >= END_CONF) | ((cv >= MIN_CONF) & covers))
             & ~np.isnan(fit) & (fit <= LOW_HP))
-    red = np.zeros(len(pv), dtype=bool) if q is None else np.nan_to_num(q[lo:hi]) >= PENDING_MIN
-    counts = np.convolve(cand.astype(np.int32), np.ones(KO_WIN, dtype=np.int32))[KO_WIN - 1:]
     ok = ~np.isnan(pv) & (cv >= MIN_CONF)
     for i in np.flatnonzero(cand & red):
-        level = fit[i - 1] if i > 0 and not np.isnan(fit[i - 1]) else fit[i]
+        level = prev[i]
         # The bar must stay (near) empty afterwards: a low bar hidden for a
         # frame mid-combo reads empty too, and then comes back.  Readings
         # above the level before the hit are not the bar (HP cannot rise):
@@ -513,6 +529,7 @@ def _raw_ko(p: np.ndarray, c: np.ndarray, q: np.ndarray | None, lo: int, hi: int
         sl = slice(i + 1, i + 1 + KO_AFTER)
         nv = np.nan_to_num(pv[sl], nan=np.inf)
         nxt = pv[sl][ok[sl] & (nv <= level + max(0.02, 0.25 * level))]
+        nxt = np.where(nxt <= KO_FLOOR, 0.0, nxt)
         if len(nxt) and float(np.median(nxt)) > min(KO_NEAR, fit[i] / 2):
             continue
         # The other side's level at the KO (its later fit may itself be

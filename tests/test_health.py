@@ -510,3 +510,112 @@ def test_attacker_hold_on_a_segment_shorter_than_the_pending_window():
     combo[-4:] = True
     r = clean_series(p1, p2, c, c, q, q, None, combo, combo)
     assert len(r.p1) == len(p1)
+
+
+def test_lethal_hit_read_with_low_confidence_but_red_covering_the_bar_is_a_ko():
+    # 07_UF R5 (~275.3 s): P2 sits at 5 % with red shown, the lethal hit reads
+    # P2 empty for one frame with confidence 0.57 (< END_CONF), but the red
+    # pending segment covers P2's whole remaining level, so the HUD is visible.
+    # The KO cinematic then reads junk 0-2 % at low/middling confidence.
+    n = 330
+    p1 = np.full(n, 0.713)
+    p2 = np.full(n, 0.054)
+    p2[:60] = 0.30
+    c1 = np.full(n, 0.85)
+    c2 = np.full(n, 0.73)
+    q1 = np.zeros(n)
+    q2 = np.zeros(n)
+    q2[60:200] = 0.06
+    timer = np.full(n, np.nan)
+    timer[:200] = 77
+    p2[199], c2[199], q2[199] = 0.014, 0.70, 0.10
+    p2[200], c2[200], q2[200] = 0.0, 0.57, 0.106      # the lethal hit
+    p1[201:], p2[201:] = np.nan, np.nan
+    junk = [0.0, 0.019, 0.015, 0.011, 0.008, 0.008, 0.013, 0.011, 0.0, 0.004, 0.01, 0.07, 0.024, 0.0]
+    conf = [0.24, 0.52, 0.53, 0.52, 0.52, 0.48, 0.45, 0.29, 0.22, 0.20, 0.21, 0.36, 0.49, 0.55]
+    for k, (v, cc) in enumerate(zip(junk, conf)):
+        p2[205 + 2 * k], c2[205 + 2 * k] = v, cc
+        p1[205 + 2 * k], c1[205 + 2 * k] = 0.0, 0.95   # P1's HUD is junk too
+    r = clean_series(p1, p2, c1, c2, q1, q2, timer)
+    assert r.p2[200] == 0.0
+    assert np.nanmax(r.p2[200:]) == 0.0
+    assert abs(r.p1[200] - 0.713) < 1e-9
+
+
+def test_ko_from_a_sliver_with_cinematic_junk_at_the_bar_floor():
+    # 10_UF R1 (~67.8 s): P1 (3 %, red shown) is hit down to a 5-px sliver for
+    # half a second, then reads empty (confident, red shown).  The KO
+    # cinematic reads junk: a burst of high fill, then a steady 11 px
+    # (0.0153) over the empty bar.  That steady floor junk is not the bar.
+    n = 400
+    p1 = np.full(n, 0.051)
+    p1[:60] = 0.30
+    p1[100:] = 0.031
+    p1[150:165] = 0.006
+    q1 = np.zeros(n)
+    q1[60:100] = 0.031
+    q1[100:150] = 0.051
+    q1[150:166] = 0.076
+    p2 = np.full(n, 0.654)
+    c1 = np.full(n, 0.95)
+    c2 = np.full(n, 0.89)
+    timer = np.full(n, np.nan)
+    timer[:166] = 76
+    p1[165], c1[165], q1[165] = 0.0, 0.98, 0.082      # the lethal hit
+    p1[166:], p2[166:] = np.nan, np.nan
+    burst = [0.064, 0.344, 0.092, 0.314, 0.051, 0.316, 0.317, 0.090, 0.061, 0.061, 0.134, 0.149,
+             0.072, 0.070, 0.108, 0.071, 0.025, 0.071, 0.090, 0.007, 0.0, 0.135, 0.106, 0.088,
+             0.079, 0.072, 0.086, 0.058, 0.093, 0.014, 0.070, 0.060, 0.070, 0.115, 0.057]
+    floor = [0.0153] * 10 + [0.057] * 9 + [0.092] * 6
+    for k, v in enumerate(burst + floor):
+        p1[166 + k], c1[166 + k] = v, 0.5
+        p2[166 + k], c2[166 + k] = 0.0, 0.5
+    r = clean_series(p1, p2, c1, c2, q1, np.zeros(n), timer)
+    assert r.p1[165] == 0.0
+    assert np.nanmax(r.p1[165:]) == 0.0
+    assert abs(r.p2[165] - 0.654) < 1e-9
+
+
+def test_low_bar_hidden_mid_combo_with_red_shown_is_not_a_ko():
+    # Guard for the two rules above: a 3 % bar (red covering it) reads empty
+    # for a few frames with middling confidence, then is shown at its level
+    # again.  No round timer to veto it: the bar coming back alone must.
+    n = 300
+    p1 = np.full(n, 0.03)
+    p1[:60] = 0.25
+    q1 = np.zeros(n)
+    q1[60:140] = 0.05
+    p1[120:125] = 0.0
+    c1 = np.full(n, 0.9)
+    c1[120:125] = 0.45
+    p2 = np.full(n, 0.60)
+    c2 = np.full(n, 0.9)
+    r = clean_series(p1, p2, c1, c2, q1, np.zeros(n))
+    assert abs(r.p1[-1] - 0.03) < 1e-9
+    assert np.nanmin(r.p1) > 0.02
+
+
+def test_sliver_read_empty_under_a_super_background_is_not_the_ko():
+    # yt_KWXz7dmt2Pk R0 (~45.8 s): P2 is a 1 % sliver (red shown) under a long
+    # super; its bar reads empty at low confidence for seconds, once at 0.59
+    # with the red covering it.  The combo goes on (the KO is ~1.3 s later),
+    # so that frame is not the KO: no confident reading of fill just before
+    # it shows the HUD was visible.
+    n = 300
+    p1 = np.full(n, 0.13)
+    p2 = np.full(n, 0.008)
+    p2[:60] = 0.20
+    c1 = np.full(n, 0.85)
+    c2 = np.full(n, 0.85)
+    q2 = np.zeros(n)
+    q2[60:] = 0.13
+    c2[100:240] = 0.2                       # busy super background
+    p2[100:240] = 0.0
+    p2[150], c2[150], q2[150] = 0.0, 0.59, 0.086
+    p2[240], c2[240], q2[240] = 0.0, 0.65, 0.23   # the real KO
+    timer = np.full(n, np.nan)
+    timer[:100] = 67
+    p1[241:], p2[241:] = np.nan, np.nan
+    r = clean_series(p1, p2, c1, c2, np.zeros(n), q2, timer)
+    assert r.p2[200] > 0.0
+    assert r.p2[240] == 0.0

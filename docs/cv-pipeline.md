@@ -390,10 +390,15 @@ round; the red pending segment is already-lost HP.
    timer). After it, readings may confirm a side's level but not lower it, except a reading
    with pending red next to it (a real hit, e.g. a trade) or a credible empty bar.
 6. **KO lock:** the KO is the first frame where a side's fit reaches 0, or earlier, a
-   **raw KO** (`_raw_ko`): a confident empty reading with pending red on a side already at
-   <= 0.20, where the next 45 frames stay below min(0.015, half its level) (readings above
-   its level before the hit are ignored: HP cannot rise, and the KO cinematic right after a
-   lethal hit reads as low-confidence junk fill, 11_WFinal R12), the bar does not come back, and the round timer does not count down afterwards (the clock freezes at
+   **raw KO** (`_raw_ko`): a confident (>= 0.6) empty reading with pending red on a side
+   already at <= 0.20 — or one read with only >= 0.35 when the red covers the side's whole
+   remaining level and the frame before showed fill at >= 0.6 (the green was visibly there
+   and the red is drawn where it was; 07_UF R5. Without that frame, a sliver under a busy
+   super background reads empty mid-combo, yt_KWXz7dmt2Pk R0) — where the next 45 frames
+   stay below min(0.015, half its level) (readings above its level before the hit are
+   ignored: HP cannot rise, and the KO cinematic right after a lethal hit reads as
+   low-confidence junk fill, 11_WFinal R12; readings <= 0.016 count as empty: over an empty
+   bar the cinematic reads a steady 1-11 px, 10_UF R1), the bar does not come back, and the round timer does not count down afterwards (the clock freezes at
    a KO; a 3 % bar flickers to empty while play goes on). The KO slash often hides the
    HUD within a frame, so the fit alone never gets there. The loser is 0 from its KO. If
    the survivor was at <= 0.20 it may still reach 0 within 30 frames (double KO);
