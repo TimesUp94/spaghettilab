@@ -39,15 +39,25 @@ Raw frames are read from stdout in chunks of `1920 * 1080 * 3` bytes.
 
 ### Detection Signals
 
+All ROIs are on the game's own HUD (the same pixels as `config/default.yaml`).
+A stream overlay (name/score banner, logos) is set by hand during a stream and
+may be stale, different or absent, so it is never read. Until 2026-10 the
+defaults sat on the Spaghetti Showdown overlay (the "timer" ROI was the
+banner's centre box, the tension ROIs the strip below the game's tension
+bars): with the banner blacked out 4,442 of 7,450 gameplay seconds flipped, and
+on non-overlay YouTube replays most gameplay was missed. With the in-game
+ROIs, 0 seconds flip with the overlay blacked out or replaced, on all 15 sets,
+the 9 re-cut sets and the 3 YouTube replays (`output/final_stage/split/`).
+
 **Tension bar detection:**
-- P1 tension ROI: y=1040-1058, x=50-440
-- P2 tension ROI: y=1040-1058, x=1480-1870
+- P1 tension ROI: y=1000-1040, x=260-750 (in-game tension bar)
+- P2 tension ROI: y=1000-1040, x=1170-1660
 - Convert ROI to HSV
 - Score: percentage of pixels with `S > 40` AND `V > 30`
 - Either player scoring > 15% = tension present
 
 **Timer brightness:**
-- Timer ROI: y=30-100, x=910-1010
+- Timer ROI: y=110-180, x=920-1000 (the in-game round timer)
 - Convert to HSV, check V channel
 - Score: percentage of pixels with `V > 180`
 - Timer bright > 2% = timer present
@@ -285,9 +295,9 @@ An interactive ROI editor overlaid on the preview frame.
 ### Default ROIs (1920x1080 GGS)
 
 ```typescript
-p1_tension: { y1: 1040, y2: 1058, x1: 50, x2: 440 },
-p2_tension: { y1: 1040, y2: 1058, x1: 1480, x2: 1870 },
-timer: { y1: 30, y2: 100, x1: 910, x2: 1010 },
+p1_tension: { y1: 1000, y2: 1040, x1: 260, x2: 750 },
+p2_tension: { y1: 1000, y2: 1040, x1: 1170, x2: 1660 },
+timer: { y1: 110, y2: 180, x1: 920, x2: 1000 },
 p1_name: { tl: [75, 150], tr: [340, 145], br: [370, 178], bl: [45, 178] },
 p2_name: { tl: [1555, 145], tr: [1850, 150], br: [1880, 178], bl: [1580, 178] },
 ```

@@ -1,11 +1,13 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import type { RoiRect, RoiQuad, VodRoiConfig } from "../types";
 
-// Default ROIs for 1920x1080 GGS with "SHOW DOWN" overlay
+// Default ROIs for 1920x1080 GGS: the game's own HUD only (in-game tension
+// bars, round timer, nameplates), never a stream overlay, which is set by hand
+// and may be stale, different or absent.
 const DEFAULT_ROIS: VodRoiConfig = {
-  p1_tension: { y1: 1040, y2: 1058, x1: 50, x2: 440 },
-  p2_tension: { y1: 1040, y2: 1058, x1: 1480, x2: 1870 },
-  timer: { y1: 30, y2: 100, x1: 910, x2: 1010 },
+  p1_tension: { y1: 1000, y2: 1040, x1: 260, x2: 750 },
+  p2_tension: { y1: 1000, y2: 1040, x1: 1170, x2: 1660 },
+  timer: { y1: 110, y2: 180, x1: 920, x2: 1000 },
   p1_name: { tl: [75, 150], tr: [340, 145], br: [370, 178], bl: [45, 178] },
   p2_name: { tl: [1555, 145], tr: [1850, 150], br: [1880, 178], bl: [1580, 178] },
 };

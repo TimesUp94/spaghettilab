@@ -37,7 +37,10 @@ def clean_frames(frames: list[FrameData]) -> CleanResult:
     (p1, c1, q1), (p2, c2, q2) = arrays[Side.P1], arrays[Side.P2]
     timer = np.array([f.timer_value if f.is_gameplay and f.timer_value is not None else np.nan
                       for f in frames], dtype=np.float64)
-    result = clean_series(p1, p2, c1, c2, q1, q2, timer)
+    # Combo counter side per frame: that side is doing a combo.
+    combo1 = np.array([f.is_gameplay and f.combo_side == Side.P1 for f in frames], dtype=bool)
+    combo2 = np.array([f.is_gameplay and f.combo_side == Side.P2 for f in frames], dtype=bool)
+    result = clean_series(p1, p2, c1, c2, q1, q2, timer, combo1, combo2)
 
     for side, cleaned in ((Side.P1, result.p1), (Side.P2, result.p2)):
         for i, f in enumerate(frames):

@@ -67,8 +67,8 @@ All extracted data for a single frame, populated incrementally by extractors.
 | `p2_tension_pct` | `Optional[float]` | `None` | P2 tension gauge (0.0-1.0) |
 | `p1_rounds_won` | `Optional[int]` | `None` | P1 round wins (from hearts) |
 | `p2_rounds_won` | `Optional[int]` | `None` | P2 round wins (from hearts) |
-| `combo_count` | `Optional[int]` | `None` | Reserved for future use |
-| `combo_side` | `Optional[Side]` | `None` | Reserved for future use |
+| `combo_count` | `Optional[int]` | `None` | Combo counter hit number (ComboCounterExtractor) |
+| `combo_side` | `Optional[Side]` | `None` | HUD side showing the combo counter = the attacker (also used by the health cleaner's attacker hold) |
 | `text_popups` | `list[str]` | `[]` | Reserved for future use |
 
 ### HealthReading
@@ -342,8 +342,8 @@ round; the red pending segment is already-lost HP.
    or after a sustained (15-frame) reset following damage in the round, at least 300 frames
    after the previous start. A reset means both sides' 9-frame medians read "full", or both
    rose >= 0.30 above their in-round lows with one of them full. "Full" is
-   `min(0.90, observed full-bar reading - 0.05)` per side: on some overlays the player name
-   hides the far end of the bar (set 03: a full P2 bar reads 0.81 in some rounds). Wallbreaks
+   `min(0.90, observed full-bar reading - 0.05)` per side: the game's character name on the
+   bar (or a replay input display) can hide its far end (set 03: a full P2 bar reads 0.81 in some rounds). Wallbreaks
    do not refill the bars in current GGST, so they do not split rounds.
    **Round intro:** the timer shows its start value (>= 89) while the bars are still empty
    and filling. A reset moves back to a credible run of start readings (3 in 15 frames)
@@ -372,18 +372,28 @@ round; the red pending segment is already-lost HP.
    0.05-0.80, counted where the other bar reads its normal level (not the post-KO fade,
    where both read near 0) or where the reading is at most the side's earlier level.
    Sprites can cover a whole HUD corner for seconds (set 14 R1).
-4. **Opponent in combo:** while the other side shows pending red (it is being comboed) and
-   this side does not, readings below half this side's level just before (from >= 3
-   confident readings) are dropped. The attacker's sprite or super VFX covers its own bar
-   (set 13 R3).
+4. **Attacker hold** (`_opp_combo_gate`): the player doing a combo essentially never loses
+   HP during it, so readings of the attacker's bar below its level just before (median of
+   >= 3 confident readings in the 15 frames before, runs padded by 6 frames) are occlusion:
+   its own sprite, super VFX or a big object over its bar (set 13 R3, 11_WFinal R12).
+   - While the combo counter is on this side's HUD (3+ consecutive frames; the counter is
+     drawn on the attacker's side), or while the other side's pending red keeps growing
+     (from its 2nd growth step of >= 0.01), and this side shows no red itself: readings
+     more than 0.02 below the level (or below half of it) are dropped.
+   - While the other side merely shows red (a single hit: its red lingers ~1 s, and this
+     side can be hit back in that time, 07_UF ~304 s) only readings below half the level
+     are dropped.
+   - A real hit on the attacker (a trade, a reversal) shows its own red, which ends the
+     hold on those frames.
 5. **Round end:** play ends at the earlier of the last run of 5 frames where both bars are
    read confidently and the last credible round-timer reading (the KO slash hides the
    timer). After it, readings may confirm a side's level but not lower it, except a reading
    with pending red next to it (a real hit, e.g. a trade) or a credible empty bar.
 6. **KO lock:** the KO is the first frame where a side's fit reaches 0, or earlier, a
    **raw KO** (`_raw_ko`): a confident empty reading with pending red on a side already at
-   <= 0.20, where the next 45 frames stay below min(0.015, half its level), the bar does
-   not come back, and the round timer does not count down afterwards (the clock freezes at
+   <= 0.20, where the next 45 frames stay below min(0.015, half its level) (readings above
+   its level before the hit are ignored: HP cannot rise, and the KO cinematic right after a
+   lethal hit reads as low-confidence junk fill, 11_WFinal R12), the bar does not come back, and the round timer does not count down afterwards (the clock freezes at
    a KO; a 3 % bar flickers to empty while play goes on). The KO slash often hides the
    HUD within a frame, so the fit alone never gets there. The loser is 0 from its KO. If
    the survivor was at <= 0.20 it may still reach 0 within 30 frames (double KO);

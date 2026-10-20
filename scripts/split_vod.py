@@ -34,14 +34,16 @@ import cv2
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# Config defaults — tuned for 1080p GGS with the "SHOW DOWN" style overlay.
-# Override via CLI flags for different overlays.
+# Config defaults for 1080p GGS.  Every ROI is on the game's own HUD (same
+# pixels as config/default.yaml): a stream overlay (score banner, logos) is set
+# by hand during a stream and may be stale, different or absent, so it is
+# never read.  Override via CLI flags for other games / layouts.
 # ---------------------------------------------------------------------------
 
 # ROI coordinates (y1, y2, x1, x2) for 1920x1080
-P1_TENSION = (1040, 1058, 50, 440)
-P2_TENSION = (1040, 1058, 1480, 1870)
-TIMER_ROI = (30, 100, 910, 1010)
+P1_TENSION = (1000, 1040, 260, 750)    # in-game tension bars
+P2_TENSION = (1000, 1040, 1170, 1660)
+TIMER_ROI = (110, 180, 920, 1000)      # in-game round timer
 # Player name tags: 4-point quads (tl_x,tl_y, tr_x,tr_y, br_x,br_y, bl_x,bl_y)
 # For rectangular name tags (e.g. SF6), all corners form a rectangle.
 # For skewed tags (e.g. GGS), corners trace the parallelogram.

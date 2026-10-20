@@ -46,8 +46,11 @@ rois:
   # attacker's HUD side. *_combo_counter = search area for the spelled-out
   # word ("two".."nine", 2-9 hits); *_combo_big = search area of the huge
   # two-digit counter shown from 10 hits on (tens + ones glyph, incl. the
-  # zoom-in on each hit). Measured on set 17; the tens-glyph slot inside
-  # these ROIs is in combo.py (BIG_TENS_BOX), so move both together.
+  # zoom-in on each hit). Measured on set 17; the glyph slots inside these
+  # ROIs are in combo.py (BIG_SLOTS), so move both together. The big ROIs
+  # stop at y 935: below it streams often put their own logos/overlays (the
+  # game draws only the tension/burst HUD there), and the matcher cuts the
+  # bottom of tall glyph templates to fit (see _BigMatcher._slot).
   p1_combo_counter:
     x1: 180
     y1: 180
@@ -62,12 +65,12 @@ rois:
     x1: 40
     y1: 0
     x2: 1360
-    y2: 1000
+    y2: 935
   p2_combo_big:
     x1: 860
     y1: 0
     x2: 1920
-    y2: 1000
+    y2: 935
 
 health_bar:
   background_threshold: 80

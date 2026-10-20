@@ -545,7 +545,7 @@ fn detect_rounds_for_replay(
                     // Validate: smoothed timer must reach ≥90 within 90 frames.
                     // Filters wallbreak/super flash OCR noise (peaks briefly at ~88).
                     // Real round starts show timer ≥90 consistently (OCR reads 90-96
-                    // for the "99" display depending on overlay font).
+                    // for the "99" display, a timer-reader template mismatch).
                     let check_end = (i + fr(90)).min(n);
                     let confirmed = (i..check_end)
                         .any(|j| timer_smooth[j].map_or(false, |tv| tv >= 90));

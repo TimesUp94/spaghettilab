@@ -62,6 +62,9 @@ BIG_PAD = 0.04  # template = glyph box padded by this fraction of the glyph heig
 # The top of a big glyph often sits under the HUD bars (and is the faded
 # half): only the part below this fraction of the glyph height is matched.
 BIG_TOP_CUT = 0.16
+# A template cut at the ROI bottom (see _BigMatcher._slot) must keep at least
+# this fraction of its rows.
+BIG_MIN_KEEP = 0.6
 # Glyph heights (full-res px) to try: ~600-850 px seen, plus the zoom-in.
 BIG_GLYPH_HEIGHTS = (590, 625, 665, 705, 750, 795, 845, 900)
 # Tens digits looked for. "1" is seen in many videos; "2" once (a 2x P1
@@ -80,6 +83,11 @@ BIG_ONES_RELAXED_MIN_SCORE = 0.50
 # Both glyphs barely over their thresholds is not enough: the "LET'S ROCK"
 # round-start banner reads as 1 + 1 at ~0.60 each.
 BIG_PAIR_MIN_SUM = 1.25
+# "11" from a pair needs more: the banner's vertical strokes match a "1" in
+# both slots at ~0.60-0.72 (sum ~1.35) once the ones slot no longer sees the
+# bottom of the screen; real 11 pairs measured 1.54+ (a clear ones "1" also
+# reads via BIG_ONES_ALONE_MIN_SCORE).
+BIG_PAIR_MIN_SUM_11 = 1.45
 # Ones digit alone (tens glyph hidden by a character / effect): read as
 # 1x only when the ones match is this strong. A hidden "2" tens digit is
 # misread as 1 then; 20+ combos are rare.
@@ -91,7 +99,7 @@ BIG_TENS_ALONE_MIN_SCORE = 0.80
 BIG_TENS_ALONE_MIN_MARGIN = 0.25
 # Where each glyph's left edge and top edge may sit, relative to the
 # *_combo_big ROI's top-left (full-res px). Measured on set 17 plus 12 other
-# ggstsets/league videos (same overlay; P1 ROI starts at x=40, P2 at x=860).
+# ggstsets/league videos (game HUD only; P1 ROI starts at x=40, P2 at x=860).
 BIG_SLOTS = {
     # side: (tens (x range, y range), ones (x range, y range))
     Side.P1: (((10, 290), (20, 200)), ((440, 760), (20, 200))),
@@ -199,12 +207,24 @@ class _BigMatcher:
         for k, h in enumerate(BIG_GLYPH_HEIGHTS):
             px, py = BIG_PAD * h, BIG_TOP_CUT * h  # template top-left -> glyph left / top
             x0, y0 = max(0, int((xa - px) / BIG_DS)), max(0, int((ya + py) / BIG_DS))
+            # Lowest template top inside the slot. A glyph placed there can
+            # reach below the ROI (which stops above the screen bottom, where
+            # streams draw their own logos): its template is cut to the rows
+            # that fit, the same cut at every position, so pixels below the
+            # ROI never take part in the match.
+            y_low = int(np.ceil((yb + py) / BIG_DS))
             for key in keys:
                 t = self.scaled[key][k]
                 d = int(key[0])
                 th, tw = t.shape
+                if y_low + th > sh:
+                    keep = sh - y_low
+                    if keep < BIG_MIN_KEEP * th:
+                        continue
+                    t = t[:keep]
+                    th = keep
                 x1 = min(sw, int(np.ceil((xb - px) / BIG_DS)) + tw)
-                y1 = min(sh, int(np.ceil((yb + py) / BIG_DS)) + th)
+                y1 = min(sh, y_low + th)
                 if y1 - y0 < th or x1 - x0 < tw:
                     continue
                 r = cv2.matchTemplate(small[y0:y1, x0:x1], t, cv2.TM_CCOEFF_NORMED)
@@ -236,7 +256,8 @@ class _BigMatcher:
         min_margin = BIG_ONES_MIN_MARGIN_1 if o_digit == 1 else BIG_ONES_MIN_MARGIN
         o_min = BIG_ONES_RELAXED_MIN_SCORE if t_score >= BIG_TENS_STRONG else BIG_ONES_MIN_SCORE
         if o_score >= o_min and o_margin >= min_margin:
-            if t_score >= BIG_TENS_MIN_SCORE and t_margin >= BIG_TENS_MIN_MARGIN and t_score + o_score >= BIG_PAIR_MIN_SUM:
+            pair_min = BIG_PAIR_MIN_SUM_11 if (t_digit, o_digit) == (1, 1) else BIG_PAIR_MIN_SUM
+            if t_score >= BIG_TENS_MIN_SCORE and t_margin >= BIG_TENS_MIN_MARGIN and t_score + o_score >= pair_min:
                 return Reading(10 * t_digit + o_digit, min(t_score, o_score), o_margin, "big"), dbg
             if o_score >= BIG_ONES_ALONE_MIN_SCORE and o_margin >= BIG_ONES_ALONE_MIN_MARGIN:
                 return Reading(10 + o_digit, o_score, o_margin, "big"), dbg

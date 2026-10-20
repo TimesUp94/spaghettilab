@@ -99,17 +99,30 @@ END_TOL = 0.02
 # up to it (one-frame OCR misreads on transition screens do not).
 TIMER_RUN = 3
 TIMER_WIN = 15
-# Opponent in combo: while the other side shows its red pending segment (it
-# is being comboed) and this side does not, this side is not losing much HP.
-# Readings far below its level from just before the combo are occlusion
-# (the attacker's sprite / super VFX over its bar).  OPP_PAD frames are added on
-# both sides of each run; OPP_REF frames before a run give the reference level.
+# Attacker hold: while one side is comboing, its own HP stays where it was
+# when the combo started (the player doing a combo essentially never loses HP
+# during it).  A side is surely comboing while the combo counter is shown on
+# its HUD side (COMBO_RUN+ consecutive frames), or while the other side's red
+# pending segment keeps growing (2nd hit on, see _pending_growing) and this
+# side shows no red itself: readings below its level from just before are
+# occlusion (its own sprite, a super's VFX or a big object over its bar).
+# While the other side merely shows red (one hit; its red lingers and this
+# side can be hit back) only near-empty readings are dropped.
+# OPP_PAD frames are added on both sides of each run; OPP_REF frames before a
+# run give the reference level.
 OPP_PAD = 6
 OPP_REF = 15
-# The reference needs OPP_REF_MIN confident readings; only readings below
-# OPP_DROP x the reference are dropped (an occluded bar reads near empty).
+COMBO_RUN = 3
+# The reference needs OPP_REF_MIN confident readings; readings below it by
+# more than OPP_TOL (reading noise), or below OPP_DROP x the reference (a tiny
+# bar read empty), are dropped.  A real hit on the attacker (a trade, a
+# reversal right after the combo) shows its own red pending, which ends the
+# hold on those frames.
 OPP_REF_MIN = 3
 OPP_DROP = 0.5
+OPP_TOL = 0.02
+# Pending red "growing": the run's highest pending reading rises by GROW_MIN.
+GROW_MIN = 0.01
 # Round intro: the timer already shows its start value (90 in GGST, or 99)
 # while the bars are still empty / filling up.  A credible run of start
 # readings within INTRO_BACK frames before a detected reset moves the reset
@@ -235,8 +248,9 @@ def _rolling_nanmedian(x: np.ndarray, win: int) -> np.ndarray:
 def full_level(m: np.ndarray) -> float:
     """Reading of a full bar for one side, from the rolling-median series.
 
-    Usually ~1.0, but some overlays draw the player name opaquely over the
-    far end of the bar (set 03: a full P2 bar reads 0.81).  HP under the name
+    Usually ~1.0, but the game's own character name drawn on the bar (or a
+    replay input display over it) can hide its far end (set 03: a full P2
+    bar reads 0.81).  HP under the name
     is unobservable, so values are not rescaled; only the reset threshold
     adapts.
     """
@@ -491,9 +505,14 @@ def _raw_ko(p: np.ndarray, c: np.ndarray, q: np.ndarray | None, lo: int, hi: int
     counts = np.convolve(cand.astype(np.int32), np.ones(KO_WIN, dtype=np.int32))[KO_WIN - 1:]
     ok = ~np.isnan(pv) & (cv >= MIN_CONF)
     for i in np.flatnonzero(cand & red):
+        level = fit[i - 1] if i > 0 and not np.isnan(fit[i - 1]) else fit[i]
         # The bar must stay (near) empty afterwards: a low bar hidden for a
-        # frame mid-combo reads empty too, and then comes back.
-        nxt = pv[i + 1:i + 1 + KO_AFTER][ok[i + 1:i + 1 + KO_AFTER]]
+        # frame mid-combo reads empty too, and then comes back.  Readings
+        # above the level before the hit are not the bar (HP cannot rise):
+        # the KO cinematic right after a lethal hit reads as junk fill.
+        sl = slice(i + 1, i + 1 + KO_AFTER)
+        nv = np.nan_to_num(pv[sl], nan=np.inf)
+        nxt = pv[sl][ok[sl] & (nv <= level + max(0.02, 0.25 * level))]
         if len(nxt) and float(np.median(nxt)) > min(KO_NEAR, fit[i] / 2):
             continue
         # The other side's level at the KO (its later fit may itself be
@@ -501,7 +520,6 @@ def _raw_ko(p: np.ndarray, c: np.ndarray, q: np.ndarray | None, lo: int, hi: int
         pre = fit_opp[max(0, i - OPP_REF):i + 1]
         pre = pre[~np.isnan(pre)]
         opp_level = float(np.median(pre)) if len(pre) else np.inf
-        level = fit[i - 1] if i > 0 and not np.isnan(fit[i - 1]) else fit[i]
         if _comes_back(pv, cv, int(i), float(level), p_opp[lo:hi], opp_level):
             continue
         # A tiny bar flickers to empty while the round goes on.
@@ -571,10 +589,58 @@ def _shown(q: np.ndarray | None, lo: int, hi: int) -> np.ndarray:
     return np.convolve(raw, np.ones(5), mode="same") >= 2
 
 
-def _opp_combo_gate(pv: np.ndarray, cv: np.ndarray, use: np.ndarray, empty: np.ndarray,
-                    mine: np.ndarray, theirs: np.ndarray) -> np.ndarray:
-    """Readings to drop because the opponent is being comboed (see OPP_PAD)."""
-    gate = theirs & ~mine
+def _combo_shown(combo: np.ndarray | None, lo: int, hi: int) -> np.ndarray:
+    """Combo counter shown on a side for COMBO_RUN+ consecutive frames, span-relative."""
+    if combo is None:
+        return np.zeros(hi - lo, dtype=bool)
+    raw = np.asarray(combo[lo:hi], dtype=bool)
+    out = np.zeros(len(raw), dtype=bool)
+    i, n = 0, len(raw)
+    while i < n:
+        if not raw[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and raw[j]:
+            j += 1
+        if j - i >= COMBO_RUN:
+            out[i:j] = True
+        i = j
+    return out
+
+
+def _pending_growing(qv: np.ndarray | None, theirs: np.ndarray) -> np.ndarray:
+    """Frames of a run of the other side's pending red from its 2nd growth step on.
+
+    The red segment grows with every hit of a combo; a single hit (whose red
+    lingers ~1 s, during which this side can be hit back) grows it once.
+    A step = the run's highest pending reading rising by GROW_MIN.
+    """
+    out = np.zeros(len(theirs), dtype=bool)
+    if qv is None:
+        return out
+    q = np.nan_to_num(qv)
+    i, n = 0, len(theirs)
+    while i < n:
+        if not theirs[i]:
+            i += 1
+            continue
+        j = i
+        while j < n and theirs[j]:
+            j += 1
+        top, steps = 0.0, 0
+        for k in range(i, j):
+            if q[k] >= top + GROW_MIN:
+                top = q[k]
+                steps += 1
+                if steps == 2:
+                    out[k:j] = True
+        i = j
+    return out
+
+
+def _gate_runs(pv: np.ndarray, cv: np.ndarray, use: np.ndarray, empty: np.ndarray,
+               mine: np.ndarray, gate: np.ndarray, strict: bool) -> np.ndarray:
     drop = np.zeros(len(pv), dtype=bool)
     i, n = 0, len(pv)
     while i < n:
@@ -590,19 +656,43 @@ def _opp_combo_gate(pv: np.ndarray, cv: np.ndarray, use: np.ndarray, empty: np.n
         if len(ref_idx) >= OPP_REF_MIN:
             ref = float(np.median(pv[r0 + ref_idx]))
             seg = slice(a, b)
-            drop[seg] |= ~mine[seg] & (np.nan_to_num(pv[seg], nan=1.0) < ref * OPP_DROP)
+            thr = max(ref * OPP_DROP, ref - OPP_TOL) if strict else ref * OPP_DROP
+            drop[seg] |= ~mine[seg] & (np.nan_to_num(pv[seg], nan=1.0) < thr)
         i = j
     return drop
+
+
+def _opp_combo_gate(pv: np.ndarray, cv: np.ndarray, use: np.ndarray, empty: np.ndarray,
+                    mine: np.ndarray, theirs: np.ndarray,
+                    attacking: np.ndarray | None = None,
+                    q_opp: np.ndarray | None = None) -> np.ndarray:
+    """Readings to drop because this side is the one comboing (see OPP_PAD).
+
+    ``mine`` / ``theirs``: red pending shown on this / the other side;
+    ``attacking``: this side's combo counter shown; ``q_opp``: the other
+    side's pending widths (span-relative).  While the other side merely shows
+    red, only near-empty readings (below OPP_DROP x the level) are dropped;
+    while this side is surely comboing (its counter is up, or the red grew
+    with a 2nd hit) its HP is held at its level (within OPP_TOL)."""
+    # np.convolve(mode="same") in _shown returns 5 values for a span shorter than 5.
+    mine, theirs = mine[:len(pv)], theirs[:len(pv)]
+    drop = _gate_runs(pv, cv, use, empty, mine, theirs & ~mine, strict=False)
+    combo_on = _pending_growing(q_opp, theirs)
+    if attacking is not None:
+        combo_on |= attacking
+    return drop | _gate_runs(pv, cv, use, empty, mine, combo_on & ~mine, strict=True)
 
 
 def _clean_side(p: np.ndarray, c: np.ndarray, q: np.ndarray | None, lo: int, hi: int,
                 end: int | None = None, q_opp: np.ndarray | None = None,
                 strict_from: int | None = None, p_opp: np.ndarray | None = None,
-                post_end_full: bool = False) -> np.ndarray:
+                post_end_full: bool = False, combo: np.ndarray | None = None) -> np.ndarray:
     """Fit one side within one segment [lo, hi).  Returns cleaned values for the span.
 
     ``strict_from``: span-relative frame (the opponent's KO) after which no
     reading may lower this side.
+
+    ``combo``: per-frame "this side's combo counter is shown" (full series).
 
     ``post_end_full``: credible empty readings after the end of play keep
     their full weight (see the KO fallback in ``clean_series``), if the other
@@ -626,8 +716,10 @@ def _clean_side(p: np.ndarray, c: np.ndarray, q: np.ndarray | None, lo: int, hi:
     use = ok & (~empty | red_shown)
     blocked = np.zeros(len(pv), dtype=bool)
     gated = np.zeros(len(pv), dtype=bool)
-    if q_opp is not None:
-        gated = _opp_combo_gate(pv, cv, use, empty, _shown(q, lo, hi), _shown(q_opp, lo, hi))
+    if q_opp is not None or combo is not None:
+        gated = _opp_combo_gate(pv, cv, use, empty, _shown(q, lo, hi), _shown(q_opp, lo, hi),
+                                _combo_shown(combo, lo, hi),
+                                None if q_opp is None else q_opp[lo:hi])
         use &= ~gated
     if end is not None and end + END_GRACE < len(pv):
         # After play ends a non-empty reading may confirm the side's last
@@ -700,9 +792,10 @@ def _clean_side(p: np.ndarray, c: np.ndarray, q: np.ndarray | None, lo: int, hi:
 
 def _hold_after(p: np.ndarray, c: np.ndarray, q: np.ndarray | None, lo: int, hi: int, cut: int,
                 prev: np.ndarray, end: int | None = None, q_opp: np.ndarray | None = None,
-                strict_from: int | None = None, p_opp: np.ndarray | None = None) -> np.ndarray:
+                strict_from: int | None = None, p_opp: np.ndarray | None = None,
+                combo: np.ndarray | None = None) -> np.ndarray:
     """Refit a side on [lo, lo+cut) only, then hold its last value where ``prev`` had coverage."""
-    fit = _clean_side(p, c, q, lo, lo + cut, end, q_opp, strict_from, p_opp)
+    fit = _clean_side(p, c, q, lo, lo + cut, end, q_opp, strict_from, p_opp, combo=combo)
     out = prev.copy()
     out[:cut] = fit
     valid = fit[~np.isnan(fit)]
@@ -767,12 +860,15 @@ def clean_series(
     p1: np.ndarray, p2: np.ndarray, c1: np.ndarray, c2: np.ndarray,
     q1: np.ndarray | None = None, q2: np.ndarray | None = None,
     timer: np.ndarray | None = None,
+    combo1: np.ndarray | None = None, combo2: np.ndarray | None = None,
 ) -> CleanResult:
     """Clean per-frame fill readings (NaN = no reading).
 
     ``c1``/``c2`` are per-frame confidences in [0, 1]; ``q1``/``q2`` the
     pending (red) segment widths as a fraction of the bar, if known;
-    ``timer`` the per-frame round timer reading (NaN = not read).
+    ``timer`` the per-frame round timer reading (NaN = not read);
+    ``combo1``/``combo2`` per-frame booleans, True where the combo counter is
+    shown on that side's HUD (that side is doing a combo).
     """
     p1 = np.asarray(p1, dtype=np.float64)
     p2 = np.asarray(p2, dtype=np.float64)
@@ -791,8 +887,8 @@ def clean_series(
         t_end = _timer_end(None if timer_val is None else ~np.isnan(timer_val), lo, hi)
         if t_end is not None and (end is None or t_end < end):
             end = t_end
-        f1 = _clean_side(p1, c1, q1, lo, hi, end, q2, p_opp=p2)
-        f2 = _clean_side(p2, c2, q2, lo, hi, end, q1, p_opp=p1)
+        f1 = _clean_side(p1, c1, q1, lo, hi, end, q2, p_opp=p2, combo=combo1)
+        f2 = _clean_side(p2, c2, q2, lo, hi, end, q1, p_opp=p1, combo=combo2)
         # KO lock: once one side is KO'd the round is over.  The survivor's
         # later readings (KO cinematic, slow-mo, transition screens) can only
         # be artifacts, so its HP is held from shortly after the KO.
@@ -809,8 +905,8 @@ def clean_series(
             # empty readings to form a level.  Refit with full weight on
             # credible empties after the end of play; adopt it only if exactly
             # one side then reaches 0.
-            g1 = _clean_side(p1, c1, q1, lo, hi, end, q2, p_opp=p2, post_end_full=True)
-            g2 = _clean_side(p2, c2, q2, lo, hi, end, q1, p_opp=p1, post_end_full=True)
+            g1 = _clean_side(p1, c1, q1, lo, hi, end, q2, p_opp=p2, post_end_full=True, combo=combo1)
+            g2 = _clean_side(p2, c2, q2, lo, hi, end, q1, p_opp=p1, post_end_full=True, combo=combo2)
             j1, j2 = _first_ko(g1), _first_ko(g2)
             if (j1 is None) != (j2 is None):
                 if j1 is not None:
@@ -827,9 +923,9 @@ def clean_series(
                 # flickering, or KO-screen junk), the other side is KO'd.
                 loser = 3 - dko_surv
                 if dko_surv == 1:
-                    f1 = _hold_after(p1, c1, q1, lo, hi, k_ko, f1, end, q2, None, p2)
+                    f1 = _hold_after(p1, c1, q1, lo, hi, k_ko, f1, end, q2, None, p2, combo1)
                 else:
-                    f2 = _hold_after(p2, c2, q2, lo, hi, k_ko, f2, end, q1, None, p1)
+                    f2 = _hold_after(p2, c2, q2, lo, hi, k_ko, f2, end, q1, None, p1, combo2)
                 f_lose = f1 if loser == 1 else f2
                 f_lose[k_ko:][~np.isnan(f_lose[k_ko:])] = 0.0
                 o1[lo:hi] = f1
@@ -858,9 +954,9 @@ def clean_series(
                     tail[tail <= EMPTY_PCT] = np.nan
                     ps1, ps2 = (p1, ps) if loser == 1 else (ps, p2)
                 if loser == 1:
-                    f2 = _hold_after(ps2, c2, q2, lo, hi, cut, f2, end, q1, strict, p1)
+                    f2 = _hold_after(ps2, c2, q2, lo, hi, cut, f2, end, q1, strict, p1, combo2)
                 else:
-                    f1 = _hold_after(ps1, c1, q1, lo, hi, cut, f1, end, q2, strict, p2)
+                    f1 = _hold_after(ps1, c1, q1, lo, hi, cut, f1, end, q2, strict, p2, combo1)
         o1[lo:hi] = f1
         o2[lo:hi] = f2
     return CleanResult(p1=o1, p2=o2, segment=seg, resets=starts)

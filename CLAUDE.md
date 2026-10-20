@@ -109,7 +109,7 @@ Schema is versioned via `PRAGMA user_version` (`SCHEMA_VERSION` + `ensure_schema
 
 ## Configuration
 
-ROI coordinates for the CV pipeline are in `config/default.yaml` (tuned for 1920x1080 + Spaghetti Showdown overlay). Use `scripts/calibrate_roi.py` for other layouts.
+ROI coordinates for the CV pipeline are in `config/default.yaml` (tuned for 1920x1080 GGST). Every ROI is on the game's own HUD; never read a stream overlay (score banner, logos), which is set by hand and may be stale, different or absent. Changes are checked with the overlay blacked out (`output/blackout/`). Use `scripts/calibrate_roi.py` for other layouts.
 
 ## Release Process
 

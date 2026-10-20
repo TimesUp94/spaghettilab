@@ -420,3 +420,93 @@ def test_survivor_shown_after_ko_is_not_a_double_ko():
     r = clean_series(p1, p2, c1, c2, q1, np.zeros(n), timer)
     assert r.p1[319] == 0.0
     assert abs(r.p2[319] - 0.05) < 1e-9
+
+
+def test_lethal_hit_before_ko_cinematic_reaches_zero():
+    # 11_WFinal R12 (~670-677 s): P1 (Goldlewis, a 1 % sliver) combos P2
+    # (1.8 %, red pending shown, P1's combo counter up).  P1's own sprite
+    # covers its bar (reads empty).  The lethal hit shows P2 empty for one
+    # frame, then the KO cinematic hides the HUD and reads as junk fill above
+    # P2's level, with low confidence.  P2 must end at 0 and P1 keep 1 %.
+    n = 260
+    p1 = np.full(n, 0.010)
+    p2 = _round([(60, 0.06), (140, 0.018), (60, np.nan)])
+    c1 = np.full(n, 0.78)
+    c2 = np.full(n, 0.95)
+    q1 = np.zeros(n)
+    q2 = np.zeros(n)
+    q2[40:200] = 0.39
+    combo1 = np.zeros(n, dtype=bool)
+    combo1[30:201] = True
+    timer = np.full(n, np.nan)
+    timer[:200] = 62
+    p1[100:115] = 0.0                       # P1's bar under its own sprite
+    p1[140:150] = 0.0
+    p2[199] = 0.0                           # the lethal hit
+    q2[199] = 0.41
+    p1[201:] = np.nan
+    p1[204] = 0.0                           # KO cinematic junk
+    c1[204] = 0.85
+    p1[217:220] = (0.063, 0.045, 0.0)
+    c1[217:220] = (0.77, 0.83, 0.99)
+    p2[204] = 0.032
+    c2[204] = 0.29
+    p2[217:220] = (0.093, 0.106, 0.110)
+    c2[217:220] = (0.45, 0.40, 0.36)
+    p2[226:229] = (0.103, 0.30, 0.0)
+    c2[226:229] = (0.30, 0.04, 0.37)
+    r = clean_series(p1, p2, c1, c2, q1, q2, timer, combo1, np.zeros(n, dtype=bool))
+    assert r.p2[199] == 0.0
+    assert np.nanmax(r.p2[199:]) == 0.0
+    assert abs(np.nanmin(r.p1) - 0.010) < 1e-9
+
+
+def test_attacker_hp_held_while_its_combo_counter_is_shown():
+    # The defender's red pending segment is not seen (bright stage), but the
+    # combo counter is on P1's side: P1 is the one comboing, so a run of low
+    # readings on P1's bar (its own sprite over the bar's far end) is
+    # occlusion, not damage.  The HUD is then hidden (a cinematic).
+    n = 220
+    p1 = np.full(n, 0.50)
+    p2 = _round([(80, 0.40), (40, 0.25), (40, 0.12), (60, np.nan)])
+    p1[120:160] = 0.31
+    p1[160:] = np.nan
+    c = np.full(n, 0.9)
+    combo1 = np.zeros(n, dtype=bool)
+    combo1[82:160] = True
+    timer = np.full(n, np.nan)
+    timer[:158] = 50
+    zeros = np.zeros(n)
+    r = clean_series(p1, p2, c, c, zeros, zeros, timer, combo1, np.zeros(n, dtype=bool))
+    assert abs(np.nanmin(r.p1) - 0.50) < 1e-9
+    assert abs(r.p2[159] - 0.12) < 1e-9
+
+
+def test_attacker_hit_with_its_own_red_is_damage():
+    # Same as above, but P1 really is hit (a trade): its own red pending is
+    # shown, so the lower level is accepted.
+    n = 220
+    p1 = np.full(n, 0.50)
+    p1[120:] = 0.31
+    p2 = _round([(80, 0.40), (40, 0.25), (100, 0.12)])
+    q1 = np.zeros(n)
+    q1[120:135] = 0.19
+    c = np.full(n, 0.9)
+    combo1 = np.zeros(n, dtype=bool)
+    combo1[82:160] = True
+    r = clean_series(p1, p2, c, c, q1, np.zeros(n), None, combo1, np.zeros(n, dtype=bool))
+    assert abs(r.p1[-1] - 0.31) < 1e-9
+
+
+def test_attacker_hold_on_a_segment_shorter_than_the_pending_window():
+    # A 4-frame segment (resplit 03_UF): the 5-frame pending smoothing must
+    # not break the attacker hold.
+    p1 = _round([(400, 1.0), (200, np.nan), (4, 0.9)])
+    p2 = _round([(400, 0.5), (200, np.nan), (4, 0.9)])
+    c = np.full(len(p1), 0.9)
+    q = np.zeros(len(p1))
+    q[-4:] = 0.1
+    combo = np.zeros(len(p1), dtype=bool)
+    combo[-4:] = True
+    r = clean_series(p1, p2, c, c, q, q, None, combo, combo)
+    assert len(r.p1) == len(p1)

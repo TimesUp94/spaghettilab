@@ -53,6 +53,10 @@ def _read(extractor, config, path, frame_number=0):
         ("league18_f33281_x860.jpg", Side.P2, 14),  # P2 "14"
         ("set17_f10330_x0.jpg", None, None),  # no counter on screen
         ("set17_f01284_x0.jpg", None, None),  # "LET'S ROCK" round-start banner
+        # "LET'S ROCK" (data/sets/04_UF f1306): with the big ROI stopping at
+        # y 935 its strokes read as 1 + 1 (sum ~1.35) unless "11" pairs need
+        # BIG_PAIR_MIN_SUM_11
+        ("set04_f01306_x0.jpg", None, None),
     ],
 )
 def test_reads_counter_from_real_frames(default_config, name, side, count):
