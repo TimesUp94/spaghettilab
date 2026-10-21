@@ -419,6 +419,11 @@ const HP_CEILING: f64 = 0.875;
 const MIN_ROUND_FRAMES: usize = 450;  // ~15 seconds at 30fps
 /// Shortest leading partial round kept when it ends in a KO (~8 s at 30/s).
 const LEAD_PARTIAL_MIN_FRAMES: usize = 240;
+/// Normalised HP at/below this is a KO.  A KO reads exactly 0; a live 1-px
+/// sliver reads 0.008 raw (0.009 normalised) on a 1080p source, so the bound
+/// stays below that (the Python cleaner's `HUD_EMPTY` is 0.005 raw).  Both
+/// were measured on one 1080p stream; other resolutions may need a re-check.
+const KO_HP: f64 = 0.005;
 const COMEBACK_DEFICIT: f64 = 0.35;
 const DEFICIT_SMOOTH_WINDOW: usize = 91;  // ~3s heavy smoothing for deficit tracking
 const TIMER_SMOOTH_WINDOW: usize = 61;  // ~2s window for timer noise filtering
@@ -1105,7 +1110,6 @@ fn detect_rounds_for_replay(
                 if !p2_norm[j].is_nan() { p2_min = p2_min.min(p2_norm[j]); }
             }
             if p1_min.is_finite() && p2_min.is_finite() {
-                const KO_HP: f64 = 0.01;
                 let p1_ko = p1_min <= KO_HP;
                 let p2_ko = p2_min <= KO_HP;
                 let diff = (p1_min - p2_min).abs();
@@ -1740,6 +1744,23 @@ fn detect_rounds_for_replay(
         }
     }
 
+    // ── Manual winner overrides ──
+    // Applied here, before the hearts and match rules, so the rules work
+    // from the corrected winners (an automatic fix can rest on a
+    // neighbouring round of the same match).  An overridden round is fixed:
+    // confident, and never changed by the passes below.
+    let mut fixed = vec![false; results.len()];
+    for (idx, new_winner) in load_winner_overrides(conn, replay_id) {
+        let Some(ri) = results.iter().position(|r| r.round_index == idx) else { continue };
+        let r = &mut results[ri];
+        if r.winner != new_winner {
+            std::mem::swap(&mut r.winner_final_hp, &mut r.loser_final_hp);
+            r.winner = new_winner;
+        }
+        r.winner_confident = true;
+        fixed[ri] = true;
+    }
+
     // ── Round-counter hearts: match starts and winner check ─────────────
     // The two hearts on each side of the timer are part of the game's HUD
     // (present in every GGST video, not only our stream overlay; only the
@@ -1864,9 +1885,20 @@ fn detect_rounds_for_replay(
     // 0/0: the match ended here, won by the side that
     // already had a round.  The hearts are a secondary signal: they confirm
     // an uncertain HP winner or break its tie (it stays uncertain), and a
-    // disagreement with a confident HP winner only flags the round as
-    // uncertain.  HP and timer stay primary.
+    // disagreement with a confident HP winner flags the round as uncertain
+    // until the match rules below settle it.  HP and timer stay primary.
+    let hp_confident: Vec<bool> = results.iter().map(|r| r.winner_confident).collect();
+    // A clean single KO on HP (the loser's bar empty, the winner's not): a
+    // misread heart must not flip it, so the match rules never pick it.
+    let hp_single_ko: Vec<bool> = results
+        .iter()
+        .map(|r| r.winner_confident && r.loser_final_hp <= KO_HP && r.winner_final_hp > KO_HP)
+        .collect();
+    let mut hearts_says: Vec<Option<&str>> = vec![None; results.len()];
     for ri in 0..results.len() {
+        if fixed[ri] {
+            continue;
+        }
         let pre = states[ri];
         let post = if ri + 1 < results.len() { states[ri + 1] } else { None };
         let (Some(pre), Some(post)) = (pre, post) else {
@@ -1891,6 +1923,7 @@ fn detect_rounds_for_replay(
             ri, results[ri].round_start_ms / 1000.0, results[ri].round_end_ms / 1000.0, pre, post,
             hearts_winner, results[ri].winner, results[ri].winner_confident, results[ri].is_match_start);
         let Some(hw) = hearts_winner else { continue };
+        hearts_says[ri] = Some(hw);
         if results[ri].winner == hw {
             if !results[ri].winner_confident {
                 eprintln!("[HEARTS-DBG]   → hearts confirm uncertain round {} winner {}", ri, hw);
@@ -1911,20 +1944,110 @@ fn detect_rounds_for_replay(
         results[ri].loser_final_hp = tmp;
     }
 
+    // ── Match rules: a match is first to 2 rounds ──
+    // The winners of the rounds from one match start to the next must form
+    // a possible match: nobody reaches 2 before its last round, and a match
+    // followed by another one ended with 2 wins (a new match after a 1-1, or
+    // a third win, is impossible).  This only resolves contradictions:
+    // - An impossible match is fixed by flipping a round the hearts disagree
+    //   with, or an uncertain one, when exactly one such flip makes it
+    //   possible.  It is confident when the hearts agree with the result.
+    //   A clean single KO on HP and a manually overridden round are never
+    //   flipped (a misread heart would otherwise turn a KO'd side into the
+    //   winner).
+    // - A confident HP winner the hearts disagree with stays confident when
+    //   the hearts' version would make its match impossible, and an
+    //   uncertain one the hearts confirm or gave becomes confident when the
+    //   other winner would make it impossible.
+    // Rounds before the first match start (the video opens mid-match) are
+    // not checked; the last match may be cut off by the end of the video.
+    let starts_idx: Vec<usize> = (0..results.len()).filter(|&i| results[i].is_match_start).collect();
+    for (k, &s) in starts_idx.iter().enumerate() {
+        let e = starts_idx.get(k + 1).copied().unwrap_or(results.len());
+        let complete = k + 1 < starts_idx.len();
+        let ws: Vec<&str> = results[s..e]
+            .iter()
+            .map(|r| if r.winner == "P1" { "P1" } else { "P2" })
+            .collect();
+        let flipped_ok = |i: usize| -> bool {
+            let mut w = ws.clone();
+            w[i - s] = if w[i - s] == "P1" { "P2" } else { "P1" };
+            match_sequence_possible(&w, complete)
+        };
+        if match_sequence_possible(&ws, complete) {
+            for i in s..e {
+                let disagree = hearts_says[i].map_or(false, |h| h != results[i].winner);
+                if disagree && hp_confident[i] && !results[i].winner_confident && !flipped_ok(i) {
+                    eprintln!("[MATCH-DBG] round {}: hearts say {} but that would make the match impossible; keeping HP {} (confident)",
+                        i, hearts_says[i].unwrap_or("?"), results[i].winner);
+                    results[i].winner_confident = true;
+                }
+                // An uncertain winner the hearts gave, which the rules also
+                // force (the other one would make the match impossible).
+                if !results[i].winner_confident && hearts_says[i] == Some(results[i].winner.as_str()) && !flipped_ok(i) {
+                    eprintln!("[MATCH-DBG] round {}: hearts and match rules agree on {}; confident", i, results[i].winner);
+                    results[i].winner_confident = true;
+                }
+            }
+            continue;
+        }
+        let cands: Vec<usize> = (s..e)
+            .filter(|&i| !fixed[i] && !hp_single_ko[i])
+            .filter(|&i| {
+                hearts_says[i].map_or(false, |h| h != results[i].winner) || !results[i].winner_confident
+            })
+            .filter(|&i| flipped_ok(i))
+            .collect();
+        if cands.len() != 1 {
+            eprintln!("[MATCH-DBG] rounds {}..{}: impossible match {:?}, {} candidate fixes; left as is",
+                s, e - 1, ws, cands.len());
+            continue;
+        }
+        let i = cands[0];
+        let new_winner = if results[i].winner == "P1" { "P2" } else { "P1" };
+        eprintln!("[MATCH-DBG] rounds {}..{}: impossible match {:?}; round {} winner {} → {} (hearts {:?})",
+            s, e - 1, ws, i, results[i].winner, new_winner, hearts_says[i]);
+        results[i].winner = new_winner.to_string();
+        let tmp = results[i].winner_final_hp;
+        results[i].winner_final_hp = results[i].loser_final_hp;
+        results[i].loser_final_hp = tmp;
+        results[i].winner_confident = hearts_says[i] == Some(new_winner);
+    }
+
     // A round cut off by the end of the video has no visible ending: the
     // loser never reaches 0, or only in the last moments (the KO and slash
-    // take a few seconds), so the winner is a guess. Ask the user.
+    // take a few seconds), so the winner is a guess. Ask the user.  Unless
+    // the KO is complete: after it the HUD shows the clock stopped (one
+    // value read at least ko_frozen_reads times, at most one below the last
+    // value before the KO; a round in play counts down) with the loser at 0.
     const UNFINISHED_MS: f64 = 2000.0;
+    let ko_frozen_reads = fr(5);
     let video_end_ms = ts[n - 1];
-    for r in results.iter_mut() {
-        if !r.winner_confident || video_end_ms - r.round_end_ms >= UNFINISHED_MS {
+    for (r, &fx) in results.iter_mut().zip(&fixed) {
+        if fx || !r.winner_confident || video_end_ms - r.round_end_ms >= UNFINISHED_MS {
             continue;
         }
         let loser = if r.winner == "P1" { &p2_norm } else { &p1_norm };
-        let ko_ms = (0..n)
+        let ko_idx = (0..n)
             .filter(|&j| ts[j] >= r.round_start_ms && ts[j] <= r.round_end_ms)
-            .find(|&j| !loser[j].is_nan() && loser[j] <= 0.01)
-            .map(|j| ts[j]);
+            .find(|&j| !loser[j].is_nan() && loser[j] <= 0.01);
+        let ko_ms = ko_idx.map(|j| ts[j]);
+        if ko_ms.map_or(false, |t| video_end_ms - t >= UNFINISHED_MS) {
+            continue;
+        }
+        let frozen_after = ko_idx.map_or(false, |k| {
+            let Some(before) = (0..k).rev().find_map(|j| timer_sup[j]) else { return false };
+            let after: Vec<i32> = (k..n).filter_map(|j| timer_sup[j]).collect();
+            after.len() >= ko_frozen_reads
+                && after.iter().all(|&v| v == after[0])
+                && after[0] >= before - 1
+                && (k..n).all(|j| loser[j].is_nan() || loser[j] <= 0.01)
+        });
+        if frozen_after {
+            eprintln!("[ROUND-DBG] {} round {}: KO at {:?} near the end of the video, clock stopped after it; keeping it confident",
+                replay_id, r.round_index, ko_ms.map(|t| t / 1000.0));
+            continue;
+        }
         if ko_ms.map_or(true, |t| video_end_ms - t < UNFINISHED_MS) {
             eprintln!("[ROUND-DBG] {} round {} cut off by the end of the video (KO at {:?}); marking uncertain",
                 replay_id, r.round_index, ko_ms.map(|t| t / 1000.0));
@@ -1933,6 +2056,20 @@ fn detect_rounds_for_replay(
     }
 
     Ok(results)
+}
+
+/// Can these round winners (in order) be one first-to-2 match?  Nobody may
+/// reach 2 wins before the last round; with `complete` (another match
+/// follows) the last round must give its winner the 2nd win.
+fn match_sequence_possible(winners: &[&str], complete: bool) -> bool {
+    let (mut a, mut b) = (0, 0);
+    for w in winners {
+        if a >= 2 || b >= 2 {
+            return false;
+        }
+        if *w == "P1" { a += 1 } else { b += 1 }
+    }
+    !complete || a.max(b) == 2
 }
 
 fn compute_match_stats(
@@ -2222,30 +2359,28 @@ fn get_damage_events(db_path: String, replay_id: String) -> Result<Vec<DamageEve
 #[tauri::command]
 fn get_rounds(db_path: String, replay_id: String) -> Result<Vec<RoundResult>, String> {
     let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
-    let mut rounds = detect_rounds_for_replay(&conn, &replay_id)?;
+    // Winner overrides are applied inside detect_rounds_for_replay, before
+    // the match rules, so a correction also updates the rounds that depend
+    // on it.
+    detect_rounds_for_replay(&conn, &replay_id)
+}
 
-    // Apply winner overrides from the database
-    ensure_winner_overrides_table(&conn)?;
-    let mut stmt = conn.prepare(
-        "SELECT round_index, winner FROM winner_overrides WHERE replay_id = ?"
-    ).map_err(|e| e.to_string())?;
-    let overrides: Vec<(usize, String)> = stmt.query_map([&replay_id], |row| {
+/// Manual winner corrections for a replay as (round_index, winner).  Empty
+/// when the table doesn't exist yet (a read-only or older DB).
+fn load_winner_overrides(conn: &Connection, replay_id: &str) -> Vec<(usize, String)> {
+    let Ok(mut stmt) = conn.prepare("SELECT round_index, winner FROM winner_overrides WHERE replay_id = ?") else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map([replay_id], |row| {
         Ok((row.get::<_, i64>(0)? as usize, row.get::<_, String>(1)?))
-    }).map_err(|e| e.to_string())?
-    .filter_map(|r| r.ok())
-    .collect();
-
-    for (idx, new_winner) in overrides {
-        if let Some(round) = rounds.iter_mut().find(|r| r.round_index == idx) {
-            if round.winner != new_winner {
-                std::mem::swap(&mut round.winner_final_hp, &mut round.loser_final_hp);
-                round.winner = new_winner;
-            }
-            round.winner_confident = true;
-        }
+    });
+    match rows {
+        Ok(rows) => rows
+            .filter_map(|r| r.ok())
+            .filter(|(_, w)| w == "P1" || w == "P2")
+            .collect(),
+        Err(_) => Vec::new(),
     }
-
-    Ok(rounds)
 }
 
 #[tauri::command]
@@ -4100,8 +4235,8 @@ mod tests {
         // Match 1: P1 wins 2-0.  Match 2: round 3's HP reads P1 ahead (a
         // time-out, nobody KO'd) but the hearts show P2 took it; P1 then
         // wins two rounds.  The hearts state is read early in each round.
-        // The hearts are secondary: the confident HP winner is kept and the
-        // disagreement only flags the round as uncertain.
+        // On HP alone match 2 would be P1 3-0, which is impossible (first
+        // to 2): the hearts' version (P2, then P1 2-1) is taken, confident.
         let rounds = [
             (0.6, 0.0, 0, 0),
             (0.5, 0.0, 0, 1),
@@ -4115,12 +4250,108 @@ mod tests {
             let r = detect_rounds_for_replay(&conn, "r").unwrap();
             assert_eq!(r.len(), 6, "rate {}", rate);
             let winners: Vec<&str> = r.iter().map(|x| x.winner.as_str()).collect();
-            assert_eq!(winners, ["P1"; 6], "rate {}", rate);
+            assert_eq!(winners, ["P1", "P1", "P2", "P1", "P1", "P1"], "rate {}", rate);
             let confident: Vec<bool> = r.iter().map(|x| x.winner_confident).collect();
-            assert_eq!(confident, [true, true, false, true, true, true], "rate {}", rate);
+            assert_eq!(confident, [true; 6], "rate {}", rate);
             let starts: Vec<bool> = r.iter().map(|x| x.is_match_start).collect();
             assert_eq!(starts, [true, false, true, false, false, true], "rate {}", rate);
         }
+    }
+
+    #[test]
+    fn test_match_sequence_possible() {
+        assert!(match_sequence_possible(&["P1", "P1"], true));
+        assert!(match_sequence_possible(&["P1", "P2", "P2"], true));
+        assert!(!match_sequence_possible(&["P1", "P2"], true), "a new match after 1-1");
+        assert!(match_sequence_possible(&["P1", "P2"], false), "cut off by the end of the video");
+        assert!(!match_sequence_possible(&["P1", "P1", "P2"], false), "a round after the match was won");
+        assert!(!match_sequence_possible(&["P1", "P1", "P1"], true), "three wins");
+    }
+
+    #[test]
+    fn test_match_rules_resolve_an_impossible_result_with_the_hearts() {
+        // Round 1 ends on time with P1 at 25 % and P2 at 40 %: on HP P2 won
+        // (confident).  But the hearts show P1 had won round 0 and the next
+        // round starts a new match (both back to 0 lost): P2 winning round
+        // 1 would leave match 1 at 1-1.  The hearts say P1: taken, confident.
+        let rounds = [(0.6, 0.0, 0, 0), (0.25, 0.4, 0, 1), (0.6, 0.0, 0, 0), (0.6, 0.0, 0, 1)];
+        let conn = synthetic_replay(&rounds, 30.0);
+        let r = detect_rounds_for_replay(&conn, "r").unwrap();
+        assert_eq!(r.len(), 4);
+        let starts: Vec<bool> = r.iter().map(|x| x.is_match_start).collect();
+        assert_eq!(starts, [true, false, true, false]);
+        assert_eq!((r[1].winner.as_str(), r[1].winner_confident), ("P1", true));
+        assert!(r[1].winner_final_hp < r[1].loser_final_hp, "HP pair follows the winner");
+    }
+
+    #[test]
+    fn test_match_rules_never_flip_a_clean_ko_on_a_misread_heart() {
+        // The real match is P2, P1, P1.  Round 0 is a clean KO for P2, but
+        // round 1's hearts are misread as P1 having won it; round 1 itself
+        // is (wrongly) a confident P2 on HP with no hearts after it, and
+        // round 2 is P1.  [P2, P2, P1] followed by a new match is
+        // impossible, and round 0 is the only round the hearts disagree
+        // with; flipping it would make the KO'd side the winner.  It stays
+        // P2, uncertain (the hearts disagree), with its KO HP pair.
+        let rounds = [(0.0, 0.6, 0, 0), (0.25, 0.4, 0, 1), (0.5, 0.0, 0, 0), (0.6, 0.0, 0, 0)];
+        let conn = synthetic_replay(&rounds, 30.0);
+        conn.execute("UPDATE frame_data SET p1_rounds_won = NULL, p2_rounds_won = NULL
+                      WHERE timestamp_ms >= 98000 AND timestamp_ms < 147000", []).unwrap();
+        let r = detect_rounds_for_replay(&conn, "r").unwrap();
+        assert_eq!(r.len(), 4);
+        let starts: Vec<bool> = r.iter().map(|x| x.is_match_start).collect();
+        assert_eq!(starts, [true, false, false, true]);
+        assert_eq!((r[0].winner.as_str(), r[0].winner_confident), ("P2", false));
+        assert!(r[0].winner_final_hp > KO_HP && r[0].loser_final_hp <= KO_HP);
+    }
+
+    #[test]
+    fn test_overrides_are_applied_before_the_match_rules() {
+        // As in test_match_rules_resolve_an_impossible_result_with_the_hearts,
+        // round 1 is flipped to P1 because P1 won round 0.  When the user
+        // corrects round 0 to P2, round 1's HP winner (P2) completes the
+        // match 2-0 and the hearts' P1 would leave it at 1-1: round 1 goes
+        // back to P2, so the match stays possible.
+        let rounds = [(0.6, 0.0, 0, 0), (0.25, 0.4, 0, 1), (0.6, 0.0, 0, 0), (0.6, 0.0, 0, 1)];
+        let conn = synthetic_replay(&rounds, 30.0);
+        ensure_winner_overrides_table(&conn).unwrap();
+        conn.execute("INSERT INTO winner_overrides VALUES ('r', 0, 'P2')", []).unwrap();
+        let r = detect_rounds_for_replay(&conn, "r").unwrap();
+        assert_eq!(r.len(), 4);
+        assert_eq!((r[0].winner.as_str(), r[0].winner_confident), ("P2", true));
+        assert!(r[0].winner_final_hp < r[0].loser_final_hp, "HP pair follows the override");
+        assert_eq!((r[1].winner.as_str(), r[1].winner_confident), ("P2", true));
+        let ws: Vec<&str> = r[..2].iter().map(|x| x.winner.as_str()).collect();
+        assert!(match_sequence_possible(&ws, true));
+    }
+
+    #[test]
+    fn test_ko_just_before_the_video_end_with_the_clock_stopped_stays_confident() {
+        // Round 1's KO lands at 40 s (timer 62) and the video ends 1.5 s
+        // later.  With the clock shown stopped after the KO the round is
+        // over; with the clock still counting down it may not be.
+        for (frozen, confident) in [(true, true), (false, false)] {
+            let conn = synthetic_replay(&[(0.6, 0.0, 0, 0), (0.5, 0.3, 0, 1)], 30.0);
+            conn.execute("DELETE FROM frame_data WHERE timestamp_ms > 90500", []).unwrap();
+            conn.execute("UPDATE frame_data SET p2_health_pct = 0.0, timer_value = ?1
+                          WHERE timestamp_ms >= 89000", [if frozen { 62 } else { 61 }]).unwrap();
+            if !frozen {
+                conn.execute("UPDATE frame_data SET timer_value = 62
+                              WHERE timestamp_ms >= 89000 AND timestamp_ms < 89800", []).unwrap();
+            }
+            let r = detect_rounds_for_replay(&conn, "r").unwrap();
+            assert_eq!(r.len(), 2);
+            assert_eq!((r[1].winner.as_str(), r[1].winner_confident), ("P1", confident), "frozen {}", frozen);
+        }
+    }
+
+    #[test]
+    fn test_a_one_pixel_sliver_is_not_a_ko() {
+        // P1 survives on a 1-px sliver (0.9 %) while P2 is KO'd (exactly 0).
+        let conn = synthetic_replay(&[(0.6, 0.0, 0, 0), (0.009, 0.0, 0, 1)], 30.0);
+        let r = detect_rounds_for_replay(&conn, "r").unwrap();
+        assert_eq!(r.len(), 2);
+        assert_eq!((r[1].winner.as_str(), r[1].winner_confident), ("P1", true));
     }
 
     #[test]
@@ -4128,12 +4359,15 @@ mod tests {
         // Round 1 ends in a double KO (both bars empty): on HP alone the
         // winner is an uncertain P1.  When the next round's hearts show P2
         // lost one (P1 took it) they confirm it; when they show P1 lost one
-        // they break the tie for P2, and the round stays uncertain.
+        // they break the tie for P2, and the match rules agree (round 2, won
+        // by P2, is in the same match, so P1 cannot have won rounds 0 and 1):
+        // confident.  With the hearts hidden, the rules alone break it and
+        // the round stays uncertain.
         let hide_next = |c: &Connection| {
             c.execute("UPDATE frame_data SET p1_rounds_won = NULL, p2_rounds_won = NULL
                        WHERE timestamp_ms >= 98000", []).unwrap();
         };
-        for (lost1, lost2, winner, confident) in [(0, 1, "P1", true), (1, 0, "P2", false)] {
+        for (lost1, lost2, winner, confident) in [(0, 1, "P1", true), (1, 0, "P2", true)] {
             let rounds = [(0.6, 0.0, 0, 0), (0.0, 0.0, 0, 0), (0.0, 0.5, lost1, lost2)];
             let conn = synthetic_replay(&rounds, 30.0);
             let r = detect_rounds_for_replay(&conn, "r").unwrap();
@@ -4142,7 +4376,7 @@ mod tests {
                 "next-round hearts {}/{}", lost1, lost2);
             hide_next(&conn);
             let r = detect_rounds_for_replay(&conn, "r").unwrap();
-            assert_eq!((r[1].winner.as_str(), r[1].winner_confident), ("P1", false), "HP alone");
+            assert_eq!((r[1].winner.as_str(), r[1].winner_confident), ("P2", false), "HP and match rules");
         }
     }
 

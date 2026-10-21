@@ -79,10 +79,10 @@ Video (1080p @30fps)
 **Rust (`app/src-tauri/src/lib.rs`):** Single large file containing all Tauri commands and the round detection algorithm. Key responsibilities:
 - Round boundary detection using four signals: timer jumps, HP resets, gap-based resets, and data gaps
 - Winner determination: terminal state of the cleaned HP first (a side at 0 loses, else the lower final HP), then the older KO counting, HP clustering, min-HP fallback and post-round tiebreaker
-- Uncertain winner detection with manual override (stored in `winner_overrides` table)
+- Uncertain winner detection with manual override (stored in `winner_overrides` table; applied inside `detect_rounds_for_replay` before the match rules, which never flip an overridden round or a clean single KO)
 - Non-gameplay filtering (no timer for 20+ seconds → NaN-out HP data)
 - Wallbreak detection (distinguishes mid-round stage transitions from KO animations)
-- Match grouping (first-to-2 round wins), comeback detection
+- Match grouping (first-to-2 round wins), comeback detection. The match rules also resolve contradictions (`match_sequence_possible`): an impossible match (a new match after 1-1, a third win) is fixed by flipping the one round the hearts disagree with or that is uncertain; confident consistent results are never overridden
 - Hearts-based winner override from round counter extraction (raw data, not smoothed). The hearts are game-native HUD (portable), but the extractor misreads lost hearts, so they stay a secondary signal; never use the Spaghetti Showdown overlay's score banner above them, which other users' videos don't have
 - All SQLite queries for serving data to the frontend
 - Spawning Python subprocesses for analysis and VOD splitting (`require_python()`: `SPAGHETTI_LAB_PYTHON`, the project `.venv`, `<local app data>/SpaghettiLab/venv`, then `py -3` on Windows / Homebrew and python.org `python3` on macOS, then PATH; the first that imports cv2) and ffmpeg (`ffmpeg_bin()`: `SPAGHETTI_FFMPEG`, PATH plus `/opt/homebrew/bin` and `/usr/local/bin`, the Python's `imageio_ffmpeg`, bundled copy incl. the macOS bundle's `Contents/Resources`). Only successes are cached, so installing a missing tool needs no restart

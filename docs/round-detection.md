@@ -225,8 +225,12 @@ Scans the post-40% portion of the round for mid-round wallbreaks:
 ### Step 1b: Terminal State
 
 The cleaned series (see `docs/cv-pipeline.md`) is non-increasing within a round and reads a KO as exactly 0, so each side's minimum over the search window is its final HP:
-- Exactly one side at <= 0.01 -> the other side wins (confident)
-- Neither at <= 0.01 and the final HPs differ by >= 0.03 -> the lower side loses (confident if the difference is >= 0.10)
+- Exactly one side at <= 0.005 -> the other side wins (confident)
+- Neither at <= 0.005 and the final HPs differ by >= 0.03 -> the lower side loses (confident if the difference is >= 0.10)
+
+The KO bound is 0.005 because a live 1-px sliver reads 0.008 raw (0.009 normalized): with 0.01,
+14_Grands R15 (P1 survives on a sliver, P2's bar empty with the clock stopped at 39, the KO
+slash over Leo) counted as a double KO and the KO-count fallback gave it to P2.
 - Otherwise (both at 0, or too close) fall through to the steps below
 
 ### Step 2: KO Counting
@@ -295,7 +299,7 @@ When `|combined| < 0.10` (very ambiguous):
 `winner_confident` is `false` when:
 - The winner was determined by the post-round tiebreaker
 - The combined signal was too weak
-- The round is cut off by the end of the video: it ends within 2 s of the last frame and the loser never reaches 0.01, or only within the last 2 s (the KO and slash are not visible)
+- The round is cut off by the end of the video: it ends within 2 s of the last frame and the loser never reaches 0.01, or only within the last 2 s (the KO and slash are not visible). Not when the KO is complete: after it the HUD shows the clock stopped (one value, read >= 5 times, at most one below the last value before the KO; a round in play counts down) and the loser stays at 0 (12_LSemi R10 in a cut ending 1.9 s after the KO)
 
 ---
 
@@ -344,8 +348,29 @@ The hearts are a secondary signal; HP and timer stay primary:
 - hearts disagree with an uncertain HP winner: tie-break, the hearts' side wins
   (`winner_final_hp` / `loser_final_hp` swapped) but the round stays uncertain;
 - hearts disagree with a confident HP winner: the HP winner is kept and the round is marked
-  uncertain, so the user is asked.
+  uncertain, until the match rules below settle it.
 The last round of a video has no next state and is never checked.
+
+**Match rules** (`match_sequence_possible`): a match is first to 2 rounds. The winners of the
+rounds from one match start to the next must be possible: nobody reaches 2 before the match's last
+round, and a match followed by another one ended with 2 wins (a new match after 1-1, or a third
+win, is impossible). The last match may be cut off by the end of the video; rounds before the
+first match start (the video opens mid-match) are not checked. This only resolves
+contradictions:
+- an impossible match is fixed by flipping one round the hearts disagree with, or an uncertain
+  one, when exactly one such flip makes it possible; the round is confident when the hearts agree
+  with the result (e2e 02_UF R1: HP said P2 after a missed KO, the next round started a new match
+  at what would be 1-1, the hearts said P1). A clean single KO on HP (loser <= `KO_HP`, winner
+  above it) and a manually overridden round are never flipped: a misread heart would otherwise
+  make the KO'd side the winner (with a winner HP of 0), confident when the same misread heart
+  agrees;
+- a confident HP winner the hearts disagree with stays confident when the hearts' version would
+  make the match impossible (the hearts reader misreads lost hearts);
+- an uncertain winner the hearts confirmed or gave becomes confident when the other winner would
+  make the match impossible.
+Otherwise (no or several candidate flips) nothing changes. On the live, e2e and YouTube data the
+resolver changes nothing after the cleaner fixes of 2026-10-21; on the old e2e cleaning it fixes
+02_UF R1.
 
 **Results** (re-extracted data, `output/reanalysis2/merged.db` and `yt/`; dumps in
 `output/round_fix/v65`, `v65_yt`): match starts are identical to v62 on all 18 videos (64 on our
@@ -374,14 +399,18 @@ CREATE TABLE IF NOT EXISTS winner_overrides (
 
 The `set_round_winner` Tauri command inserts/replaces entries in this table.
 
-### Applied at Read-Time
+### Applied Before the Match Rules
 
-In the `get_rounds` command:
-1. Detect rounds via `detect_rounds_for_replay()`
-2. Query `winner_overrides` for the replay
-3. For each override, find the matching round by `round_index`, swap winner/loser HP if needed, set `winner_confident = true`
+In `detect_rounds_for_replay()` (so `get_rounds`, `get_match_stats` and every other caller see
+them), after each round's HP winner and before the hearts and match rules:
+1. Query `winner_overrides` for the replay (`load_winner_overrides`; none when the table doesn't exist)
+2. For each override, find the matching round by `round_index`, swap winner/loser HP if needed, set `winner_confident = true`
+3. Mark the round fixed: the hearts check, the match rules and the end-of-video rule never change it
 
-This means overrides are non-destructive and survive reanalysis.
+The match rules then work from the corrected winners: an automatic flip that rested on a wrong
+neighbouring round of the same match is undone when the user corrects that round, so a
+correction can't leave a match at 1-1 or with a third win. Overrides are non-destructive and
+survive reanalysis.
 
 ---
 

@@ -198,10 +198,7 @@ fn get_rounds(db_path: String, replay_id: String) -> Result<Vec<RoundResult>, St
 **Purpose:** Detect rounds and determine winners for a replay.
 
 **Algorithm:**
-1. Calls `detect_rounds_for_replay()` which runs the full round detection algorithm (see `docs/round-detection.md`)
-2. Creates the `winner_overrides` table if it doesn't exist
-3. Queries `winner_overrides` for manual corrections
-4. Applies overrides: swaps winner/loser HP values, sets `winner_confident = true`
+1. Calls `detect_rounds_for_replay()` which runs the full round detection algorithm (see `docs/round-detection.md`), including the manual corrections from `winner_overrides` (applied before the match rules, so rounds that depend on a corrected one follow it)
 
 **Notes:** Rounds are computed on-demand from raw frame data each time this command is called. Manual overrides are stored separately and applied at read-time, so they survive reanalysis.
 
@@ -363,7 +360,7 @@ CREATE TABLE IF NOT EXISTS winner_overrides (
 
 Uses `INSERT OR REPLACE` so calling again for the same round overwrites the previous override.
 
-**Notes:** Overrides are applied at read-time in `get_rounds`, not stored in the round detection output. This means they persist across reanalysis.
+**Notes:** Overrides are applied at read-time inside `detect_rounds_for_replay` (before the match rules), not stored in the round detection output. This means they persist across reanalysis.
 
 ---
 
