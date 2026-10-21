@@ -266,16 +266,26 @@ class _BigMatcher:
         return None, dbg
 
 
+# After the last frame with a counter, every frame is still read for this
+# many samples (the counter flickers under occlusion and VFX).
+ACTIVE_GRACE = 15
+
+
 class ComboCounterExtractor(BaseExtractor):
     """Per-frame combo counter: which side shows a counter and its hit number."""
 
     def __init__(self, templates_path: Path | None = None, stride: int = 2):
-        """``stride`` > 1 reads only every stride-th frame and repeats that
-        reading on the frames in between (the counter stays up for many
-        frames; matching costs ~40 ms per frame on 1080p)."""
+        """``stride`` > 1 reads only every stride-th frame while no counter is
+        shown (matching costs ~40 ms per frame on 1080p).  Once one is found
+        every frame is read until none has been seen for ACTIVE_GRACE
+        samples, and the skipped frame just before the find is read too, so
+        the output does not depend on which frames the stride lands on (a
+        cut of the same video starting one frame later reads the same)."""
         self.stride = max(1, int(stride))
-        self._held: tuple[Side, int] | None = None
-        self._held_frame = -10**9
+        # Samples left in which every frame is read (counter seen recently).
+        self._active = 0
+        # The last frame skipped by the stride: (frame number, rois, data).
+        self._skipped: tuple[int, dict, FrameData] | None = None
         # Spacing between consecutive sampled frame numbers (1 at 30 fps,
         # 2 when a 60 fps video is read every 2nd frame). The stride counts
         # samples, not source frames.
@@ -327,20 +337,28 @@ class ComboCounterExtractor(BaseExtractor):
         self._prev_frame = ctx.frame_number
         step = self._step or 1
         idx = ctx.frame_number // step
-        if self.stride > 1 and idx % self.stride:
-            if self._held is not None and idx - self._held_frame // step < self.stride:
-                data.combo_side, data.combo_count = self._held
+        if self.stride > 1 and idx % self.stride and self._active <= 0:
+            self._skipped = (ctx.frame_number, ctx.rois, data)
             return
-        self._held_frame = ctx.frame_number
-        self.last = {side: self.read_side(ctx.rois, side) for side in (Side.P1, Side.P2)}
+        found = self._read_into(ctx.rois, data)
+        skipped, self._skipped = self._skipped, None
+        if found:
+            if self._active <= 0 and skipped is not None and skipped[0] == ctx.frame_number - step:
+                # The counter may have appeared on the frame the stride skipped.
+                self._read_into(skipped[1], skipped[2])
+            self._active = ACTIVE_GRACE
+        else:
+            self._active -= 1
+
+    def _read_into(self, rois: dict, data: FrameData) -> bool:
+        self.last = {side: self.read_side(rois, side) for side in (Side.P1, Side.P2)}
         cands = [(s, r) for s, r in self.last.items() if r is not None]
         if not cands:
-            self._held = None
-            return
+            return False
         side, r = max(cands, key=lambda sr: sr[1].score)
         data.combo_side = side
         data.combo_count = r.count
-        self._held = (side, r.count)
+        return True
 
 
 # ── Combo list ───────────────────────────────────────────────────────────────
@@ -361,8 +379,8 @@ class Combo:
 
 def _smooth_readings(frames: list[FrameData], min_run: int = 3) -> list[tuple[Side | None, int | None]]:
     """Per-frame (side, count), dropping side readings that last < min_run frames
-    (3 frames = 2 independent reads at the extractor's default stride of 2)
-    and count readings that disagree with both neighbours (single-frame misreads)."""
+    (the extractor reads every frame while a counter is shown) and count
+    readings that disagree with both neighbours (single-frame misreads)."""
     raw = [(f.combo_side, f.combo_count) for f in frames]
     n = len(raw)
     out: list[tuple[Side | None, int | None]] = [(None, None)] * n

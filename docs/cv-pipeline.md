@@ -158,7 +158,11 @@ Generator that yields `(frame_number, timestamp_ms, frame_bgr)` tuples.
   and assumes ~30 samples/s. Skipped frames use `cap.grab()` (no BGR copy)
 - `ComboCounterExtractor`'s `stride` (default 2) also counts samples: it derives the
   spacing between sampled frame numbers (1 at 30 fps, 2 for a 60 fps video read every 2nd
-  frame) and reads the counter on every 2nd *sample*, not every even source frame
+  frame) and, while no counter is shown, reads every 2nd *sample*. Once a counter is found
+  it reads every sample until none has been seen for 15 samples (`ACTIVE_GRACE`), and also
+  reads the sample the stride skipped just before the find. The output therefore does not
+  depend on which samples the stride lands on: a cut of the same video starting one frame
+  later reads the same (it used to differ by 229-804 frames per file, e2e E4)
 - `frame_number` is the source-video frame index; timestamp is `(frame_number / video_fps) * 1000.0`.
   30 fps videos give exactly the same frames and timestamps as before
 - `max_frames` stops after that many source frames

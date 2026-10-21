@@ -68,18 +68,44 @@ def test_reads_counter_from_real_frames(default_config, name, side, count):
     assert data.combo_count == count
 
 
-def test_stride_repeats_last_reading(default_config):
+def test_stride_reads_every_frame_while_a_counter_is_shown(default_config):
     ext = ComboCounterExtractor(stride=2)
     if not ext.enabled:
         pytest.skip("combo templates not built")
-    d0 = _read(ext, default_config, FRAMES / "set17_f09000_x860.jpg", frame_number=100)
-    # odd frame: not matched, previous reading carried over
-    d1 = _read(ext, default_config, FRAMES / "set17_f10330_x0.jpg", frame_number=101)
-    assert (d0.combo_side, d0.combo_count) == (Side.P2, 3)
-    assert (d1.combo_side, d1.combo_count) == (Side.P2, 3)
-    # a gap breaks the carry-over
-    d2 = _read(ext, default_config, FRAMES / "set17_f10330_x0.jpg", frame_number=105)
-    assert d2.combo_side is None
+    calls = []
+    real = ext.read_side
+    ext.read_side = lambda rois, side: (calls.append(side), real(rois, side))[1]
+    empty, three = FRAMES / "set17_f10330_x0.jpg", FRAMES / "set17_f09000_x860.jpg"
+    _read(ext, default_config, empty, frame_number=100)
+    _read(ext, default_config, empty, frame_number=101)     # idle: skipped
+    assert len(calls) == 2
+    # The counter shows up on a skipped frame: the next read finds it and
+    # reads the skipped frame too.
+    d3 = _read(ext, default_config, three, frame_number=103)
+    d4 = _read(ext, default_config, three, frame_number=104)
+    assert len(calls) == 6
+    assert (d3.combo_side, d3.combo_count) == (Side.P2, 3)
+    assert (d4.combo_side, d4.combo_count) == (Side.P2, 3)
+    # While a counter was seen recently every frame is read (odd ones too).
+    d5 = _read(ext, default_config, empty, frame_number=105)
+    assert len(calls) == 8 and d5.combo_side is None
+
+
+def test_stride_output_does_not_depend_on_frame_parity(default_config):
+    """The same frames read as a cut starting one frame later (every frame
+    number shifted by one) give the same per-frame readings."""
+    if not ComboCounterExtractor(stride=2).enabled:
+        pytest.skip("combo templates not built")
+    empty, three, twelve = (FRAMES / n for n in ("set17_f10330_x0.jpg", "set17_f09000_x860.jpg",
+                                                 "set17_f08300_x860.jpg"))
+    seq = [empty] * 4 + [three] * 3 + [twelve] * 3 + [empty] * 25 + [twelve] * 2 + [empty] * 4
+    out = []
+    for shift in (0, 1):
+        ext = ComboCounterExtractor(stride=2)
+        data = [_read(ext, default_config, path, frame_number=k + shift) for k, path in enumerate(seq)]
+        out.append([(d.combo_side, d.combo_count) for d in data])
+    assert out[0] == out[1]
+    assert out[0][4] == (Side.P2, 3) and out[0][7] == (Side.P2, 12) and out[0][35] == (Side.P2, 12)
 
 
 def test_confirmed_max_drops_one_frame_misreads():
@@ -183,11 +209,15 @@ def test_stride_counts_samples_not_source_frames(default_config):
     calls = []
     real = ext.read_side
     ext.read_side = lambda rois, side: (calls.append(side), real(rois, side))[1]
-    d0 = _read(ext, default_config, FRAMES / "set17_f09000_x860.jpg", frame_number=200)
-    d1 = _read(ext, default_config, FRAMES / "set17_f10330_x0.jpg", frame_number=202)
-    assert (d0.combo_side, d0.combo_count) == (Side.P2, 3)
-    # frame 202 is the next sample: skipped, reading carried over
-    assert (d1.combo_side, d1.combo_count) == (Side.P2, 3)
-    assert len(calls) == 2  # one read (both sides) for two samples
-    _read(ext, default_config, FRAMES / "set17_f10330_x0.jpg", frame_number=204)
+    empty, three = FRAMES / "set17_f10330_x0.jpg", FRAMES / "set17_f09000_x860.jpg"
+    _read(ext, default_config, empty, frame_number=200)
+    _read(ext, default_config, empty, frame_number=202)     # next sample: skipped
+    assert len(calls) == 2
+    _read(ext, default_config, empty, frame_number=204)
     assert len(calls) == 4
+    # A counter on sample 208 also reads the skipped sample 206 before it.
+    d6 = _read(ext, default_config, three, frame_number=206)
+    d8 = _read(ext, default_config, three, frame_number=208)
+    assert len(calls) == 8
+    assert (d6.combo_side, d6.combo_count) == (Side.P2, 3)
+    assert (d8.combo_side, d8.combo_count) == (Side.P2, 3)
