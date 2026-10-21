@@ -27,6 +27,7 @@ export function SplitVodView({ onComplete, onCancel }: Props) {
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState("");
+  const [scanWarnings, setScanWarnings] = useState<string[]>([]);
   const [sets, setSets] = useState<DetectedSetInfo[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [cutPaths, setCutPaths] = useState<string[]>([]);
@@ -121,6 +122,9 @@ export function SplitVodView({ onComplete, onCancel }: Props) {
         const msg = event.payload;
         if (msg.startsWith("PROGRESS:")) {
           setProgress(msg.slice("PROGRESS:".length));
+        } else if (msg.startsWith("WARNING:")) {
+          const w = msg.slice("WARNING:".length).trim();
+          setScanWarnings((prev) => (prev.includes(w) ? prev : [...prev, w]));
         }
       }
     });
@@ -134,12 +138,14 @@ export function SplitVodView({ onComplete, onCancel }: Props) {
     if (!videoPath) return;
     setStep("scanning");
     setProgress("0");
+    setScanWarnings([]);
     setError(null);
     try {
       const detected = await scanVod(videoPath, roiConfig);
       setSets(detected);
-      // Auto-select only sets with detected player names
-      setSelected(new Set(detected.filter((s) => s.p1_name && s.p2_name).map((s) => s.index)));
+      // Every detected set has the game's HUD (timer) on screen, so select them
+      // all; a set whose names couldn't be read is cut as "P1 vs P2"
+      setSelected(new Set(detected.map((s) => s.index)));
       setStep("results");
     } catch (err) {
       setError(String(err));
@@ -165,8 +171,8 @@ export function SplitVodView({ onComplete, onCancel }: Props) {
           index: s.index,
           start_secs: s.start_secs,
           end_secs: s.end_secs,
-          p1_name: s.p1_name || null,
-          p2_name: s.p2_name || null,
+          p1_name: s.p1_name || "P1",
+          p2_name: s.p2_name || "P2",
         }));
       const paths = await cutVodSets(videoPath, tocut, outputDir);
       setCutPaths(paths);
@@ -314,6 +320,11 @@ export function SplitVodView({ onComplete, onCancel }: Props) {
               <div className="text-xs text-text-muted mb-2">
                 Found {sets.length} sets. Select which ones to cut:
               </div>
+              {scanWarnings.map((w) => (
+                <div key={w} className="text-[10px] text-yellow-400 mb-2 select-text">
+                  {w}
+                </div>
+              ))}
               <div className="space-y-1.5 max-h-[300px] overflow-y-auto">
                 {sets.map((s) => (
                   <label
@@ -332,7 +343,9 @@ export function SplitVodView({ onComplete, onCancel }: Props) {
                     />
                     <div className="flex-1">
                       <div className="text-xs text-text-primary font-medium">
-                        {s.p1_name && s.p2_name ? `${s.p1_name} vs ${s.p2_name}` : `Set ${s.index}`}
+                        {s.p1_name || s.p2_name
+                          ? `${s.p1_name || "P1"} vs ${s.p2_name || "P2"}`
+                          : `Set ${s.index} (names not read)`}
                       </div>
                       <div className="text-[10px] text-text-muted">
                         {formatTime(s.start_secs)} - {formatTime(s.end_secs)}

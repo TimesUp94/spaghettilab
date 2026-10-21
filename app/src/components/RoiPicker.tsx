@@ -3,13 +3,16 @@ import type { RoiRect, RoiQuad, VodRoiConfig } from "../types";
 
 // Default ROIs for 1920x1080 GGS: the game's own HUD only (in-game tension
 // bars, round timer, nameplates), never a stream overlay, which is set by hand
-// and may be stale, different or absent.
+// and may be stale, different or absent. Must match the defaults in
+// scripts/split_vod.py. The name quads cover only the name text, which GGS
+// draws slightly rotated (P1 rising to the right, P2 falling), and leave out
+// the game's "Player 1/2" label above it.
 const DEFAULT_ROIS: VodRoiConfig = {
   p1_tension: { y1: 1000, y2: 1040, x1: 260, x2: 750 },
   p2_tension: { y1: 1000, y2: 1040, x1: 1170, x2: 1660 },
   timer: { y1: 110, y2: 180, x1: 920, x2: 1000 },
-  p1_name: { tl: [75, 150], tr: [340, 145], br: [370, 178], bl: [45, 178] },
-  p2_name: { tl: [1555, 145], tr: [1850, 150], br: [1880, 178], bl: [1580, 178] },
+  p1_name: { tl: [145, 168], tr: [400, 147], br: [400, 172], bl: [145, 193] },
+  p2_name: { tl: [1560, 150], tr: [1748, 165], br: [1748, 190], bl: [1560, 175] },
 };
 
 const ROI_COLORS: Record<string, string> = {
@@ -362,8 +365,8 @@ export function RoiPicker({ imageSrc, videoWidth, videoHeight, videoDurationSecs
           />
           {imgSize.w > 0 && (
             <>
-              {renderRoi("p1_tension")}
-              {renderRoi("p2_tension")}
+              {/* The tension ROIs are still sent (older scripts read them) but
+                  gameplay is detected from the timer, so they aren't shown */}
               {renderRoi("timer")}
               {/* SVG overlay for quad ROIs */}
               <svg
@@ -409,8 +412,8 @@ export function RoiPicker({ imageSrc, videoWidth, videoHeight, videoDurationSecs
         )}
         <div className="text-[10px] text-text-muted flex gap-6">
           <span>Drag regions to move. Drag corners to resize/reshape. Use slider to find gameplay.</span>
-          <span className="text-blue-400">P1 Name / Tension</span>
-          <span className="text-red-400">P2 Name / Tension</span>
+          <span className="text-blue-400">P1 Name</span>
+          <span className="text-red-400">P2 Name</span>
           <span className="text-yellow-400">Timer</span>
         </div>
       </div>

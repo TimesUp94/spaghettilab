@@ -74,7 +74,7 @@ Video (1080p @30fps)
 
 ### Three-Layer Stack
 
-**Python (`replanal/` + `scripts/`):** CV pipeline using OpenCV. `scripts/analyze_replay.py` is the main entry point. Extractors in `replanal/extractors/` process health bars (brightness scanning), tension (green pixel scanning), timer (template-matched OCR), round counters (heart/cross detection), and scene state. `scripts/split_vod.py` handles VOD splitting with EasyOCR for player name detection.
+**Python (`replanal/` + `scripts/`):** CV pipeline using OpenCV. `scripts/analyze_replay.py` is the main entry point. Extractors in `replanal/extractors/` process health bars (brightness scanning), tension (green pixel scanning), timer (template-matched OCR), round counters (heart/cross detection), and scene state. `scripts/split_vod.py` handles VOD splitting: gameplay from the pipeline's timer reader (never stream-overlay colours), sets grouped by the in-game name tags read with EasyOCR and voted per segment (the tags' look as fallback), game counts from the hearts.
 
 **Rust (`app/src-tauri/src/lib.rs`):** Single large file containing all Tauri commands and the round detection algorithm. Key responsibilities:
 - Round boundary detection using four signals: timer jumps, HP resets, gap-based resets, and data gaps
@@ -96,7 +96,7 @@ Video (1080p @30fps)
 - **Wallbreaks:** GGS stage transitions that briefly show both bars at 100% during a camera transition. Must be distinguished from real round resets and post-KO animations.
 - **Non-gameplay detection:** If the round timer is absent for 20+ consecutive seconds, the region is classified as non-gameplay (lobby, character select) and HP data is NaN-ed out.
 - **Uncertain winners:** When HP signals are ambiguous (combined signal < 0.10), rounds are marked `winner_confident: false`. Users can override via the UI, stored in `winner_overrides` SQLite table.
-- **Quad ROIs:** VOD splitter name tag regions use 4-point quads (parallelograms) for skewed text in GGS. Perspective-warped to rectangles before OCR.
+- **Quad ROIs:** VOD splitter name tag regions use 4-point quads that follow the rotated name text in GGS and leave out the game's "Player 1/2" label. Perspective-warped to rectangles before OCR. Defaults in `split_vod.py`, RoiPicker `DEFAULT_ROIS` and `docs/vod-splitter.md` must agree.
 - **`.spag` / `.spagz` files:** `.spag` is a ZIP with an SQLite snapshot (plus video); `.spagz` is the lightweight variant (analysis DB only, no video — stores `video_url` so YouTube/Twitch sessions re-embed on reopen). Both registered as file associations.
 - **Annotate mode:** Lightweight session from a YouTube/Twitch URL (`create_quick_session`, `AnnotateSetup`/`AnnotateView`) — embeds the video via IFrame API for timestamped notes, drawings and the review questionnaire, without running the CV pipeline. `VideoPlayer` abstracts playback over both `<video>` and embeds.
 - **Questionnaire:** Templates in `app/src/lib/questionnaireTemplate.ts`; answers keyed by `(replay_id, question_key)` with template-id-prefixed keys (e.g. `ggst.roundstart.main_options`).

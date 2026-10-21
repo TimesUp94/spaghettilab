@@ -4,231 +4,286 @@ The VOD splitter detects individual tournament sets within a long VOD recording 
 
 ---
 
-## Architecture: 5-Step Pipeline
+## Architecture: 4-Step Pipeline
 
 ```
-Step 1: Gameplay Scanning (1fps via ffmpeg pipe)
-  -> (second, is_gameplay) pairs
-Step 2: Segment Building (merge + filter)
-  -> list of Segment objects
-Step 3: Set Boundary Detection (name tag comparison)
-  -> list of boundary indices
-Step 4: Grouping + OCR Name Reading
-  -> list of DetectedSet objects with player names
-Step 5: ffmpeg Stream Copy Cutting
+Step 1: HUD scan (1 fps via ffmpeg pipe)
+  -> per second: timer value, hearts, name-tag crops of clean HUD seconds
+Step 2: Gameplay segments (timer reads, merged over short HUD gaps)
+  -> list of Segment objects with their hearts states
+Step 3: Names + set grouping (OCR'd in-game name tags, voted per segment)
+  -> list of DetectedSet objects with player names and game counts
+Step 4: ffmpeg stream copy cutting (CLI only; the app cuts in Rust)
   -> individual MP4 files
 ```
 
+Every input is the game's own HUD: the round timer, the round hearts and the
+in-game name tags under the health bars. A stream overlay (name/score
+banner, logos, the stream's own lobby scene) is set by hand during a stream
+and may be stale, different or absent, so it is never read.
+
+### Results (Tappa #4, 3 h 10 min, 16 true sets)
+
+Scored against `output/e2e/split/truth_rounds_vod.json` (runs in
+`output/e2e2/split/`, overlay blacked out):
+
+| | Before (colour fractions + 80x4 thumbnail) | Now |
+|---|---|---|
+| Auto sets / clean (one whole set per file) | 24 / 10 | 16 / 16 |
+| False sets (stream "TIMESUP" lobby, intro) | 5 | 0 |
+| Split / merged sets | 4 split (04, 07, 09, 13), 05b+06 merged | none |
+| Game counts right | - | 16 / 16 |
+| Names exact / near / wrong (32 names) | 1 / 6 / 27 (+2 empty) | 30 / 2 / 0 |
+| Round spans inside their file (10 s / end pad) | 143 / 152 (5 s pad) | 152 / 152 (20 s pad) |
+
+The same 16/16 holds on the original (overlay) VOD, with the scan shifted by
+1-3 s, with 15 % of timer reads and 30 % of name crops dropped at random, and
+without OCR (grouping by the tags' look).
+
 ---
 
-## Step 1: Gameplay Scanning
+## Step 1: HUD Scan
 
-**Function:** `scan_gameplay()`
+**Function:** `scan_hud()`
 
-Scans the entire VOD at 1 frame per second to classify each second as gameplay or non-gameplay.
-
-### ffmpeg Pipe
-
-Spawns ffmpeg to decode at 1fps with forced 1920x1080 scaling:
+Decodes the whole VOD once at 1 fps, forced to 1920x1080:
 
 ```
-ffmpeg -i <vod> -vf "fps=1,scale=1920:1080" -f rawvideo -pix_fmt bgr24 -v quiet pipe:1
+ffmpeg -threads <cpus-2> -i <vod> -an -sn -vf "fps=1,scale=1920:1080" -f rawvideo -pix_fmt bgr24 -v quiet pipe:1
 ```
 
-Raw frames are read from stdout in chunks of `1920 * 1080 * 3` bytes.
+The decoder leaves two logical CPUs free. For every second it records:
 
-### Detection Signals
+- **Timer:** the pipeline's own reader (`replanal/extractors/timer.py`,
+  template-matched glyphs) on the timer digits. `--timer-roi` is the timer
+  badge (y 110-180, x 920-1000, like `rois.timer` in `config/default.yaml`);
+  the digit box is derived from it the same way as `rois.timer_digits`
+  (y 115-170).
+- **Hearts:** `read_lost_hearts()` from `replanal/extractors/round_counter.py`
+  for both sides (fixed 1080p geometry), or none when either side is not read.
+- **Name-tag crops:** for every 2nd second where the timer *and* both hearts
+  are read (the full HUD is on screen: no super, flash or transition), the grey
+  bounding boxes of both name quads are kept, so names are read later without
+  seeking back into the VOD (~50 MB for a 3 h VOD).
 
-All ROIs are on the game's own HUD (the same pixels as `config/default.yaml`).
-A stream overlay (name/score banner, logos) is set by hand during a stream and
-may be stale, different or absent, so it is never read. Until 2026-10 the
-defaults sat on the Spaghetti Showdown overlay (the "timer" ROI was the
-banner's centre box, the tension ROIs the strip below the game's tension
-bars): with the banner blacked out 4,442 of 7,450 gameplay seconds flipped, and
-on non-overlay YouTube replays most gameplay was missed. With the in-game
-ROIs, 0 seconds flip with the overlay blacked out or replaced, on all 15 sets,
-the 9 re-cut sets and the 3 YouTube replays (`output/final_stage/split/`).
+`--scan-cache <file.npz>` (debug) saves this scan, or reuses it when the file
+exists, so grouping and OCR can be re-run without decoding again.
 
-**Tension bar detection:**
-- P1 tension ROI: y=1000-1040, x=260-750 (in-game tension bar)
-- P2 tension ROI: y=1000-1040, x=1170-1660
-- Convert ROI to HSV
-- Score: percentage of pixels with `S > 40` AND `V > 30`
-- Either player scoring > 15% = tension present
-
-**Timer brightness:**
-- Timer ROI: y=110-180, x=920-1000 (the in-game round timer)
-- Convert to HSV, check V channel
-- Score: percentage of pixels with `V > 180`
-- Timer bright > 2% = timer present
-
-**Gameplay decision:**
-```
-is_gameplay = (t1_score > 0.15 or t2_score > 0.15) and timer_bright > 0.02
-```
+The old test (saturated pixels in the tension areas and 2 % bright pixels in
+the timer box) also passed on the stream's composited "TIMESUP" lobby scene,
+which made 5 false sets, bridged 05b and 06 into one segment and left one set
+without names. The timer reader returns a value only for real timer glyphs on
+the dark badge, so lobbies (stream or game) never read. The tension ROIs are
+still accepted on the command line but no longer used.
 
 ### Progress Reporting
 
-Machine-readable progress lines are printed to stdout:
+Machine-readable lines are printed to stdout:
 ```
 PROGRESS:123/4567
+WARNING:<message>
 ```
 
-The Rust bridge captures these and emits them as Tauri events.
+The Rust bridge forwards both as `vod-scan-progress` events.
 
 ---
 
-## Step 2: Segment Building
+## Step 2: Gameplay Segments
 
 **Function:** `build_segments()`
 
-Converts per-second gameplay flags into merged, filtered segments.
-
-### Parameters
+1. **Valid timer seconds** (`valid_timer_seconds`): a read counts only when
+   another read within 5 s agrees with a countdown (same value, or lower by at
+   most the elapsed seconds + 1). The timer only counts down or freezes, so an
+   isolated false read has no partner.
+2. **Merging:** valid seconds closer than `merge_gap` (12 s) form one segment.
+   This bridges the HUD hiding in supers, KO cinematics and round intros.
+   Games are separated by character select / loading screens, so in practice
+   a segment is one game, or a few rounds of one.
+3. **Filtering:** segments with fewer than `min_hud` (15) valid seconds are
+   dropped.
+4. **Hearts:** each segment keeps its *stable* hearts states (`stable_hearts`:
+   a state read twice in a row, unread seconds skipped, repeats collapsed),
+   e.g. `00 10 11 00 01`.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `merge_gap` | 12 seconds | Merge gameplay segments with < N second gaps |
-| `min_duration` | 25 seconds | Discard segments shorter than this |
-
-### Algorithm
-
-1. Walk through `(second, is_gameplay)` pairs, building raw segments from contiguous `True` runs
-2. Merge segments where the gap between them is < `merge_gap` seconds
-3. Filter out segments shorter than `min_duration` seconds
+| `--merge-gap` | 12 s | Merge timer runs closer than this |
+| `--min-duration` | 15 | Minimum valid timer seconds per segment |
 
 ---
 
-## Step 3: Set Boundary Detection
+## Step 3: Names and Set Grouping
 
-**Function:** `detect_set_boundaries()`
+### Name tag quads
 
-Compares player name tag fingerprints between consecutive gameplay segments to identify where one set ends and another begins.
-
-### Name Tag Fingerprinting
-
-**Quad ROIs for GGS name tags:**
-
-GGS name tags are parallelogram-shaped (skewed), not rectangular. They are defined as 4-point quads:
+GGS draws the player name slightly rotated (P1 rising to the right, P2
+falling), centred in the tag (P1 ~x 258, P2 ~x 1690) with the platform icon
+just before it, under a smaller "Player 1/2" label ("Giocatore 1", "Joueur 1",
+...) that sits up and out (left of the P1 name, right of the P2 name). The
+quads follow the name text and leave the label out:
 
 | Player | Quad Corners (tl, tr, br, bl) |
 |--------|-------------------------------|
-| P1 | (45,155), (340,150), (370,178), (75,178) |
-| P2 | (1555,150), (1870,155), (1850,178), (1580,178) |
+| P1 | (145,168), (400,147), (400,172), (145,193) |
+| P2 | (1560,150), (1748,165), (1748,190), (1560,175) |
 
-**Perspective warp:**
+`scripts/split_vod.py` (`P1_NAME_QUAD`, `P2_NAME_QUAD`), the RoiPicker
+`DEFAULT_ROIS` and this table must agree. The old quads included the label
+(17 of 36 names read as "Giocatore") and the app's P1 quad slanted the wrong
+way.
 
-`warp_quad()` uses `cv2.getPerspectiveTransform()` to warp the parallelogram into a 300x40 rectangle, correcting for the skew. Source points are the 4 quad corners; destination points are the rectangle corners.
+`name_strip()` warps a quad to a rectangle (`warp_quad()`,
+`cv2.getPerspectiveTransform`) at 2x for OCR.
 
-**Binary signature:**
+### EasyOCR
 
-`get_name_signature()`:
-1. Warp both P1 and P2 name regions to rectangles
-2. Convert to grayscale
-3. Binary threshold at 160 (separates bright text from dark background)
-4. Resize to 80x4 pixels (compact signature)
-5. Concatenate P1 + P2 signatures into a single float32 vector (640 values)
-6. Reject if mean intensity < 5.0 (too dark, no text visible)
+The reader is created lazily (GPU when torch sees CUDA). Per strip
+(`pick_name`):
 
-**Distance metric:**
+1. Drop the "Player 1/2" label (`_drop_labels`): a box that looks like it (a
+   fuzzy match, ratio >= 0.7, trailing 1/2/z/l ignored, against the label in
+   GGST's languages) is only dropped when it carries the label's number
+   ("Giocatore 1") or sits above the name line (its centre a quarter of the
+   name's height above the widest other box). The quads leave the label out,
+   so a label-like box on the name line is a handle ("Payer", "Spieler").
+2. Drop the platform icon: a box of at most 2 characters that is not much
+   wider than tall.
+3. Take the **widest** remaining box (not the largest, which was often the
+   label), and join boxes next to it on the same line (names with spaces).
+4. Drop a 1-character token, or a 2-character token made of icon-like
+   characters ("CI"), that the icon left glued to the front ("CI Dona").
 
-`name_distance()`: Mean absolute difference between two signatures.
+Per segment, up to 9 clean HUD seconds spread over it are OCR'd and each side
+is **voted** (`vote_names`): reads are clustered by similarity (>= 0.75), the
+biggest cluster wins, represented by its most frequent spelling.
 
-### Multi-Frame Sampling
-
-For each segment, 3 frames are sampled at 20%, 50%, and 80% through the segment duration. The signature with the highest mean intensity (most visible text) is selected.
-
-### Boundary Detection Logic
-
-A new set boundary is detected between consecutive segments when:
-- **Gap threshold:** The gap between segments exceeds 45 seconds (`SET_GAP_THRESHOLD`), OR
-- **Name distance:** The name tag signature distance exceeds 12 (`NAME_DIST_THRESHOLD`)
-
-The first segment always starts a new set (boundary index 0).
-
----
-
-## Step 4: Grouping + OCR Name Reading
+The reader is loaded before the 1 fps scan, so a problem shows at once. If
+easyocr is not installed, or fails to load (a torch DLL error on Windows) or
+to start (its first run downloads models; offline that fails), the scan still
+runs: it prints a `WARNING:` line saying why (with the pip command for the
+interpreter in use), names stay empty and grouping falls back to the tags'
+look.
 
 ### Grouping
 
-**Function:** `group_sets()`
+**Function:** `group_segments()`
 
-Groups consecutive segments between boundary indices into `DetectedSet` objects, each with an index number.
+Each segment is compared with the current set's names (votes pooled over its
+segments, side swaps aligned, `set_names`):
 
-### EasyOCR Name Reading
+- **Names:** a side "matches" at similarity >= 0.6. Same set when every side
+  read in both matches; a new set when a side read in both clearly differs
+  (so a winner who stays on for the next set still starts a new one).
+  Players may swap sides between games: the swapped pairing makes it the same
+  set when all four names were read, and "unknown" (the look decides) when
+  some were not (one player seen on the other side may also be them starting
+  a new set).
+- **Names unreadable:** the tags' look decides (`segment_signature`: each
+  strip binarised with Otsu's threshold, so the encode's levels don't matter,
+  median over the segment, 96x8 per side). Same players at a per-side mean
+  difference at or below a threshold that follows the VOD's own noise
+  (`signature_threshold`: 10x the median distance between a segment's even-
+  and odd-second signatures, kept within 0.03-0.08). Tappa #4, also
+  re-encoded to limited range, darker, brighter, 720p/480p upscaled and with
+  added noise: noise 0.003-0.004, same set 0.001-0.013, changed player
+  0.12-0.21. A side swap by look (`swapped_look_same`): each side's cropped
+  tag text against the other side's, over a range of slants (P2's name is
+  drawn in italics), both <= 0.15. The two sides never match as closely as
+  one side with itself (Tappa #4: same player 0.10-0.26, other players >=
+  0.24), so only about half of real swaps are caught this way and a missed
+  one splits the set; with easyocr every swap is handled by the names.
+- **No tag crops either:** a segment whose first hearts state already shows a
+  lost heart continues the previous one (gap up to 270 s); otherwise a gap
+  over 90 s starts a new set.
 
-**Lazy-loaded GPU-accelerated EasyOCR reader:**
+There is no hard gap rule: players often spend 12-100 s in the lobby between
+games of one set, which split 4 of 16 sets before. The flip side: consecutive
+sets of the same two players (a grand final and its bracket reset, a
+rematch) become one set, however long the break between them; split that
+file by hand. The hearts only break ties:
+the reader misses lost hearts often enough (a new set's first frames can read
+as 0-1) that they never override readable names or tags.
 
-```python
-_ocr_reader = None
-def _get_ocr_reader():
-    global _ocr_reader
-    if _ocr_reader is None:
-        import easyocr
-        _ocr_reader = easyocr.Reader(["en"], gpu=True, verbose=False)
-    return _ocr_reader
-```
+### Game count
 
-**Reading process (`ocr_name_region`):**
-1. Run EasyOCR on the warped name region with `detail=1` (returns bounding box, text, confidence)
-2. Pick the result with the **largest bounding box area** (most prominent text in the ROI)
-3. Sanitize to ASCII: keep only alphanumeric characters, spaces, underscores, and hyphens
-
-**Multi-frame sampling for names:**
-- For each set, sample 3 frames from the first segment at 20%, 40%, 60%
-- Pick the reading with the longest combined P1+P2 name length (best OCR result)
+`DetectedSet.game_count`: every segment starts a game, plus each reset of the
+hearts to 0-0 inside a segment. A segment only resumes the previous game when
+its first hearts state strictly follows the previous segment's last one (0-1
+then 1-1).
 
 ---
 
-## Step 5: ffmpeg Stream Copy Cutting
+## Step 4: ffmpeg Stream Copy Cutting
 
-**Function:** `cut_sets()`
-
-### Padding
+**Function:** `cut_sets()` (CLI); the app uses Rust `cut_vod_sets`.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `padding_before` | 10 seconds | Extra time before set start |
-| `padding_after` | 5 seconds | Extra time after set end |
+| `padding_after` | 20 seconds | Extra time after set end |
 
-Cut start is clamped to >= 0; cut end is clamped to <= total video duration.
-
-### ffmpeg Command
+A set ends at its last timer-read second. The HUD fades at the match-deciding
+KO (and hides during a finishing super), so with the old 5 s pad the last KO
+could land within 2 s of the file end, which round detection treats as an
+unfinished round, and the win screen was trimmed by up to 15 s. 20 s keeps
+both. Cut start is clamped to >= 0; cut end to <= the video duration.
 
 ```
 ffmpeg -ss <start> -i <vod> -t <duration> -c copy -avoid_negative_ts make_zero -y -v warning <output>
 ```
 
-Stream copy (no re-encode) for fast cutting.
+Stream copy starts at the keyframe before `start`, so a file may begin up to
+one GOP (8 s on Tappa #4) early. That only adds lead-in; an exact start would
+need a re-encode.
 
-### Output Filenames
+Output files: `{index:02d}_{p1}_vs_{p2}.mp4` (names sanitised to
+alphanumerics, `_` and `-`), or `set_{index:02d}.mp4` without names.
 
-- With player names: `{index:02d}_{safe_p1}_vs_{safe_p2}.mp4`
-- Without player names: `set_{index:02d}.mp4`
+### Tools
 
-Player names are sanitized for filenames (alphanumeric + underscore + hyphen only).
+`find_tool()` resolves ffmpeg/ffprobe in order: `SPAGHETTI_FFMPEG` /
+`SPAGHETTI_FFPROBE`, PATH, `imageio_ffmpeg` (ffmpeg only; in the `ocr`
+extra), then a bundled copy (`ffmpeg/`, `resources/ffmpeg/` or `bin/` next to
+`scripts/`). Without ffprobe, duration and size are parsed from `ffmpeg -i`.
+Without ffmpeg the script exits with code 2 and an actionable `ERROR:` line.
 
 ---
 
 ## Rust Bridge
 
+### Interpreter and ffmpeg
+
+`python_bin()` / `require_python()` pick the interpreter once per session:
+`SPAGHETTI_LAB_PYTHON`, the project's `.venv` / `venv` (dev checkout), a venv
+at `<local app data>/SpaghettiLab/venv` (installed app), then `python3` /
+`python` from PATH. The first that can `import cv2, numpy` wins; a bare
+`python` on Windows is often the Store alias or an unrelated install. When none
+can, `scan_vod`, `analyze_video` and `reanalyze_replay` fail with a message
+naming the pip command and `SPAGHETTI_LAB_PYTHON`.
+
+`ffmpeg_bin()` resolves ffmpeg: `SPAGHETTI_FFMPEG`, PATH, the chosen Python's
+`imageio_ffmpeg`, then a bundled copy (`resources/ffmpeg/` or `ffmpeg/` next
+to the exe, or in the project root). Used by `scan_vod` (passed to the script
+as `SPAGHETTI_FFMPEG` so both agree), `cut_vod_sets`, `extract_preview_frame`
+and `export_clip`.
+
 ### scan_vod Command
 
 **Signature:** `async fn scan_vod(app_handle, video_path, roi_config) -> Result<Vec<DetectedSetInfo>, String>`
 
-1. Spawns Python with the `split_vod.py` script and `--preview --json-output` flags
+1. Spawns `split_vod.py` with `--preview --json-output`
 2. Passes ROI configuration as CLI arguments:
-   - `--p1-tension y1,y2,x1,x2`
-   - `--p2-tension y1,y2,x1,x2`
+   - `--p1-tension y1,y2,x1,x2`, `--p2-tension y1,y2,x1,x2` (accepted, unused)
    - `--timer-roi y1,y2,x1,x2`
    - `--p1-name-quad tl_x,tl_y,tr_x,tr_y,br_x,br_y,bl_x,bl_y`
    - `--p2-name-quad tl_x,tl_y,tr_x,tr_y,br_x,br_y,bl_x,bl_y`
 3. Reads stdout line-by-line:
-   - `PROGRESS:N/M` lines are emitted as `vod-scan-progress` Tauri events
+   - `PROGRESS:N/M` and `WARNING:...` lines are emitted as `vod-scan-progress` Tauri events
    - `JSON_RESULT:{...}` line is parsed as the final result
 4. Reads stderr in a separate thread (avoids deadlock)
-5. Parses JSON into `Vec<DetectedSetInfo>`
+5. Parses JSON into `Vec<DetectedSetInfo>` (extra JSON fields such as
+   `segment_count` and `warnings` are ignored)
 
 ### cut_vod_sets Command
 
@@ -236,7 +291,8 @@ Player names are sanitized for filenames (alphanumeric + underscore + hyphen onl
 
 Performs the ffmpeg cutting directly in Rust (does not call Python):
 1. Creates the output directory
-2. For each `CutSetRequest`, runs ffmpeg stream copy with 10s/5s padding
+2. For each `CutSetRequest`, runs ffmpeg stream copy with 10 s / 20 s padding
+   (same as the script)
 3. Emits `vod-cut-progress` events (`i/total`)
 4. Returns list of output file paths
 
@@ -258,7 +314,7 @@ select -> roi -> scanning -> results -> cutting -> done
 | `select` | File picker for VOD video |
 | `roi` | RoiPicker component for adjusting ROI regions on a preview frame |
 | `scanning` | Live progress display while Python scans the VOD |
-| `results` | Table of detected sets with checkboxes; auto-deselects sets with no player names |
+| `results` | Table of detected sets with checkboxes, all selected (every set has the game's timer on screen); scan warnings (e.g. easyocr missing) shown above |
 | `cutting` | Progress display during ffmpeg cutting |
 | `done` | Success confirmation with output directory |
 | `error` | Error display with full Python traceback and Copy Error button |
@@ -272,7 +328,7 @@ On entering the `roi` step, `extractPreviewFrame(videoPath, 30)` extracts a fram
 Detected sets are shown in a table with:
 - Set number, player names, time range, gameplay duration, game count
 - Checkboxes for selecting which sets to cut
-- Sets with empty player names are auto-deselected (likely false detections)
+- All sets are selected. A set whose names weren't read is shown and cut as "P1 vs P2" (`NN_P1_vs_P2.mp4`) instead of being dropped
 
 ---
 
@@ -286,8 +342,8 @@ An interactive ROI editor overlaid on the preview frame.
 
 | Key | Type | Color | Description |
 |-----|------|-------|-------------|
-| `p1_tension` | RoiRect | Blue | P1 tension bar region |
-| `p2_tension` | RoiRect | Red | P2 tension bar region |
+| `p1_tension` | RoiRect | (hidden) | Sent with defaults, unused by the scan |
+| `p2_tension` | RoiRect | (hidden) | Sent with defaults, unused by the scan |
 | `timer` | RoiRect | Yellow | Timer region |
 | `p1_name` | RoiQuad | Blue (lighter) | P1 name tag parallelogram |
 | `p2_name` | RoiQuad | Red (lighter) | P2 name tag parallelogram |
@@ -298,8 +354,8 @@ An interactive ROI editor overlaid on the preview frame.
 p1_tension: { y1: 1000, y2: 1040, x1: 260, x2: 750 },
 p2_tension: { y1: 1000, y2: 1040, x1: 1170, x2: 1660 },
 timer: { y1: 110, y2: 180, x1: 920, x2: 1000 },
-p1_name: { tl: [75, 150], tr: [340, 145], br: [370, 178], bl: [45, 178] },
-p2_name: { tl: [1555, 145], tr: [1850, 150], br: [1880, 178], bl: [1580, 178] },
+p1_name: { tl: [145, 168], tr: [400, 147], br: [400, 172], bl: [145, 193] },
+p2_name: { tl: [1560, 150], tr: [1748, 165], br: [1748, 190], bl: [1560, 175] },
 ```
 
 ### Rect ROI Interaction
@@ -328,8 +384,17 @@ When `videoDurationSecs` is provided, a time slider allows scrubbing through the
 ```python
 @dataclass
 class Segment:
-    start: float  # seconds
-    end: float    # seconds
+    start: float        # seconds
+    end: float          # seconds
+    hud_secs: int       # valid timer seconds
+    hearts: list[tuple[int, int]]  # stable (p1_lost, p2_lost) states
+    p1_name: str        # voted OCR names, and the per-frame reads
+    p2_name: str
+    p1_votes: list[str]
+    p2_votes: list[str]
+    signature: np.ndarray | None   # tags' look, for the no-OCR fallback
+    tag_shapes: tuple | None       # cropped tag texts, for side swaps by look
+    signature_noise: float | None  # even- vs odd-second signature distance
 
 @dataclass
 class DetectedSet:
@@ -337,7 +402,13 @@ class DetectedSet:
     index: int
     p1_name: str
     p2_name: str
+    # game_count (property): games from segments + hearts resets
 ```
+
+The JSON per set has `index`, `start_secs`, `end_secs`,
+`gameplay_duration_secs`, `game_count` (from the hearts; was the number of
+segments), `segment_count`, `p1_name`, `p2_name`; the top level also has
+`warnings`.
 
 ### Rust
 
@@ -395,7 +466,7 @@ interface CutSetRequest { index: number; start_secs: number; end_secs: number; p
 
 ## Error Handling
 
-- Python exceptions produce full tracebacks on stderr
+- Python exceptions produce full tracebacks on stderr; a missing ffmpeg is an `ERROR:` line (exit 2), a missing or broken easyocr only a `WARNING:` (the scan continues without names)
 - The Rust bridge captures stderr in a separate thread and includes the last error line in the error message
 - The frontend `error` step displays the full error text with a "Copy Error" button for debugging
 - Windows-specific: stdout/stderr are reconfigured to UTF-8 at script startup to avoid charmap encoding errors from EasyOCR
