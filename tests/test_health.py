@@ -619,3 +619,135 @@ def test_sliver_read_empty_under_a_super_background_is_not_the_ko():
     r = clean_series(p1, p2, c1, c2, np.zeros(n), q2, timer)
     assert r.p2[200] > 0.0
     assert r.p2[240] == 0.0
+
+
+def _countdown(n: int, start: int, every: int = 30) -> np.ndarray:
+    """A round timer counting down one per second (``every`` samples)."""
+    return np.array([start - k // every for k in range(n)], dtype=float)
+
+
+def test_frozen_clock_over_an_empty_bar_is_a_ko():
+    # 02_UF R1 (e2e copy): P2 (1 %) is KO'd under the slash with no red seen;
+    # the HUD comes back for 1.5 s with the clock stopped at 57 and P2's bar
+    # empty.  The win pose then reads P1 empty and P2 at its old sliver
+    # (no timer): that is not P1's KO.
+    n = 420
+    p1 = np.full(n, 0.197)
+    p2 = np.full(n, 0.011)
+    p2[:60] = 0.30
+    c1 = np.full(n, 0.96)
+    c2 = np.full(n, 0.86)
+    timer = np.full(n, np.nan)
+    timer[:200] = _countdown(200, 63)                 # 63 .. 57
+    p1[202:290] = np.nan                              # the slash hides the HUD
+    p2[202:290] = np.nan
+    p1[205:260] = 0.0                                 # slash junk on P1's bar
+    c1[205:260] = 0.5
+    timer[290:336] = 57                               # HUD back, clock stopped
+    p2[290:336] = 0.0
+    c2[290:336] = 0.95
+    p1[336:345] = np.nan
+    p2[336:345] = np.nan
+    p1[345:] = 0.0                                    # win pose: P1 read empty
+    c1[345:] = 0.5
+    c2[345:] = 0.65                                   # P2 read at its sliver
+    r = clean_series(p1, p2, c1, c2, np.zeros(n), np.zeros(n), timer)
+    assert r.p2[335] == 0.0
+    assert abs(np.nanmin(r.p1) - 0.197) < 1e-9
+
+
+def test_round_result_does_not_depend_on_the_video_after_it():
+    # 01_WRI R5: after the last round the stream shows its lobby for minutes
+    # (no timer); its junk "bars" must not pull the round's values (P1 held
+    # 0.287 from the lobby instead of its 0.164).  The KO is not seen.
+    n = 700
+    p1 = np.full(n, 0.164)
+    p1[:200] = 0.5
+    p2 = np.full(n, 0.08)
+    p2[:100] = 0.6
+    c = np.full(n, 0.9)
+    q2 = np.zeros(n)
+    timer = _countdown(n, 80)
+    p1[660:], p2[660:], timer[660:] = np.nan, np.nan, np.nan
+    alone = clean_series(p1, p2, c, c, np.zeros(n), q2, timer)
+    lobby = 3000
+    pl1 = np.concatenate([p1, np.full(60, np.nan), np.full(lobby, 0.287)])
+    pl2 = np.concatenate([p2, np.full(60, np.nan), np.full(lobby, 0.287)])
+    cl = np.concatenate([c, np.zeros(60), np.full(lobby, 0.8)])
+    ql = np.concatenate([q2, np.zeros(60 + lobby)])
+    tl = np.concatenate([timer, np.full(60 + lobby, np.nan)])
+    followed = clean_series(pl1, pl2, cl, cl, np.zeros(len(pl1)), ql, tl)
+    for a, b in ((alone.p1, followed.p1), (alone.p2, followed.p2)):
+        both = ~np.isnan(a[:n]) & ~np.isnan(b[:n])
+        assert both[:660].all()
+        assert np.allclose(a[:n][both], b[:n][both])
+    assert abs(followed.p1[655] - 0.164) < 1e-9 and abs(followed.p2[655] - 0.08) < 1e-9
+
+
+def test_round_that_ends_with_the_clock_running_ended_in_a_ko():
+    # 12_LSemi R1: P2 (5 %) is KO'd under a super with the clock at 77; the
+    # HUD never shows the empty bar, but the next round starts.  A round
+    # only ends by a KO or a time-out (clock at 0), so P2 is at 0.  Ending
+    # on a time-out instead keeps P2's level.
+    for last, expect in ((77, 0.0), (0, 0.053)):
+        n1, gap, n2 = 400, 90, 200
+        p1 = np.concatenate([np.full(n1, 0.873), np.full(gap, np.nan), np.full(n2, 1.0)])
+        p2 = np.concatenate([np.full(n1, 0.053), np.full(gap, np.nan), np.full(n2, 1.0)])
+        p2[:100] = 0.4
+        c = np.where(np.isnan(p1), 0.0, 0.9)
+        timer = np.concatenate([_countdown(n1, last + 13), np.full(gap, np.nan), np.full(n2, 99.0)])
+        r = clean_series(p1, p2, c, c, None, None, timer)
+        assert len(r.resets) == 2
+        assert abs(r.p2[n1 - 1] - expect) < 1e-9, last
+        assert abs(r.p1[n1 - 1] - 0.873) < 1e-9
+
+
+def test_hidden_ko_is_not_given_to_the_side_doing_a_combo_or_on_a_low_clock():
+    # As above, P2 is behind (5 %) when the HUD hides with the clock running.
+    # - P2's combo counter is up just before: P2 is attacking (a super landed
+    #   from behind under the cinematic), so P2 is not declared KO'd.
+    # - The clock last read 2: the round may have ended on time while the
+    #   HUD was hidden, so P2 keeps its level too.
+    # Without either, P2 is at 0 (the rule above).
+    n1, gap, n2 = 400, 90, 200
+    for combo_up, last, expect in ((False, 77, 0.0), (True, 77, 0.053), (False, 2, 0.053)):
+        p1 = np.concatenate([np.full(n1, 0.873), np.full(gap, np.nan), np.full(n2, 1.0)])
+        p2 = np.concatenate([np.full(n1, 0.053), np.full(gap, np.nan), np.full(n2, 1.0)])
+        p2[:100] = 0.4
+        c = np.where(np.isnan(p1), 0.0, 0.9)
+        timer = np.concatenate([_countdown(n1, last + 13), np.full(gap, np.nan), np.full(n2, 99.0)])
+        combo2 = np.zeros(n1 + gap + n2, dtype=bool)
+        if combo_up:
+            combo2[n1 - 20:n1] = True
+        r = clean_series(p1, p2, c, c, None, None, timer, None, combo2)
+        assert abs(r.p2[n1 - 1] - expect) < 1e-9, (combo_up, last)
+        assert abs(r.p1[n1 - 1] - 0.873) < 1e-9
+
+
+def test_survivor_shown_again_after_the_ko_keeps_its_level():
+    # 11_WFinal R4: P1 (2 %) is KO'd; one junk frame then reads P2's 7 % bar
+    # nearly empty (within the double-KO window), but the HUD later shows P2
+    # at its level with the clock stopped: no double KO.
+    n = 400
+    p1 = np.full(n, 0.021)
+    p2 = np.full(n, 0.071)
+    p1[:60] = 0.2
+    c1 = np.full(n, 0.9)
+    c2 = np.full(n, 0.95)
+    q1 = np.zeros(n)
+    timer = np.full(n, np.nan)
+    timer[:200] = _countdown(200, 72)
+    p1[200:] = 0.0                                    # the lethal hit
+    q1[195:203] = 0.03
+    p1[203:280], p2[203:280] = np.nan, np.nan         # KO cinematic
+    p2[208:220] = 0.004                               # junk on the survivor
+    c2[208:220] = 0.75
+    timer[280:320] = 66                               # HUD back, clock stopped
+    p1[280:320] = 0.008
+    c1[280:320] = 0.55
+    p2[280:320] = 0.089
+    c2[280:320] = 1.0
+    p1[320:], p2[320:] = np.nan, np.nan
+    r = clean_series(p1, p2, c1, c2, q1, np.zeros(n), timer)
+    assert r.p1[319] == 0.0
+    assert abs(r.p2[319] - 0.071) < 1e-9

@@ -389,10 +389,17 @@ round; the red pending segment is already-lost HP.
      are dropped.
    - A real hit on the attacker (a trade, a reversal) shows its own red, which ends the
      hold on those frames.
-5. **Round end:** play ends at the earlier of the last run of 5 frames where both bars are
-   read confidently and the last credible round-timer reading (the KO slash hides the
-   timer). After it, readings may confirm a side's level but not lower it, except a reading
-   with pending red next to it (a real hit, e.g. a trade) or a credible empty bar.
+5. **Round end:** a segment is cleaned only up to 150 frames (`KO_MARGIN`, 5 s) after its
+   last credible round-timer reading. The KO can land under a super cinematic and the HUD
+   come back without a readable timer for a few seconds (up to ~4.5 s seen), but later
+   frames (win pose, transition, the stream's lobby, the next video) are never the round:
+   before the cut their junk changed the result with how much video followed (05b R6's
+   segment ran through 100 s of lobby; 01_WRI R5 held a lobby reading). Frames after the cut
+   that a fit of the whole segment covers hold the last cleaned value. Play ends at the
+   earlier of the last run of 5 frames where both bars are read confidently and the last
+   credible timer reading (the KO slash hides the timer). After it, readings may confirm a
+   side's level but not lower it, except a reading with pending red next to it (a real
+   hit, e.g. a trade) or a credible empty bar.
 6. **KO lock:** the KO is the first frame where a side's fit reaches 0, or earlier, a
    **raw KO** (`_raw_ko`): a confident (>= 0.6) empty reading with pending red on a side
    already at <= 0.20 — or one read with only >= 0.35 when the red covers the side's whole
@@ -405,9 +412,30 @@ round; the red pending segment is already-lost HP.
    bar the cinematic reads a steady 1-11 px, 10_UF R1), the bar does not come back, and the round timer does not count down afterwards (the clock freezes at
    a KO; a 3 % bar flickers to empty while play goes on). The KO slash often hides the
    HUD within a frame, so the fit alone never gets there. The loser is 0 from its KO. If
-   the survivor was at <= 0.20 it may still reach 0 within 30 frames (double KO);
-   otherwise nothing after the KO may lower it, even with red shown (KO-screen junk shows
-   fake red).
+   the survivor was at <= 0.20 it may still reach 0 within 30 frames (double KO), unless
+   its bar is shown with fill again later in the cleaned span (11_WFinal R4: one junk
+   frame read the 7 % survivor empty; 13_LFinal R9: the survivor's 1-px sliver read empty
+   while the clock still ran); otherwise nothing after the KO may lower it, even with red
+   shown (KO-screen junk shows fake red).
+   **Frozen-clock KO** (`_frozen_clock_ko`): the HUD is up (timer read), the clock has
+   stopped (the same value over >= 40 frames, never lower afterwards) and one bar reads
+   empty (<= 0.005, confidence >= 0.6) for >= 5 frames in a row while the other bar shows
+   fill, and it is never read with fill again while the timer is shown. A running clock
+   ticks every second, so this is the KO even when no red is seen (it went with the slash;
+   e2e 02_UF R1, 14_Grands R6/R18, 09b R10). The KO is placed just after the side's last
+   confident reading with fill since the clock stopped. A live 1-px sliver reads 0.008 raw
+   (e2e 14_Grands R15), so the empty bound stays below it, the same as the round detector's
+   `KO_HP`; both come from one 1080p stream and may need a re-check on other sources.
+   **Hidden KO** (`_hidden_ko`): a round ends only by a KO or a time-out. When no KO was
+   found but the next round starts (its timer intro within 150 frames) and the clock last
+   read 4 or more, the KO happened while the HUD was hidden: the side clearly behind (<= 0.20
+   and >= 0.10 below the other) is at 0 from just after the last timer reading (at least
+   on its last cleaned frame). Not when that side's combo counter was up within 30 frames of
+   the last timer reading (the attacker essentially never loses HP during its own combo, so
+   it is the likely winner, e.g. a super landed from behind), nor when the clock last read
+   1-3 (a time-out may have ended the round under the hidden HUD; the loser keeps its HP). 12_LSemi R1 (clock at 77, HUD hidden from the super on),
+   11_WFinal R6, yt_KWX R7 (perfects whose last hit is under the KO cinematic), and losers
+   left at the bar's floor junk (0.010-0.05).
    **Survivor shown after the KO** (`_near_double_ko_survivor`): when the survivor is at
    <= 0.20 just after the KO, the last run of 5 frames within 210 frames after the KO in
    which one bar shows its level (>= 0.01, between its level after and before the KO,
