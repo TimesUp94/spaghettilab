@@ -85,7 +85,7 @@ Video (1080p @30fps)
 - Match grouping (first-to-2 round wins), comeback detection
 - Hearts-based winner override from round counter extraction (raw data, not smoothed). The hearts are game-native HUD (portable), but the extractor misreads lost hearts, so they stay a secondary signal; never use the Spaghetti Showdown overlay's score banner above them, which other users' videos don't have
 - All SQLite queries for serving data to the frontend
-- Spawning Python subprocesses for analysis and VOD splitting
+- Spawning Python subprocesses for analysis and VOD splitting (`require_python()`: `SPAGHETTI_LAB_PYTHON`, the project `.venv`, `<local app data>/SpaghettiLab/venv`, then `py -3` on Windows / Homebrew and python.org `python3` on macOS, then PATH; the first that imports cv2) and ffmpeg (`ffmpeg_bin()`: `SPAGHETTI_FFMPEG`, PATH plus `/opt/homebrew/bin` and `/usr/local/bin`, the Python's `imageio_ffmpeg`, bundled copy incl. the macOS bundle's `Contents/Resources`). Only successes are cached, so installing a missing tool needs no restart
 - .spag file export/import (ZIP containing SQLite snapshot)
 
 **React (`app/src/`):** Tauri v2 frontend with React 18 + TypeScript + Tailwind + Recharts. `App.tsx` is the main component managing all state. `api.ts` wraps Tauri `invoke()` calls. Components in `app/src/components/`.

@@ -22,23 +22,289 @@ fn hide_window(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-/// Returns the Python binary name. Prefers "python3" on non-Windows.
-fn python_bin() -> &'static str {
-    #[cfg(target_os = "windows")]
-    { "python" }
-    #[cfg(not(target_os = "windows"))]
-    {
-        use std::sync::OnceLock;
-        static PYTHON: OnceLock<&str> = OnceLock::new();
-        PYTHON.get_or_init(|| {
-            if Command::new("python3")
-                .arg("--version")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok()
-            { "python3" } else { "python" }
-        })
+/// A Python interpreter to spawn: the program plus any arguments that go
+/// before the script (`py -3` on Windows).
+#[derive(Debug, Clone, PartialEq)]
+struct PythonCmd {
+    program: String,
+    args: Vec<String>,
+}
+
+impl PythonCmd {
+    fn new(program: impl Into<String>, args: &[&str]) -> Self {
+        PythonCmd { program: program.into(), args: args.iter().map(|a| a.to_string()).collect() }
+    }
+
+    /// A `Command` for this interpreter (console hidden on Windows), ready
+    /// for the script's own arguments.
+    fn command(&self) -> Command {
+        let mut cmd = Command::new(&self.program);
+        hide_window(&mut cmd);
+        cmd.args(&self.args);
+        cmd
+    }
+}
+
+impl std::fmt::Display for PythonCmd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.program)?;
+        for a in &self.args {
+            write!(f, " {}", a)?;
+        }
+        Ok(())
+    }
+}
+
+/// Folders a GUI app doesn't get on PATH but where Python and ffmpeg are
+/// usually installed: on macOS an app started from Finder gets only
+/// /usr/bin:/bin:..., where `python3` is the Xcode stub without OpenCV.
+fn extra_tool_dirs() -> Vec<PathBuf> {
+    if cfg!(target_os = "macos") {
+        vec![
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/Library/Frameworks/Python.framework/Versions/Current/bin"),
+        ]
+    } else if cfg!(target_os = "linux") {
+        vec![PathBuf::from("/usr/local/bin"), PathBuf::from("/usr/bin")]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Python interpreters to try, best first: an explicitly configured one
+/// (`SPAGHETTI_LAB_PYTHON`), the project's `.venv` (dev checkout), a venv in the
+/// app's data dir (installed app), then the system Python: the `py -3`
+/// launcher on Windows (the python.org installer doesn't add `python` to
+/// PATH by default, and a bare `python` is often the Store alias), Homebrew /
+/// python.org `python3` on macOS, then `python3` / `python` from PATH.
+fn python_candidates() -> Vec<PythonCmd> {
+    let mut out = Vec::new();
+    if let Ok(p) = std::env::var("SPAGHETTI_LAB_PYTHON") {
+        if !p.trim().is_empty() {
+            out.push(PythonCmd::new(p, &[]));
+        }
+    }
+    let venv_python = |venv: PathBuf| -> PathBuf {
+        if cfg!(target_os = "windows") {
+            venv.join("Scripts").join("python.exe")
+        } else {
+            venv.join("bin").join("python")
+        }
+    };
+    let mut venvs = Vec::new();
+    if let Ok(root) = find_project_root() {
+        venvs.push(root.join(".venv"));
+        venvs.push(root.join("venv"));
+    }
+    if let Some(d) = dirs::data_local_dir() {
+        venvs.push(d.join("SpaghettiLab").join("venv"));
+    }
+    for v in venvs {
+        let p = venv_python(v);
+        if p.is_file() {
+            out.push(PythonCmd::new(p.to_string_lossy(), &[]));
+        }
+    }
+    if cfg!(target_os = "windows") {
+        out.push(PythonCmd::new("py", &["-3"]));
+    } else {
+        for d in extra_tool_dirs() {
+            let p = d.join("python3");
+            if p.is_file() {
+                out.push(PythonCmd::new(p.to_string_lossy(), &[]));
+            }
+        }
+        out.push(PythonCmd::new("python3", &[]));
+    }
+    out.push(PythonCmd::new("python", &[]));
+    out
+}
+
+/// The interpreter that can run the CV pipeline (imports cv2 and numpy),
+/// or None.  A bare `python` on Windows is often the Store alias or an
+/// unrelated install without OpenCV, so each candidate is checked.  Only a
+/// success is cached: after the user installs the missing packages, the
+/// next call finds them without restarting the app.
+fn resolve_python() -> Option<PythonCmd> {
+    use std::sync::Mutex;
+    static PYTHON: Mutex<Option<PythonCmd>> = Mutex::new(None);
+    if let Some(p) = PYTHON.lock().unwrap().clone() {
+        return Some(p);
+    }
+    let candidates = python_candidates();
+    for c in &candidates {
+        let ok = c
+            .command()
+            .args(["-c", "import cv2, numpy"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            eprintln!("[PYTHON] using {}", c);
+            *PYTHON.lock().unwrap() = Some(c.clone());
+            return Some(c.clone());
+        }
+    }
+    eprintln!("[PYTHON] no interpreter with cv2 among {:?}", candidates);
+    None
+}
+
+/// The Python interpreter for helpers that don't need OpenCV (yt-dlp,
+/// imageio-ffmpeg): the pipeline's one when found, else the first candidate.
+fn python_cmd() -> PythonCmd {
+    resolve_python()
+        .or_else(|| python_candidates().into_iter().next())
+        .unwrap_or_else(|| PythonCmd::new("python", &[]))
+}
+
+/// The Python interpreter, or an actionable error when none can run the
+/// pipeline.
+fn require_python() -> Result<PythonCmd, String> {
+    resolve_python().ok_or_else(|| {
+        format!(
+            "No Python with OpenCV found (tried {}). Install Python 3.10+ and run \
+             `pip install -e \".[ocr]\"` in the Spaghetti Lab folder (or `pip install \
+             opencv-python numpy pyyaml pyarrow easyocr imageio-ffmpeg`), or set \
+             SPAGHETTI_LAB_PYTHON to an interpreter that has them, then try again.",
+            python_candidates().iter().map(|c| c.to_string()).collect::<Vec<_>>().join(", ")
+        )
+    })
+}
+
+/// Folders that may hold bundled resources: `resources/` next to the exe
+/// (NSIS) and, on macOS, the app bundle's `Contents/Resources` (the exe is
+/// in `Contents/MacOS`).
+fn exe_resource_dirs() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(d) = std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf())) {
+        out.push(d.join("resources"));
+        if let Some(contents) = d.parent() {
+            out.push(contents.join("Resources"));
+        }
+    }
+    out
+}
+
+/// Folders that may hold a bundled ffmpeg: the bundle's resources dir, next
+/// to the exe, and the project root (dev).
+fn bundled_tool_dirs() -> Vec<PathBuf> {
+    let mut dirs_out: Vec<PathBuf> = exe_resource_dirs().into_iter().map(|r| r.join("ffmpeg")).collect();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(d) = exe.parent() {
+            dirs_out.push(d.join("ffmpeg"));
+            dirs_out.push(d.to_path_buf());
+        }
+    }
+    if let Ok(root) = find_project_root() {
+        dirs_out.push(root.join("ffmpeg"));
+        dirs_out.push(root.join("resources").join("ffmpeg"));
+    }
+    dirs_out
+}
+
+fn exe_name(name: &str) -> String {
+    if cfg!(target_os = "windows") {
+        format!("{}.exe", name)
+    } else {
+        name.to_string()
+    }
+}
+
+/// `name` on PATH, or in the install folders a GUI app doesn't get on PATH.
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path)
+        .chain(extra_tool_dirs())
+        .map(|d| d.join(exe_name(name)))
+        .find(|p| p.is_file())
+}
+
+/// Resolve ffmpeg: `SPAGHETTI_FFMPEG`, PATH, the Python env's imageio-ffmpeg,
+/// then a bundled copy.  Only a success is cached, so an ffmpeg installed
+/// while the app runs is picked up on the next try.
+fn ffmpeg_bin() -> Result<String, String> {
+    use std::sync::Mutex;
+    static FFMPEG: Mutex<Option<String>> = Mutex::new(None);
+    if let Some(p) = FFMPEG.lock().unwrap().clone() {
+        return Ok(p);
+    }
+    let find = || -> Option<String> {
+        if let Ok(p) = std::env::var("SPAGHETTI_FFMPEG") {
+            if PathBuf::from(&p).is_file() {
+                return Some(p);
+            }
+        }
+        if let Some(p) = find_on_path("ffmpeg") {
+            return Some(p.to_string_lossy().to_string());
+        }
+        if let Ok(out) = python_cmd()
+            .command()
+            .args(["-c", "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())"])
+            .stderr(Stdio::null())
+            .output()
+        {
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if out.status.success() && PathBuf::from(&p).is_file() {
+                return Some(p);
+            }
+        }
+        bundled_tool_dirs()
+            .into_iter()
+            .map(|d| d.join(exe_name("ffmpeg")))
+            .find(|p| p.is_file())
+            .map(|p| p.to_string_lossy().to_string())
+    };
+    let found = find().ok_or_else(|| {
+        "ffmpeg not found. Install ffmpeg and add it to PATH, or run \
+         `pip install imageio-ffmpeg` for the Python Spaghetti Lab uses, \
+         or set SPAGHETTI_FFMPEG to the ffmpeg executable, then try again."
+            .to_string()
+    })?;
+    *FFMPEG.lock().unwrap() = Some(found.clone());
+    Ok(found)
+}
+
+#[cfg(test)]
+mod tool_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn project_venv_is_preferred_over_bare_python() {
+        let c = python_candidates();
+        assert_eq!(c.last().map(|p| p.program.as_str()), Some("python"));
+        if cfg!(target_os = "windows") {
+            let py = c.iter().position(|p| p == &PythonCmd::new("py", &["-3"])).unwrap();
+            assert_eq!(py, c.len() - 2, "the py launcher comes right before a bare python");
+        }
+        let root = find_project_root().unwrap();
+        if root.join(".venv").is_dir() {
+            let first_venv = c.iter().position(|p| p.program.contains(".venv")).unwrap();
+            let bare = c.iter().position(|p| p.program == "python").unwrap();
+            assert!(first_venv < bare);
+            // The dev venv has OpenCV, so it is the interpreter we spawn
+            assert!(require_python().unwrap().program.contains(".venv"));
+        }
+    }
+
+    #[test]
+    fn python_cmd_puts_its_args_before_the_script() {
+        let c = PythonCmd::new("py", &["-3"]);
+        let mut cmd = c.command();
+        cmd.arg("script.py");
+        let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+        assert_eq!(args, ["-3", "script.py"]);
+        assert_eq!(c.to_string(), "py -3");
+    }
+
+    #[test]
+    fn ffmpeg_resolves_or_explains() {
+        match ffmpeg_bin() {
+            Ok(p) => assert!(PathBuf::from(p).is_file()),
+            Err(e) => assert!(e.contains("imageio-ffmpeg")),
+        }
     }
 }
 
@@ -2103,9 +2369,11 @@ fn find_project_root() -> Result<PathBuf, String> {
     // 3. Installed: resources are bundled next to the exe in a resources/ subdir,
     //    or directly next to the exe (NSIS places them in the install dir).
     //    Tauri NSIS puts resources at <install_dir>/resources/
-    let resource_dir = exe_dir.join("resources");
-    if marker(&resource_dir) {
-        return Ok(resource_dir);
+    //    On macOS they are in the app bundle's Contents/Resources.
+    for resource_dir in exe_resource_dirs() {
+        if marker(&resource_dir) {
+            return Ok(resource_dir);
+        }
     }
 
     // 4. Also check exe_dir itself (some bundle layouts)
@@ -2169,9 +2437,8 @@ async fn analyze_video(
     let script = project_root.join("scripts").join("analyze_replay.py");
     let config = project_root.join("config").join("default.yaml");
 
-    let mut cmd = Command::new(python_bin());
+    let mut cmd = require_python()?.command();
     // Set PYTHONPATH so `import replanal` works from installed location
-    hide_window(&mut cmd);
     cmd.env("PYTHONPATH", project_root.to_str().unwrap())
         .arg(script.to_str().unwrap())
         .arg(&video_path)
@@ -2208,8 +2475,7 @@ async fn reanalyze_replay(
     let script = project_root.join("scripts").join("analyze_replay.py");
     let config = project_root.join("config").join("default.yaml");
 
-    let mut cmd = Command::new(python_bin());
-    hide_window(&mut cmd);
+    let mut cmd = require_python()?.command();
     cmd.env("PYTHONPATH", project_root.to_str().unwrap())
         .arg(script.to_str().unwrap())
         .arg(video_path.to_str().unwrap())
@@ -2250,7 +2516,7 @@ async fn export_clip(
     let start_s = start_ms / 1000.0;
     let duration_s = (end_ms - start_ms) / 1000.0;
 
-    let mut ffmpeg_cmd = Command::new("ffmpeg");
+    let mut ffmpeg_cmd = Command::new(ffmpeg_bin()?);
     hide_window(&mut ffmpeg_cmd);
     let output = ffmpeg_cmd
         .args([
@@ -2660,7 +2926,9 @@ async fn download_vod(
     output_dir: String,
 ) -> Result<String, String> {
     // Ensure yt-dlp is installed (auto-install if missing)
-    let check = Command::new(python_bin())
+    let python = python_cmd();
+    let check = python
+        .command()
         .args(["-m", "yt_dlp", "--version"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2673,8 +2941,7 @@ async fn download_vod(
 
     if needs_install {
         let _ = app_handle.emit("vod-download-progress", "Installing yt-dlp...");
-        let mut pip_cmd = Command::new(python_bin());
-        hide_window(&mut pip_cmd);
+        let mut pip_cmd = python.command();
         let pip_status = pip_cmd
             .args(["-m", "pip", "install", "yt-dlp"])
             .stdout(Stdio::null())
@@ -2689,8 +2956,7 @@ async fn download_vod(
 
     // Use python -m yt_dlp to download the VOD as mp4
     // -u forces unbuffered stdout/stderr so progress lines arrive in real time
-    let mut cmd = Command::new(python_bin());
-    hide_window(&mut cmd);
+    let mut cmd = python.command();
     cmd.arg("-u").args(["-m", "yt_dlp"])
         .arg(&url)
         .arg("-f").arg("best[ext=mp4]/best")
@@ -2776,7 +3042,7 @@ async fn extract_preview_frame(
     let preview_path = output_dir.join(".vod_preview.png");
     std::fs::create_dir_all(&output_dir).map_err(|e| e.to_string())?;
 
-    let mut ffmpeg_cmd = Command::new("ffmpeg");
+    let mut ffmpeg_cmd = Command::new(ffmpeg_bin()?);
     hide_window(&mut ffmpeg_cmd);
     let output = ffmpeg_cmd
         .args([
@@ -2807,10 +3073,13 @@ async fn scan_vod(
 ) -> Result<Vec<DetectedSetInfo>, String> {
     let project_root = find_project_root()?;
     let script = project_root.join("scripts").join("split_vod.py");
+    let python = require_python()?;
+    let ffmpeg = ffmpeg_bin()?;
 
-    let mut cmd = Command::new(python_bin());
-    hide_window(&mut cmd);
+    let mut cmd = python.command();
     cmd.env("PYTHONPATH", project_root.to_str().unwrap())
+        // The script resolves ffmpeg the same way; pass ours so both agree
+        .env("SPAGHETTI_FFMPEG", &ffmpeg)
         .arg(script.to_str().unwrap())
         .arg(&video_path)
         .arg("--preview")
@@ -2823,7 +3092,7 @@ async fn scan_vod(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    eprintln!("[VOD-SCAN] Spawning: python {} {} --preview --json-output ...", script.display(), &video_path);
+    eprintln!("[VOD-SCAN] Spawning: {} {} {} --preview --json-output ...", python, script.display(), &video_path);
 
     let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn python: {}", e))?;
 
@@ -2844,7 +3113,7 @@ async fn scan_vod(
 
     for line in std::io::BufReader::new(stdout).lines() {
         let line = line.map_err(|e| e.to_string())?;
-        if line.starts_with("PROGRESS:") {
+        if line.starts_with("PROGRESS:") || line.starts_with("WARNING:") {
             let _ = app_handle.emit("vod-scan-progress", &line);
         } else if line.starts_with("JSON_RESULT:") {
             json_result = Some(line["JSON_RESULT:".len()..].to_string());
@@ -2905,9 +3174,15 @@ async fn cut_vod_sets(
     output_dir: String,
 ) -> Result<Vec<String>, String> {
     std::fs::create_dir_all(&output_dir).map_err(|e| e.to_string())?;
+    let ffmpeg = ffmpeg_bin()?;
     let mut paths: Vec<String> = Vec::new();
+    // Same padding as split_vod.py. A set's end is the last second with the
+    // game's HUD, which fades at the match-deciding KO: 20 s keeps the KO
+    // well inside the file (round detection treats a KO in the last 2 s as
+    // unfinished) and the win screen after it. Stream copy starts at the
+    // keyframe before `start`, so files may begin a few seconds earlier.
     let padding_before = 10.0;
-    let padding_after = 5.0;
+    let padding_after = 20.0;
 
     for (i, set) in sets.iter().enumerate() {
         let start = (set.start_secs - padding_before).max(0.0);
@@ -2923,7 +3198,7 @@ async fn cut_vod_sets(
         };
         let out_path = PathBuf::from(&output_dir).join(&filename);
 
-        let mut ffmpeg_cmd = Command::new("ffmpeg");
+        let mut ffmpeg_cmd = Command::new(&ffmpeg);
         hide_window(&mut ffmpeg_cmd);
         let output = ffmpeg_cmd
             .args([

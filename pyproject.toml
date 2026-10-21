@@ -10,7 +10,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-ocr = ["easyocr>=1.7"]
+# VOD splitter (scripts/split_vod.py): player-name OCR, plus an ffmpeg binary
+# for machines without ffmpeg on PATH
+ocr = ["easyocr>=1.7", "imageio-ffmpeg>=0.4"]
 viz = ["matplotlib>=3.8"]
 dev = ["pytest>=7.0"]
 
