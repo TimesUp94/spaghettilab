@@ -156,17 +156,20 @@ Generator that yields `(frame_number, timestamp_ms, frame_bgr)` tuples.
   sample rate stays ~30/s: 60 fps YouTube replays are read every 2nd frame. Downstream
   code (health cleaning, combo grouping, the Rust round detector) counts in samples
   and assumes ~30 samples/s. Skipped frames use `cap.grab()` (no BGR copy)
-- `ComboCounterExtractor`'s `stride` (default 2) also counts samples: it derives the
+- `ComboCounterExtractor`'s `stride` (default 3) also counts samples: it derives the
   spacing between sampled frame numbers (1 at 30 fps, 2 for a 60 fps video read every 2nd
-  frame) and, while no counter is shown, reads every 2nd *sample*. Once a counter is found
+  frame) and, while no counter is shown, reads every 3rd *sample*. Once a counter is found
   it reads every sample until none has been seen for 15 samples (`ACTIVE_GRACE`), and also
-  reads the sample the stride skipped just before the find. The output therefore does not
+  reads the samples the stride skipped just before the find. The output therefore does not
   depend on which samples the stride lands on: a cut of the same video starting one frame
-  later reads the same (it used to differ by 229-804 frames per file, e2e E4)
-- `frame_number` is the source-video frame index; timestamp is `(frame_number / video_fps) * 1000.0`.
-  30 fps videos give exactly the same frames and timestamps as before
-- `max_frames` stops after that many source frames
-- `VideoCapture` is released in a `finally` block
+  later reads the same (it used to differ by 229-804 frames per file, e2e E4). A counter on
+  fewer than 3 samples can be missed, but grouping drops such blips anyway.
+- Decode cost at 60 fps: skipped frames still go through `cap.grab()` (H.264 needs every
+  reference frame decoded); measured ~0.26 ms per skipped 720p frame, ~1-2 % of real time.
+  An ffmpeg `select`/`scale` pipe was ~10x slower on Windows. The analyzer's real cost was
+  the combo reader (~60 ms per read): it now matches in threads (`workers=4`: the two
+  sides, and word + big matcher per side; OpenCV releases the GIL; identical readings),
+  ~3.5x faster, plus the stride of 3.
 
 ### get_video_info(video_path, fallback_fps=None, sample_every=None) -> dict
 
@@ -224,13 +227,21 @@ y=116-139 form the primary band; y=88-112 and y=142-170 are fallback bands for s
 
 | Class | Pixels | Meaning |
 |-------|--------|---------|
-| F (fill) | warm hue (H<=30 or >=160), S>=30, V>=170; or the yellow/green and cool modes for other overlays | current health: pastel pink/beige, orange at low HP |
+| F (fill) | warm hue (H<=30 or >=160), S>=30, V>=170; or the yellow/green (V>100) and cool (H 90-145, S>40, V>150) modes for other overlays | current health: pastel pink/beige, orange at low HP |
 | R (pending) | red hue (H<=7 or >=168), S>=180, V 90-205 | the red segment showing combo damage; already lost, not counted as health |
 | W (neutral) | white (S<30, V>=170), or pastel too dark to be lit fill (V 80-170) | sprites, flashes, dimmed bar; ignored |
 | N | anything else | empty (semi-transparent) bar, coloured sprites |
 
-Fill-coloured columns that are also fill-coloured just above (y-12..y-5) or below
-(y+5..y+11) the band are not a bar (full-screen, letterboxed super cinematics) and become neutral.
+Fill-coloured columns whose fill colour carries on just above (y-12..y-5) or below
+(y+5..y+11) the band are not a bar (full-screen, letterboxed super cinematics) and become
+neutral. In the warm mode this needs the outside rows' mean colour to be the band's own
+(hue within 6, saturation within 30, brightness within 40): pink or cream stage scenery
+right above a pink bar is a different shade and used to hide real fill columns (new-VOD
+set 01 at 140 s read P2 0.37 instead of 0.41; set 07 R0 0.348 instead of 0.398). The
+yellow/green and cool modes, whose cinematic swirls vary in shade, and pending-red columns
+(red never reaches past the bar; red outside it is a sprite) keep the plain test. The cool
+mode needs V > 150: the empty, semi-transparent bar over a blue stage reads H ~95, S 50-90,
+V ~80 and was read as 7 % fill on a KO'd bar (set 01 at 411 s).
 
 **Edge fit:** with index 0 at the anchored end, the health edge `e` maximises
 `#F[:e] - #(R|N)[:e]`, a 1-D step fit in which neutral columns count 0. A sprite crossing
@@ -248,7 +259,8 @@ emitted when `consistency >= 0.70`; an empty bar only when the other bar shows t
 
 **Source:** `replanal/extractors/timer.py`
 
-Reads the two-digit round timer (0-99) by in-place grey template matching of each digit cell.
+Reads the round timer (0-99) by in-place grey template matching of each digit cell, and the
+single warm digit of the last 9 seconds.
 Returns `None` rather than guess: a missing reading is cheap for the cleaner, a wrong one is not.
 
 **Required ROIs:** `timer_digits`
@@ -266,42 +278,81 @@ Returns `None` rather than guess: a missing reading is cheap for the cleaner, a 
 4. If a cell fails at full size but looked digit-like (score >= 0.5), glyphs squashed to 90% / 80%
    height towards the baseline are tried: a new digit grows up from the baseline for a few frames
    after each tick.
-5. Both cells read -> `tens * 10 + ones`; otherwise `timer_value` stays `None`.
+5. Both cells read -> `tens * 10 + ones`.
+6. **Single digit** (`_read_single`): from 9 down GGST draws one centred digit in orange /
+   yellow (flashing), ~10-25 % larger than the two-digit glyphs and pulsing. Only when the two
+   cells give no value and the lit pixels (V >= 140, >= 5 % of the ROI) are clearly warm (median
+   saturation >= 90; measured 46-62 on the cream two-digit timer, 148-201 on the warm digits;
+   grey-only input never takes this path) is the same glyph set matched around the ROI centre (+-8 px) at scales 1.0-1.3; the best
+   (scale, digit) needs score >= 0.65, a 0.06 margin over the runner-up digit and the quadrant
+   check at 1.05 (an 8 under a white streak correlates with 3). Otherwise `timer_value` stays
+   `None`. New-VOD set 07 R3 (9 -> 5, 720p60): 333 of 777 frames read, 0 wrong; 8400 random
+   frames of all 29 test videos read exactly as before.
+7. **Replay check of single digits** (`finalize_timer`, run by `analyze_replay.py` and
+   `reclean_replay.py` before the tension clean-up): the single digit is only shown for the
+   last 9 seconds, so it must continue the countdown. A single-digit reading is kept only when
+   3 readings within +-0.5 s show it and the last such supported reading before it (`p`, `dt`
+   seconds earlier) could have counted down to it (`p - dt - 1 <= value <= p`). A tens digit
+   covered by a fist or a flash read "7" for 97 (Tappa #4 04_UF 144.47 s) and for 67 (yt_KWX
+   47.8 s) on one frame; both are dropped, the 140 real single-digit frames of new-VOD set 07
+   are kept. The per-frame readings stay in the parquet's `timer_raw`.
 
 Templates (`replanal/extractors/timer_glyphs.npz`, shipped with the package) are averaged, aligned
 crops from the hand-labelled set in `tests/data/timer/` (overlay VODs + 60 fps non-overlay YouTube
 replays), rebuilt and scored with `scripts/build_timer_templates.py`. On held-out videos: 100% exact
 on clean crops, 0 wrong values (the old Otsu/half-split reader: 41% exact, 45% wrong, e.g. 98->90,
-67->82, 65->85). Cost ~1.3 ms per read (old: ~0.16 ms). Values below 28 never occur in the labelled
-VODs, so tens digits 0/1 and the single-digit display (< 10) are unverified; an unrecognised
-display reads `None`.
+67->82, 65->85). Cost ~1.3 ms per read (old: ~0.16 ms). Values 10-27 never occur in the labelled
+VODs, so tens digits 0/1 are unverified; an unrecognised display reads `None`. Single-digit test
+crops are `tests/data/timer/single_*.png`.
 
 ### TensionExtractor
 
 **Source:** `replanal/extractors/tension.py`
 
-Reads P1 and P2 tension gauge percentage from the green-hued tension bars.
+Reads P1 and P2 tension as an absolute fraction (0-1) of the game's tension gauge.
 
-**Required ROIs:** None (reads directly from the full frame)
+**Required ROIs:** `p1_tension_bar`, `p2_tension_bar` (config; defaults in `DEFAULT_BARS`): the
+whole 481 px bar, fill rows y 1005-1031. P1 x 266-748, P2 x 1167-1649. The fill is anchored at
+the screen-centre end (P1 x2, P2 x1) and grows outward.
 
-**Pixel regions:**
-- Y band: y=1000-1040
-- P1: x=260-750 (fills right-to-left from center outward)
-- P2: x=1170-1660 (fills left-to-right from center outward)
+**What the gauge looks like** (Tappa #4 1080p30 and the new-VOD 720p60 stream):
+- Below 50 % the fill is mint green (H ~50-73, S ~70-95); from 50 % the whole fill turns pale
+  yellow (H ~27-40, S ~15-100, whitish next to the anchor). V ~230-255. The old green-only window
+  (H 35-85, S > 40) missed every yellow fill, at 1080p too.
+- A dark gear sits on the bar at 50 % (~35 px), a second one at the outer end when full; a full
+  bar also shines white over its inner half. The "TENSION" label is drawn inside the fill next
+  to the anchor. Positive-bonus chevrons can be drawn over the empty bar.
 
-**Green hue detection:**
-- H: 35-85
-- S: > 40
-- V: > 60
-- Column fill threshold: 20% of vertical pixels must be green
+**Measurement** (`measure_bar`): per column, the share of fill-coloured pixels (V >= 170,
+8 <= S <= 170, 18 <= H <= 90; >= 70 % of the rows, >= 35 % in the label zone next to the anchor)
+and of white shine pixels (V >= 170, S <= 40). The fill is the run starting within 19 % of the
+bar from the anchor (a stream webcam may cover the anchor) and continuing over gaps of at most
+8.5 % of the bar (gear, letters); white columns do not open a gap but the run must end on a
+coloured column (a white flash alone reads 0). Tension = run length / bar width; >= 0.965 is
+full (the end gear covers the last pixels). The gear at 50 % can hide a fill ending under it:
+values 0.47-0.53 read as ~0.47.
 
-**Fill measurement:** Longest continuous run of filled columns = tension bar width.
+**HUD state:** the gauge is HUD. With the round timer on screen an empty bar is 0; without it a
+value is kept only when both bars show a fill, else `None` (supers, cinematics, menus).
 
-**Calibration:** Max observed width per player is tracked as the 100% reference. Percentage = smoothed_width / max_width.
+**Replay clean-up** (`finalize_tension`, run by `analyze_replay.py` and `reclean_replay.py`):
+- Overlay ceiling: if one side's readings sit at a fixed value for >= 2 s in all, (almost) none
+  of its readings ever pass it (<= 0.2 %), and the other side's bar is read beyond it for >= 2 s
+  too (the gauge can be read there), a stream overlay covers the bar beyond it (new VOD: the
+  "CREATORS" logo caps P1 at 0.836, reached for 3.7-9 s per file). The amount is absolute, not a
+  share of the file (a share of 3 % missed the cap on new-VOD sets 05-07). Readings at the
+  ceiling are only a lower bound and become `None`. A player's own highest tension held still is
+  shorter (Tappa #4 05_UF P2: 1.7 s at 0.70, kept). A chat box that is sometimes see-through does
+  not make a ceiling; then the readings are kept.
+- Median of 5 consecutive readings; `None` stays `None`.
+- The per-frame readings are kept in `p1/p2_tension_raw` (parquet columns), and the clean-up
+  always starts from them, so `reclean_replay.py` can re-run it without decoding the video.
+  Older parquets only hold the cleaned values; re-running on them leaves them as they are
+  apart from another median pass.
 
-**Smoothing:** 15-frame rolling median window (`_MEDIAN_WINDOW = 15`).
-
-**Reset:** Same 15-frame gap detection as HealthBarExtractor. Resets max widths and median buffers.
+Validation: 26/27 frame-checked values of new-VOD sets 02/03/10 within 0.1 (old extractor 3/27;
+the miss is P1 at 1.0 read 0.836 = the logo ceiling, dropped by `finalize_tension`). Test strips
+of both sources in `tests/data/tension/`.
 
 ### RoundCounterExtractor
 
@@ -329,6 +380,41 @@ Values are written only when both sides are readable. Accuracy on the labeled se
 
 ---
 
+### ComboCounterExtractor and combo grouping
+
+**Source:** `replanal/extractors/combo.py` (reader: see the module docstring; templates
+`config/templates/combo_templates.npz`). Per frame: `combo_side` (the attacker's HUD side) and
+`combo_count`.
+
+**Grouping** (`derive_combos`, run after health cleaning; also by `scripts/reclean_replay.py`):
+- HUD state from the round timer (`hud_state`): a run of >= 4 samples without a timer = HUD
+  hidden (super cinematic, wallbreak, round transition); a hidden stretch after which the timer
+  comes back higher (99) ended the round, as does one that runs to the end of the video. The
+  values compared are the nearest supported readings (3 equal values within +-15 samples)
+  before and after the gap, so a lone misread next to it (a "7" for 97) does not end the round.
+- Gaps between counter readings are counted in HUD-shown samples, so a combo continues through
+  a super or wallbreak (max 240 samples in all). It is also bridged when the defender's red
+  pending segment stayed on screen all through the gap (GGST drains it only after the combo
+  ends) and the count did not fall back below 4, and when a 10+ count comes back higher by at
+  most 5 hits per second of gap. Counts falling back to 2-3 still start a new combo.
+- No combo continues into the next round; a counter in the gap after a round ended can only
+  extend the running combo.
+- A combo must deal damage (>= 0.003): one whose defender lost no HP is a counter still on
+  screen (it lingers ~1 s after the combo, and through the KO slash) or a misread: dropped.
+- `hp_after` = defender HP within 3 samples of the last counter frame: the combo ends when its
+  counter goes away; later loss (red draining, chip from blocking the next move) is not its
+  damage.
+- `hp_before` = HP before hit 1: the counter appears on hit 2 and is often read late (words under
+  the COUNTER banner). The cleaned HP is followed back through the combo's drops until 45 samples
+  pass without one, the red was off on 8 cleanly read frames (it drained), or a steady bar total
+  (fill + red) above the combo's own shows an earlier combo's red. The nearest drop always counts.
+  Red is only trusted on frames whose fill reading agrees with the cleaned HP (+-0.02).
+
+Validation (`output/fix2/track3/`): new-VOD frame-checked combos (10 sets): matched 15 -> 26,
+split 13 -> 2, phantom 15 -> 1, right hit count 11 -> 20, zero-damage combos 45 -> 0; Tappa #4
+sets 02/07/09/13: 20 merges (4 checked on frames, all one combo through a super or wallbreak),
+10 drops (8 zero-damage leftovers).
+
 ## HealthAggregator
 
 **Source:** `replanal/aggregator.py`, `replanal/health_clean.py`
@@ -342,8 +428,10 @@ detects damage events on the cleaned series. Call it before anything that reads
 GGST rules: within a round HP only goes down; it goes back up only to full, at the next
 round; the red pending segment is already-lost HP.
 
-1. **Segments (rounds):** a new segment starts after a gap of > 150 frames with no readings,
-   or after a sustained (15-frame) reset following damage in the round, at least 300 frames
+1. **Segments (rounds):** a new segment starts after a gap of > 150 frames with no readings
+   (unless the round clock carries on across it: the first credible reading after the gap is an
+   in-round value no higher than the last one before it; a long super cinematic hides the whole
+   HUD for 5 s or more mid-round, 14_Grands R6), or after a sustained (15-frame) reset following damage in the round, at least 300 frames
    after the previous start. A reset means both sides' 9-frame medians read "full", or both
    rose >= 0.30 above their in-round lows with one of them full. "Full" is
    `min(0.90, observed full-bar reading - 0.05)` per side: the game's character name on the
@@ -412,7 +500,8 @@ round; the red pending segment is already-lost HP.
    bar the cinematic reads a steady 1-11 px, 10_UF R1), the bar does not come back, and the round timer does not count down afterwards (the clock freezes at
    a KO; a 3 % bar flickers to empty while play goes on). The KO slash often hides the
    HUD within a frame, so the fit alone never gets there. The loser is 0 from its KO. If
-   the survivor was at <= 0.20 it may still reach 0 within 30 frames (double KO), unless
+   the survivor was at <= 0.20 it may still reach 0 within 30 frames (double KO: both end at
+   exactly 0; the alive floor below keeps it alive only until its own KO frame), unless
    its bar is shown with fill again later in the cleaned span (11_WFinal R4: one junk
    frame read the 7 % survivor empty; 13_LFinal R9: the survivor's 1-px sliver read empty
    while the clock still ran); otherwise nothing after the KO may lower it, even with red
@@ -450,6 +539,53 @@ round; the red pending segment is already-lost HP.
    above 0.20 at the end of play. The HUD is often up for only a few frames between the KO
    and the slash (set 12 R1: 6 frames after a super cinematic). The refit is adopted only if
    exactly one side then reaches 0.
+   **A KO ends the round** (`_clock_freeze`, `_hud_back`, `_end_loser`, `ALIVE_MIN`): the
+   clock stops and the HUD goes for the round-end slash. The game keeps the last HP point as a
+   1-px sliver, which a 720p source cannot show at all (new-VOD set 10 R0: P2 read 0.000 for
+   8 s while the clock ran 70 -> 63 and P1 took two more hits), so "at or near 0" is not a KO:
+   - A KO candidate (the fit reaching 0, or the raw KO) after which the clock still counts down
+     is dropped; a side with only such candidates is KO'd, if at all, when play ended (the last
+     timer reading before the HUD went, see below). End of play is never before the first
+     frame of the clock's final value.
+   - The frozen-clock KO is no longer shadowed by a later red-backed raw KO (the earlier of the
+     two wins; set 09 R4 placed the KO 6 s late, after the victory cinematic, and the survivor's
+     bar was dragged from 0.97 to 0.10). It ignores empty readings while the other side shows
+     red and this side none: that side is attacking and its bar is covered by its own combo's
+     effects (13_LFinal R8).
+   - A red segment backs an empty reading only when it covers at least half the level read just
+     before (the red of a lethal combo covers the bar where the fill was). Nagoriyuki's red
+     sprite over his own 0.49 bar read "empty with 0.14 red" one frame before he KO'd P2
+     (yt_KWX R2).
+   - **HUD back** (`_hud_back`): the timer readings from the clock's last tick on (only readings
+     with 3 equal values within +-15 frames, `_supported_timer`: a lone misread on a flash would
+     split the gap); the last gap of >= 15 frames in them is the slash (the clock can sit on one value through a long combo
+     and a super, and tick for the last time while the HUD is hidden). Play ended with the
+     reading before that gap; the frames after it that read the frozen value show the result.
+     A KO first seen on those frames happened while the HUD was hidden: it is placed at the
+     end of play, so the winner is frozen at its level from there (new-VOD set 06 R8: the wipe
+     covered part of P2's bar on the HUD's return and dragged it from 0.957 to 0.75; 07_UF R8).
+     The KO'd side is 0 on all of those frames (`_ko_shown`): its fit can leave them empty
+     when the empty bar is read with middling confidence after a cinematic, and the round
+     detector then ended the round at its last value before the KO (new-VOD set 08 R10:
+     0.021, uncertain).
+   - **Both low** (`_end_loser`): when both sides were near 0 at the end, or the KO was only
+     placed at the clock's stop, who lost is decided in game terms: (1) on the HUD back after the
+     slash, a bar read empty (<= 0.016, the junk floor over an empty bar) next to one read
+     >= 0.0025 wider (not counting frames where the "empty" side is attacking); (2) failing that,
+     the side shown with red pending (being hit) in the last 15 frames of play while the other
+     shows none; (3) failing that, the side whose combo counter (the attacker) is up in those
+     last 15 frames of play is the winner. The counter lingers ~1 s after a combo ends, so an
+     earlier one says nothing about the last hit (a one-hit reversal shows no counter). New-VOD set 04 R3: P1's 0.003 sliver had been
+     taken for the KO and P2 (being combo'd by P1's super) frozen at 0.035; set 09 R3, set 07 R1.
+   - **Alive floor:** the survivor's cleaned HP, and the loser's before its KO frame, never go
+     below `ALIVE_MIN` (0.008, the 1-px sliver's 1080p reading), so exactly 0 always means KO'd
+     (the round detector's terminal-state rule relies on it). In a double KO the survivor is
+     only floored until its own KO frame.
+   - The survivor's empty readings from 30 frames before the KO on are blanked when the HUD
+     shows it surviving (its own super's sprites over its bar, yt_KWX R2).
+   - **Hidden KO** also resolves both-low endings with the evidence above (lead < 0.10), and
+     the last round of a video (no next-round intro to prove the round ended) when the HUD back
+     shows the low side empty (new-VOD set 01 R8). The loser is at 0 from the end of play.
 7. **Gaps:** frames between fitted points (up to 120 frames) are linearly interpolated,
    so a bar hidden during a combo keeps going down and never comes back up. Frames after
    the last fitted point that still had a (rejected) reading hold the last value.
@@ -535,7 +671,7 @@ The `init_db()` function uses `ALTER TABLE ... ADD COLUMN` wrapped in try/except
 
 `write_frame_parquet()` writes per-frame data as an Apache Parquet file using PyArrow directly (no pandas dependency). Output path: `<output_dir>/frames/<replay_id>_frames.parquet`.
 
-Schema mirrors the `frame_data` SQLite table with typed Arrow columns (int32, float64). Parquet-only health columns: `p1/p2_health_raw` (per-frame measurement before cleaning), `p1/p2_pending_pct` and `p1/p2_health_conf`. The SQLite `frame_data` table is unchanged (it must stay in lockstep with the web app, and the `.spag` export copies it with `SELECT *`); its `p1/p2_health_pct` columns now hold the cleaned values.
+Schema mirrors the `frame_data` SQLite table with typed Arrow columns (int32, float64). Parquet-only health columns: `p1/p2_health_raw` (per-frame measurement before cleaning), `p1/p2_pending_pct` and `p1/p2_health_conf`; `timer_raw` and `p1/p2_tension_raw` hold the readings before `finalize_timer` / `finalize_tension` (`timer_value` and `p1/p2_tension_pct` are the cleaned ones), so `scripts/reclean_replay.py` re-runs those clean-ups from the parquet. The SQLite `frame_data` table is unchanged (it must stay in lockstep with the web app, and the `.spag` export copies it with `SELECT *`); its `p1/p2_health_pct` columns now hold the cleaned values.
 
 ---
 
