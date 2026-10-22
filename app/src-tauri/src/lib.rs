@@ -415,16 +415,36 @@ pub struct AnalysisStatus {
 
 // ── Constants for round detection ────────────────────────────────────────────
 
-const HP_CEILING: f64 = 0.875;
 const MIN_ROUND_FRAMES: usize = 450;  // ~15 seconds at 30fps
 /// Shortest leading partial round kept when it ends in a KO (~8 s at 30/s).
 const LEAD_PARTIAL_MIN_FRAMES: usize = 240;
-/// Normalised HP at/below this is a KO.  A KO reads exactly 0; a live 1-px
-/// sliver reads 0.008 raw (0.009 normalised) on a 1080p source, so the bound
-/// stays below that (the Python cleaner's `HUD_EMPTY` is 0.005 raw).  Both
-/// were measured on one 1080p stream; other resolutions may need a re-check.
+/// HP at/below this is a KO.  HP is the filled fraction of the bar
+/// (`health.py` measures fill/total, so a full bar reads 1.0; every HP value
+/// and threshold in the round detection is on that scale).  A KO reads
+/// exactly 0; a live 1-px sliver reads 0.008 on a 1080p source, so the bound
+/// stays below that (the Python cleaner's `HUD_EMPTY` is the same 0.005).
+/// Both were measured on one 1080p stream; other resolutions may need a
+/// re-check.
 const KO_HP: f64 = 0.005;
-const COMEBACK_DEFICIT: f64 = 0.35;
+/// A side at or below this HP is near a KO (0.13125 of the bar, the old 0.15
+/// on HP divided by 0.875).  A KO with the other side above it is one-sided.
+const NEAR_KO_HP: f64 = 0.13125;
+/// Both sides at or below this HP when the round ended: which bar is empty
+/// comes down to a few pixels (a 1-px sliver is 0.0014 of the bar).  The
+/// Python cleaner's `NEAR_DKO` is the same 0.03.
+const NEAR_DKO_HP: f64 = 0.03;
+/// A round ends at most this many samples (at 30/s) after its last timer
+/// reading (see the round end below); the KO and slash in that margin still
+/// belong to the round, also before a non-gameplay stretch.  The Python
+/// cleaner cleans the same KO_MARGIN after the last timer reading.
+const ROUND_KO_MARGIN: usize = 150;
+/// Below this margin an HP-based winner is uncertain (final-HP difference,
+/// or the combined fallback signal).  0.0875 of the bar: the old 0.10 was
+/// applied to HP divided by 0.875 (see docs/round-detection.md, "HP scale").
+const UNCERTAIN_HP: f64 = 0.0875;
+/// A round is a comeback when the winner was this far behind (heavy-smoothed
+/// HP) at some point: 0.30 of the bar (the old 0.35 on HP divided by 0.875).
+const COMEBACK_DEFICIT: f64 = 0.30;
 const DEFICIT_SMOOTH_WINDOW: usize = 91;  // ~3s heavy smoothing for deficit tracking
 const TIMER_SMOOTH_WINDOW: usize = 61;  // ~2s window for timer noise filtering
 const HP_RESET_WINDOW: usize = 90;  // ~3s window for HP reset detection
@@ -506,6 +526,100 @@ fn rolling_median_i32(arr: &[Option<i32>], window: usize) -> Vec<Option<i32>> {
         }
     }
     out
+}
+
+/// HP scale of older data.  `p1/p2_health_pct` is the filled fraction of the
+/// bar (full = 1.0) since 2026-10; data written before (the March 2026
+/// builds and `.spag`/`.spagz` files made with them) reads a full bar at
+/// 0.875 (`HP_CEILING`, which the app divided by).  Detected per replay from
+/// where the full bars pile up (every round starts full): readings within
+/// LEGACY_FULL_TOL of 0.875 outnumbering readings at 1.0 (>= FULL_MIN) by
+/// LEGACY_FULL_RATIO.  Measured: legacy files 6.3-10.6, current ones <= 0.63.
+const LEGACY_HP_FULL: f64 = 0.875;
+const LEGACY_FULL_TOL: f64 = 0.01;
+const FULL_MIN: f64 = 0.985;
+const LEGACY_FULL_RATIO: f64 = 2.0;
+const LEGACY_FULL_MIN_READS: i64 = 30;
+
+/// The value a full bar reads in this replay's `frame_data` (1.0, or
+/// LEGACY_HP_FULL for older data).  HP read from the DB is divided by it.
+fn replay_hp_full(conn: &Connection, replay_id: &str) -> f64 {
+    let q = format!(
+        "SELECT COALESCE(SUM((ABS(p1_health_pct - {f}) <= {t}) + (ABS(p2_health_pct - {f}) <= {t})), 0),
+                COALESCE(SUM((p1_health_pct >= {m}) + (p2_health_pct >= {m})), 0)
+         FROM frame_data WHERE replay_id = ?",
+        f = LEGACY_HP_FULL, t = LEGACY_FULL_TOL, m = FULL_MIN
+    );
+    let counts = conn.query_row(&q, [replay_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)));
+    match counts {
+        Ok((legacy, full)) => hp_full_from_counts(legacy, full),
+        Err(_) => 1.0,
+    }
+}
+
+/// Damage events of a replay on the current HP scale (see replay_hp_full).
+fn rescale_events(events: &mut [DamageEvent], hp_full: f64) {
+    if hp_full == 1.0 {
+        return;
+    }
+    for e in events.iter_mut() {
+        e.damage_pct /= hp_full;
+        e.pre_health_pct = (e.pre_health_pct / hp_full).min(1.0);
+        e.post_health_pct = (e.post_health_pct / hp_full).min(1.0);
+    }
+}
+
+fn hp_full_from_counts(legacy: i64, full: i64) -> f64 {
+    if legacy >= LEGACY_FULL_MIN_READS && legacy as f64 > LEGACY_FULL_RATIO * full as f64 {
+        LEGACY_HP_FULL
+    } else {
+        1.0
+    }
+}
+
+/// Does the round clock carry on across a gap in the readings (samples
+/// `a`..`b`)?  A super cinematic hides the whole HUD mid-round, at times for
+/// more than 5 s (Tappa #4 14_Grands: 5.6 s with the clock at 84 on both
+/// sides).  The same round goes on when the nearest supported readings (at
+/// least TIMER_SUPPORT others of the same value within TIMER_SUPPORT_MS;
+/// searched within CLOCK_CONTINUES_MS of the gap) show an in-round value
+/// after it no higher than before (a new round starts at its intro's 99).
+/// Mirrors the Python cleaner's `_clock_continues`.
+const CLOCK_CONTINUES_MS: f64 = 3000.0;
+
+fn clock_continues(timer: &[Option<i32>], ts: &[f64], a: usize, b: usize) -> bool {
+    let supported = |i: usize| -> bool {
+        let Some(v) = timer[i] else { return false };
+        let mut support = 0usize;
+        let mut j = i;
+        while j > 0 && ts[j - 1] >= ts[i] - TIMER_SUPPORT_MS {
+            j -= 1;
+            if timer[j] == Some(v) {
+                support += 1;
+            }
+        }
+        let mut j = i + 1;
+        while j < timer.len() && ts[j] <= ts[i] + TIMER_SUPPORT_MS {
+            if timer[j] == Some(v) {
+                support += 1;
+            }
+            j += 1;
+        }
+        support >= TIMER_SUPPORT
+    };
+    let before = (0..=a)
+        .rev()
+        .take_while(|&j| ts[j] >= ts[a] - CLOCK_CONTINUES_MS)
+        .find(|&j| supported(j))
+        .and_then(|j| timer[j]);
+    let after = (b..timer.len())
+        .take_while(|&j| ts[j] <= ts[b] + CLOCK_CONTINUES_MS)
+        .find(|&j| supported(j))
+        .and_then(|j| timer[j]);
+    match (before, after) {
+        (Some(tb), Some(ta)) => ta <= TIMER_SUPPORT_MIN && ta <= tb,
+        _ => false,
+    }
 }
 
 /// Round-start timer readings need temporal support: the round timer shows
@@ -674,24 +788,29 @@ fn detect_rounds_for_replay(
     let p1_rounds_won: Vec<Option<i32>> = rows.iter().map(|r| r.4).collect();
     let p2_rounds_won: Vec<Option<i32>> = rows.iter().map(|r| r.5).collect();
 
-    // Normalize HP by ceiling
+    // HP is the filled fraction of the bar (a full bar reads 1.0), so it is
+    // only clipped to [0, 1].  Older data reads a full bar at 0.875 and is
+    // divided by that (see replay_hp_full).  (The app used to divide every
+    // replay by 0.875; the thresholds below were recalibrated when that was
+    // removed, see docs/round-detection.md, "HP scale".)
+    let hp_full = replay_hp_full(conn, replay_id);
     let mut p1_norm: Vec<f64> = p1_raw
         .iter()
-        .map(|v| if v.is_nan() { f64::NAN } else { clip(v / HP_CEILING, 0.0, 1.0) })
+        .map(|v| if v.is_nan() { f64::NAN } else { clip(*v / hp_full, 0.0, 1.0) })
         .collect();
     let mut p2_norm: Vec<f64> = p2_raw
         .iter()
-        .map(|v| if v.is_nan() { f64::NAN } else { clip(v / HP_CEILING, 0.0, 1.0) })
+        .map(|v| if v.is_nan() { f64::NAN } else { clip(*v / hp_full, 0.0, 1.0) })
         .collect();
 
     // ── Data cleaning: filter junk HP from non-gameplay screens ──
-    // If both players' HP stays below 0.15 for > 5 seconds (150 frames),
+    // If both players' HP stays below 0.13125 for > 5 seconds (150 frames),
     // it's a lobby/menu screen misidentified as gameplay. Null out those frames.
-    // Threshold is intentionally low (0.15) because both players CAN legitimately
+    // Threshold is intentionally low (0.13125) because both players CAN legitimately
     // be at low health in close GGS rounds. Only catch clear non-gameplay.
     let mut junk_count = 0usize;
     {
-        let junk_thresh = 0.15;
+        let junk_thresh = 0.13125;
         let junk_window = fr(150); // ~5 seconds
         let p1_junk = rolling_median(&p1_norm, junk_window);
         let p2_junk = rolling_median(&p2_norm, junk_window);
@@ -738,7 +857,12 @@ fn detect_rounds_for_replay(
     // read as 0/0). If the timer is absent for 20+ seconds, we're not in
     // gameplay (character select, lobby, replay browser, loading, etc.).
     // NaN-out HP data in these regions so they don't contaminate round
-    // detection, and let the game-break detector handle boundaries.
+    // detection, and let the game-break detector handle boundaries.  A KO
+    // in the first ROUND_KO_MARGIN samples of a region is kept (the samples
+    // up to it): the round before it can end in a KO under the slash after
+    // its last timer reading, with the HUD never shown again (the last round
+    // of a set: new VOD set 10 R9).  A round already decided before the
+    // region keeps its end.
     let nongame_threshold = fr(600); // ~20 seconds
     let mut nongame_regions: Vec<(usize, usize)> = Vec::new();
     {
@@ -774,7 +898,13 @@ fn detect_rounds_for_replay(
             eprintln!("[NONGAME-DBG] {} non-gameplay region: frames {}-{} t={:.1}s-{:.1}s ({:.1}s)",
                 replay_id, start, end, ts[start]/1000.0, ts[end.min(n-1)]/1000.0,
                 (ts[end.min(n-1)] - ts[start])/1000.0);
-            for j in start..end {
+            let is_ko = |j: usize| p1_norm[j] <= KO_HP || p2_norm[j] <= KO_HP;
+            let keep = if start == 0 || (0..start).rev().find(|&j| !p1_norm[j].is_nan() || !p2_norm[j].is_nan()).map_or(true, is_ko) {
+                0
+            } else {
+                (start..(start + fr(ROUND_KO_MARGIN)).min(end)).find(|&j| is_ko(j)).map_or(0, |j| j + 1 - start)
+            };
+            for j in start + keep..end {
                 if !p1_norm[j].is_nan() || !p2_norm[j].is_nan() {
                     p1_norm[j] = f64::NAN;
                     p2_norm[j] = f64::NAN;
@@ -832,7 +962,7 @@ fn detect_rounds_for_replay(
                     let hp_stayed_low = post_min.len() >= fr(15) && {
                         let mut sorted = post_min.clone();
                         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                        sorted[sorted.len() / 2] < 0.50
+                        sorted[sorted.len() / 2] < 0.4375
                     };
                     if confirmed && hp_stayed_low {
                         eprintln!("[ROUND-DBG] timer_start REJECTED (HP did not reset) at i={} t={:.1}s (smooth_timer={}, lowest={})",
@@ -853,8 +983,9 @@ fn detect_rounds_for_replay(
     }
 
     // ── Signal 2: HP reset detection ──
-    // When both players' rolling median HP goes from low (<0.50) to high (>0.85),
-    // a new round has started.
+    // When both players' rolling median HP goes from low (<0.4375) to high (>0.74375),
+    // a new round has started.  (A new round's bars read 1.0; the 3 s median
+    // stays above 0.74375 through the first exchanges.)
     let p1_rm = rolling_median(&p1_norm, fr(HP_RESET_WINDOW));
     let p2_rm = rolling_median(&p2_norm, fr(HP_RESET_WINDOW));
     let mut hp_resets: Vec<usize> = Vec::new();
@@ -863,7 +994,7 @@ fn detect_rounds_for_replay(
         if !p1_rm[i].is_nan() && !p2_rm[i].is_nan() {
             let current_min = p1_rm[i].min(p2_rm[i]);
             min_hp_since_reset = min_hp_since_reset.min(current_min);
-            if p1_rm[i] > 0.85 && p2_rm[i] > 0.85 && min_hp_since_reset < 0.50 {
+            if p1_rm[i] > 0.74375 && p2_rm[i] > 0.74375 && min_hp_since_reset < 0.4375 {
                 if hp_resets.last().map_or(true, |&last| i - last > min_round_frames) {
                     eprintln!("[ROUND-DBG] hp_reset at i={} t={:.1}s (p1_rm={:.3}, p2_rm={:.3}, min_since={:.3})",
                         i, ts[i]/1000.0, p1_rm[i], p2_rm[i], min_hp_since_reset);
@@ -878,7 +1009,7 @@ fn detect_rounds_for_replay(
     // Detects round resets across NaN gaps that the rolling-median HP reset
     // misses.  When both players' health drops to low values, then a NaN gap
     // occurs (KO animation / round transition), and health returns to high
-    // (both > 0.85), that's unambiguously a new round.
+    // (both > 0.74375), that's unambiguously a new round.
     let mut gap_hp_resets: Vec<usize> = Vec::new();
     {
         let mut last_both_valid_idx: Option<usize> = None;
@@ -891,15 +1022,15 @@ fn detect_rounds_for_replay(
                     // Gap >= 30 frames (~1s), at least one player was low before,
                     // and both are high now → round reset.
                     // For short gaps (< 60 frames / ~2s), require at least one player
-                    // to be near-KO (< 0.25) before the gap. This filters wallbreaks
-                    // where both players have moderate health (e.g. P1=0.40, P2=0.75)
+                    // to be near-KO (< 0.21875) before the gap. This filters wallbreaks
+                    // where both players have moderate health (e.g. P1=0.35, P2=0.65)
                     // and the brief stage-transition VFX causes a short NaN gap + 100%
                     // flash, but the round continues.
                     let pre_gap_min = last_p1_val.min(last_p2_val);
                     if gap_frames >= fr(30)
-                        && (last_p1_val < 0.50 || last_p2_val < 0.50)
-                        && p1_norm[i] > 0.85 && p2_norm[i] > 0.85
-                        && (gap_frames >= fr(60) || pre_gap_min < 0.25)
+                        && (last_p1_val < 0.4375 || last_p2_val < 0.4375)
+                        && p1_norm[i] > 0.74375 && p2_norm[i] > 0.74375
+                        && (gap_frames >= fr(60) || pre_gap_min < 0.21875)
                     {
                         if gap_hp_resets.last().map_or(true, |&last| i - last > min_round_frames) {
                             eprintln!("[ROUND-DBG] gap_hp_reset at i={} t={:.1}s (gap={}f, pre_p1={:.3}, pre_p2={:.3})",
@@ -907,9 +1038,9 @@ fn detect_rounds_for_replay(
                             gap_hp_resets.push(i);
                         }
                     } else if gap_frames >= fr(30) && gap_frames < fr(60)
-                        && (last_p1_val < 0.50 || last_p2_val < 0.50)
-                        && p1_norm[i] > 0.85 && p2_norm[i] > 0.85
-                        && pre_gap_min >= 0.25
+                        && (last_p1_val < 0.4375 || last_p2_val < 0.4375)
+                        && p1_norm[i] > 0.74375 && p2_norm[i] > 0.74375
+                        && pre_gap_min >= 0.21875
                     {
                         eprintln!("[ROUND-DBG] gap_hp_reset REJECTED (wallbreak, short gap + moderate pre-HP) at i={} t={:.1}s (gap={}f, pre_p1={:.3}, pre_p2={:.3}, min={:.3})",
                             i, ts[i]/1000.0, gap_frames, last_p1_val, last_p2_val, pre_gap_min);
@@ -925,14 +1056,19 @@ fn detect_rounds_for_replay(
     // ── Signal 3: Game break detection (gaps > 5s) ──
     // Track gaps in health data for EITHER player.  When one player is at
     // very low health (bar too small to read), the other player's bar is
-    // still valid and prevents false game breaks mid-round.
+    // still valid and prevents false game breaks mid-round.  A gap across
+    // which the round clock carries on (a long super cinematic hiding the
+    // HUD, see clock_continues) is not a break.
     let mut game_breaks: Vec<usize> = Vec::new();
     let mut prev_valid_idx: Option<usize> = None;
     for i in 0..n {
         if !p1_norm[i].is_nan() || !p2_norm[i].is_nan() {
             if let Some(pv) = prev_valid_idx {
                 let gap_ms = ts[i] - ts[pv];
-                if gap_ms > 5000.0 {
+                if gap_ms > 5000.0 && clock_continues(&timer_raw, &ts, pv, i) {
+                    eprintln!("[ROUND-DBG] gap at i={} t={:.1}s (gap={:.1}s): the clock carries on, not a game break",
+                        i, ts[i]/1000.0, gap_ms/1000.0);
+                } else if gap_ms > 5000.0 {
                     eprintln!("[ROUND-DBG] game_break at i={} t={:.1}s (gap={:.1}s)",
                         i, ts[i]/1000.0, gap_ms/1000.0);
                     game_breaks.push(i);
@@ -1006,7 +1142,7 @@ fn detect_rounds_for_replay(
             // win pose) is not a round worth listing.
             let tail_lo = (fv + (end - fv) * 6 / 10).max(fv + fr(LEAD_PARTIAL_MIN_FRAMES));
             let is_ko = |j: usize, a: &[f64], b: &[f64]| {
-                !a[j].is_nan() && a[j] <= 0.005 && !b[j].is_nan() && b[j] > 0.02
+                !a[j].is_nan() && a[j] <= KO_HP && !b[j].is_nan() && b[j] > 0.02
             };
             match (fv..end).find(|&j| is_ko(j, &p1_norm, &p2_norm) || is_ko(j, &p2_norm, &p1_norm)) {
                 Some(k) => k >= tail_lo,
@@ -1058,10 +1194,10 @@ fn detect_rounds_for_replay(
             let mut saw_low_hp = false;
             for j in search_start..e {
                 if !p1_norm[j].is_nan() && !p2_norm[j].is_nan() {
-                    if p1_norm[j] < 0.50 || p2_norm[j] < 0.50 {
+                    if p1_norm[j] < 0.4375 || p2_norm[j] < 0.4375 {
                         saw_low_hp = true;
                     }
-                    if saw_low_hp && p1_norm[j] > 0.85 && p2_norm[j] > 0.85 {
+                    if saw_low_hp && p1_norm[j] > 0.74375 && p2_norm[j] > 0.74375 {
                         // Before accepting as wallbreak, check if either player
                         // was truly dead (< 0.02) in the recent ~6s (180 frames).
                         // A dead player's "recovery" during KO animation is NOT
@@ -1099,8 +1235,9 @@ fn detect_rounds_for_replay(
         // Terminal-state check. The Python cleaner makes HP non-increasing
         // within a round and reads a KO as exactly 0, so each side's minimum
         // over the round is its final HP. A side that reached 0 while the
-        // other didn't is the loser; otherwise the lower final HP loses.
-        // (Do NOT count "frames below 0.15": a survivor can sit at 3% for
+        // other didn't is the loser; otherwise the lower final HP loses
+        // (by >= 0.02625 of the bar; confident from UNCERTAIN_HP).
+        // (Do NOT count "frames below NEAR_KO_HP": a survivor can sit at 3% for
         // tens of seconds while the opponent is KO'd at the very end.)
         {
             let mut p1_min = f64::INFINITY;
@@ -1120,10 +1257,10 @@ fn detect_rounds_for_replay(
                     eprintln!("[WINNER-DBG]   → {} wins via single KO", winner);
                     return Some((winner.to_string(), p1_min, p2_min, true));
                 }
-                if !p1_ko && !p2_ko && diff >= 0.03 {
+                if !p1_ko && !p2_ko && diff >= 0.02625 {
                     let winner = if p1_min > p2_min { "P1" } else { "P2" };
                     eprintln!("[WINNER-DBG]   → {} wins via lower final HP (diff={:.3})", winner, diff);
-                    return Some((winner.to_string(), p1_min, p2_min, diff >= 0.10));
+                    return Some((winner.to_string(), p1_min, p2_min, diff >= UNCERTAIN_HP));
                 }
                 // Both at 0 (double KO / KO animation artifacts) or too close
                 // to call: fall through to the KO-moment heuristics below.
@@ -1142,17 +1279,17 @@ fn detect_rounds_for_replay(
             if p1_loses { (lose_hp, win_hp) } else { (win_hp, lose_hp) }
         };
 
-        // Early check: count raw frames with HP < 0.15 in last 60%.
+        // Early check: count raw frames with HP < NEAR_KO_HP in last 60%.
         // Filter post-KO garbage: only count if the OTHER player is NOT at full HP.
         // After a KO, the winning player's bar resets to ~1.0 while the loser's
         // shows residual low values — these aren't real combat frames.
         let p1_ko_count = (effective_search_start..e)
-            .filter(|&j| !p1_norm[j].is_nan() && p1_norm[j] < 0.15
-                      && !p2_norm[j].is_nan() && p2_norm[j] < 0.90)
+            .filter(|&j| !p1_norm[j].is_nan() && p1_norm[j] < NEAR_KO_HP
+                      && !p2_norm[j].is_nan() && p2_norm[j] < 0.7875)
             .count();
         let p2_ko_count = (effective_search_start..e)
-            .filter(|&j| !p2_norm[j].is_nan() && p2_norm[j] < 0.15
-                      && !p1_norm[j].is_nan() && p1_norm[j] < 0.90)
+            .filter(|&j| !p2_norm[j].is_nan() && p2_norm[j] < NEAR_KO_HP
+                      && !p1_norm[j].is_nan() && p1_norm[j] < 0.7875)
             .count();
         eprintln!("[WINNER-DBG] {} find_winner_ko s={} e={} t={:.1}s-{:.1}s eff_start={} p1_ko={} p2_ko={}",
             replay_id, s, e, ts[s] / 1000.0, ts[e.min(n - 1)] / 1000.0, effective_search_start, p1_ko_count, p2_ko_count);
@@ -1172,13 +1309,13 @@ fn detect_rounds_for_replay(
         // first player to reach zero is the real loser. When far apart (>90),
         // it's a wallbreak/comeback — let the KO clustering handle it.
         if p1_ko_count >= 3 && p2_ko_count >= 3 {
-            let first_p1 = (effective_search_start..e).find(|&j| !p1_norm[j].is_nan() && p1_norm[j] < 0.05);
-            let first_p2 = (effective_search_start..e).find(|&j| !p2_norm[j].is_nan() && p2_norm[j] < 0.05);
+            let first_p1 = (effective_search_start..e).find(|&j| !p1_norm[j].is_nan() && p1_norm[j] < 0.04375);
+            let first_p2 = (effective_search_start..e).find(|&j| !p2_norm[j].is_nan() && p2_norm[j] < 0.04375);
             if let (Some(fp1), Some(fp2)) = (first_p1, first_p2) {
                 let gap = if fp1 > fp2 { fp1 - fp2 } else { fp2 - fp1 };
                 if gap <= fr(90) {
                     // Only use first-to-zero when it's a one-sided KO
-                    // (other player > 0.15 HP). If both are near KO at the
+                    // (other player > NEAR_KO_HP). If both are near KO at the
                     // earlier moment, it's ambiguous — check the later zero.
                     let (earlier, later, earlier_is_p1) = if fp1 < fp2 {
                         (fp1, fp2, true)
@@ -1187,7 +1324,7 @@ fn detect_rounds_for_replay(
                     };
                     let other_at_earlier = if earlier_is_p1 { p2_norm[earlier] } else { p1_norm[earlier] };
                     let other_at_later = if earlier_is_p1 { p1_norm[later] } else { p2_norm[later] };
-                    if other_at_earlier > 0.15 {
+                    if other_at_earlier > NEAR_KO_HP {
                         // Earlier zero is one-sided — earlier player died
                         if earlier_is_p1 {
                             let (a, b) = ko_hp(true);
@@ -1196,7 +1333,7 @@ fn detect_rounds_for_replay(
                             let (a, b) = ko_hp(false);
             return Some(("P1".to_string(), a, b, true));
                         }
-                    } else if other_at_later > 0.15 {
+                    } else if other_at_later > NEAR_KO_HP {
                         // Later zero is one-sided — later player died
                         if earlier_is_p1 {
                             let (a, b) = ko_hp(false);
@@ -1238,7 +1375,7 @@ fn detect_rounds_for_replay(
         let ko_frames: Vec<(usize, f64, f64)> = valid_frames
             .iter()
             .copied()
-            .filter(|&(_, p1, p2)| p1.min(p2) < best_min_hp + 0.10)
+            .filter(|&(_, p1, p2)| p1.min(p2) < best_min_hp + 0.0875)
             .collect();
 
         let (ep1, ep2) = if !ko_frames.is_empty() {
@@ -1270,7 +1407,7 @@ fn detect_rounds_for_replay(
 
         eprintln!("[WINNER-DBG]   cluster: ep1={:.3} ep2={:.3} hp_diff={:.3}", ep1, ep2, hp_diff);
         // If KO moment is clear (large HP gap), use it directly
-        if hp_diff >= 0.15 {
+        if hp_diff >= 0.13125 {
             let winner = if ep1 >= ep2 { "P1".to_string() } else { "P2".to_string() };
             eprintln!("[WINNER-DBG]   → {} wins via cluster hp_diff", winner);
             // ep1/ep2 are smoothed medians and can pick up the next round's
@@ -1315,23 +1452,23 @@ fn detect_rounds_for_replay(
         // Combine signals: whoever reached lower minimum HP is the loser
         let mut min_signal = p2_min_last - p1_min_last;  // positive = P1 went lower = P2 wins
 
-        // Detect transition artifact: both min values in [0.40, 0.55] with
-        // tiny difference = "loading screen" where both bars show ~50%.
-        if p1_min_last >= 0.40 && p1_min_last <= 0.55
-            && p2_min_last >= 0.40 && p2_min_last <= 0.55
-            && min_signal.abs() < 0.05
+        // Detect transition artifact: both min values in [0.35, 0.48125] with
+        // tiny difference = "loading screen" where both bars read ~0.4.
+        if p1_min_last >= 0.35 && p1_min_last <= 0.48125
+            && p2_min_last >= 0.35 && p2_min_last <= 0.48125
+            && min_signal.abs() < 0.04375
         {
             min_signal = 0.0;
         }
 
         // Strategy B: Average HP in last 25% of the round.
         // Exclude transition artifacts where both bars drop simultaneously
-        // below 0.60 (loading screen pattern).
+        // below 0.525 (loading screen pattern).
         let mut p1_avg_vals: Vec<f64> = Vec::new();
         let mut p2_avg_vals: Vec<f64> = Vec::new();
         for j in last_quarter_start..e {
             if !p1_smooth[j].is_nan() && !p2_smooth[j].is_nan() {
-                if p1_smooth[j] < 0.60 && p2_smooth[j] < 0.60 {
+                if p1_smooth[j] < 0.525 && p2_smooth[j] < 0.525 {
                     continue;
                 }
                 p1_avg_vals.push(p1_smooth[j]);
@@ -1353,33 +1490,33 @@ fn detect_rounds_for_replay(
         // difference is noise (transition artifacts, OCR jitter). Use
         // avg_signal which captures the post-round result screen HP.
         let hp_range = (p1_min_last - p2_min_last).abs();
-        let min_weight = (hp_range / 0.20).min(0.8);
+        let min_weight = (hp_range / 0.175).min(0.8);
         let avg_weight = 1.0 - min_weight;
         let mut combined = min_signal * min_weight + avg_signal * avg_weight;
         eprintln!("[WINNER-DBG]   fallback: p1_min={:.3} p2_min={:.3} min_sig={:.3} avg_sig={:.3} combined={:.3}",
             p1_min_last, p2_min_last, min_signal, avg_signal, combined);
 
         // Track confidence before tiebreaker — if the signal was already clear
-        // (>= 0.10), we're confident. Tiebreaker is a best-guess for display
+        // (>= UNCERTAIN_HP), we're confident. Tiebreaker is a best-guess for display
         // but should NOT be marked as confident since it can be wrong
         // (e.g. next round starting quickly pollutes post-round visibility).
-        let confident = combined.abs() >= 0.10;
+        let confident = combined.abs() >= UNCERTAIN_HP;
 
         // Tiebreaker: asymmetric data presence beyond round end.
         // In GGS, the winner's HP bar stays visible on the result screen while
         // the loser's disappears. If one player has many more visible frames
         // after the round ends, they're likely the winner. This is a best-guess
         // for ambiguous rounds — the user can override via the UI.
-        if combined.abs() < 0.10 {
+        if combined.abs() < UNCERTAIN_HP {
             let scan_end = (e + fr(300)).min(n);
             let p1_post = (e..scan_end).filter(|&k| !p1_norm[k].is_nan()).count();
             let p2_post = (e..scan_end).filter(|&k| !p2_norm[k].is_nan()).count();
             if p2_post > p1_post + fr(10) {
                 eprintln!("[WINNER-DBG]   tiebreaker(post-round): P2 visible {} frames vs P1 {} after round end → P2 (uncertain)", p2_post, p1_post);
-                combined = 0.10;
+                combined = UNCERTAIN_HP;
             } else if p1_post > p2_post + fr(10) {
                 eprintln!("[WINNER-DBG]   tiebreaker(post-round): P1 visible {} frames vs P2 {} after round end → P1 (uncertain)", p1_post, p2_post);
-                combined = -0.10;
+                combined = -UNCERTAIN_HP;
             }
         }
         let (winner, _fp1, _fp2) = if combined > 0.0 {
@@ -1425,15 +1562,15 @@ fn detect_rounds_for_replay(
         };
 
         // Alternative confirmation for wallbreak transitions: KO evidence before
-        // the gap + timer ≥90 nearby + both HP reset to >0.90 after.
+        // the gap + timer ≥90 nearby + both HP reset to >0.7875 after.
         let round_reset_ok = |idx: usize| -> bool {
             // Check for KO evidence before the gap (within preceding 450 frames / 15s)
             let ko_start = idx.saturating_sub(fr(450));
             let p1_ko = (ko_start..idx)
-                .filter(|&j| !p1_norm[j].is_nan() && p1_norm[j] < 0.10)
+                .filter(|&j| !p1_norm[j].is_nan() && p1_norm[j] < 0.0875)
                 .count();
             let p2_ko = (ko_start..idx)
-                .filter(|&j| !p2_norm[j].is_nan() && p2_norm[j] < 0.10)
+                .filter(|&j| !p2_norm[j].is_nan() && p2_norm[j] < 0.0875)
                 .count();
             if p1_ko < 3 && p2_ko < 3 {
                 return false;
@@ -1445,11 +1582,11 @@ fn detect_rounds_for_replay(
             if !has_timer {
                 return false;
             }
-            // Both smoothed HP must reset to >0.90 after the gap
+            // Both smoothed HP must reset to >0.7875 after the gap
             let hp_check = (idx + fr(300)).min(n);
             (idx..hp_check).any(|j| {
                 !p1_smooth[j].is_nan() && !p2_smooth[j].is_nan()
-                    && p1_smooth[j] > 0.90 && p2_smooth[j] > 0.90
+                    && p1_smooth[j] > 0.7875 && p2_smooth[j] > 0.7875
             })
         };
 
@@ -1507,7 +1644,7 @@ fn detect_rounds_for_replay(
                     let current_min = p1_med.min(p2_med);
                     min_hp_local = min_hp_local.min(current_min);
 
-                    if p1_med > 0.75 && p2_med > 0.75 && min_hp_local < 0.55 {
+                    if p1_med > 0.65625 && p2_med > 0.65625 && min_hp_local < 0.48125 {
                         let mid_t = ts[gi] / 1000.0;
                         let start_t = ts[s_idx] / 1000.0;
                         let end_t = ts[e_idx.min(ts.len() - 1)] / 1000.0;
@@ -1561,6 +1698,22 @@ fn detect_rounds_for_replay(
         // next round's intro (empty bars before the HUD fills), not this round.
         const TAIL_BLOCK_MAX: usize = 60;
         const TAIL_GAP_MIN: usize = 90;
+        // The HUD (timer and bars) goes away at the slash after the KO and
+        // stays hidden through the win pose, loading screen and lobby, but
+        // the cleaned HP can be carried into them (the lobby after a file's
+        // last round is often just under the 20 s non-gameplay threshold).
+        // So a round also ends at its last timer reading plus a KO margin:
+        // the KO can land a few seconds after the last reading when a super
+        // cinematic hides the timer (measured up to 3.3 s on Tappa #4 and
+        // the 720p test VOD).  A hidden-HUD super can last 5.6 s (14_Grands),
+        // longer than the margin; that is only safe because the cleaner
+        // places a KO it did not see right after the last timer reading
+        // before the HUD went, so the loser is at 0 inside the margin.  A
+        // stopped clock after the KO is still read.
+        let e_idx = match (s_idx..e_idx).rev().find(|&j| timer_raw[j].is_some()) {
+            Some(lt) => (lt + 1 + fr(ROUND_KO_MARGIN)).min(e_idx),
+            None => e_idx,
+        };
         let has_hp = |j: usize| !p1_norm[j].is_nan() || !p2_norm[j].is_nan();
         let mut last_hp = (s_idx..e_idx).rev().find(|&j| has_hp(j));
         if let Some(last) = last_hp {
@@ -1952,9 +2105,11 @@ fn detect_rounds_for_replay(
     // - An impossible match is fixed by flipping a round the hearts disagree
     //   with, or an uncertain one, when exactly one such flip makes it
     //   possible.  It is confident when the hearts agree with the result.
-    //   A clean single KO on HP and a manually overridden round are never
-    //   flipped (a misread heart would otherwise turn a KO'd side into the
-    //   winner).
+    //   A single KO on HP is only considered when no other round can fix
+    //   the match, the hearts disagree with it, and it was a near double KO
+    //   (see below; such a flip stays uncertain); any other KO and a
+    //   manually overridden round are never flipped (a misread heart would
+    //   otherwise turn a KO'd side into the winner).
     // - A confident HP winner the hearts disagree with stays confident when
     //   the hearts' version would make its match impossible, and an
     //   uncertain one the hearts confirm or gave becomes confident when the
@@ -1991,13 +2146,32 @@ fn detect_rounds_for_replay(
             }
             continue;
         }
-        let cands: Vec<usize> = (s..e)
-            .filter(|&i| !fixed[i] && !hp_single_ko[i])
-            .filter(|&i| {
-                hearts_says[i].map_or(false, |h| h != results[i].winner) || !results[i].winner_confident
-            })
-            .filter(|&i| flipped_ok(i))
-            .collect();
+        let flippable = |i: usize, allow_ko: bool| -> bool {
+            !fixed[i]
+                && (allow_ko || !hp_single_ko[i])
+                && (hearts_says[i].map_or(false, |h| h != results[i].winner) || !results[i].winner_confident)
+                && flipped_ok(i)
+        };
+        let mut cands: Vec<usize> = (s..e).filter(|&i| flippable(i, false)).collect();
+        let mut ko_flip = false;
+        if cands.is_empty() {
+            // No other fix: a single KO on HP that the hearts made uncertain
+            // (they disagree with it) is a candidate too, when it is the
+            // only flip that makes the match possible and it was a near
+            // double KO (the HP winner at or below NEAR_DKO_HP).  Then which
+            // bar is empty comes down to a few pixels, and the cleaner can
+            // take a 1-px sliver for a KO; the hearts and the match rules
+            // together outweigh it, but only enough to change the winner:
+            // the round stays uncertain for the user to check.  A KO with a
+            // bar still clearly drawn on the winner's side, or a KO the
+            // hearts agree with or say nothing about, is never picked: a
+            // misread heart must not turn the KO'd side into the winner.
+            ko_flip = true;
+            cands = (s..e)
+                .filter(|&i| hp_single_ko[i] && !results[i].winner_confident
+                    && results[i].winner_final_hp <= NEAR_DKO_HP && flippable(i, true))
+                .collect();
+        }
         if cands.len() != 1 {
             eprintln!("[MATCH-DBG] rounds {}..{}: impossible match {:?}, {} candidate fixes; left as is",
                 s, e - 1, ws, cands.len());
@@ -2011,7 +2185,7 @@ fn detect_rounds_for_replay(
         let tmp = results[i].winner_final_hp;
         results[i].winner_final_hp = results[i].loser_final_hp;
         results[i].loser_final_hp = tmp;
-        results[i].winner_confident = hearts_says[i] == Some(new_winner);
+        results[i].winner_confident = !ko_flip && hearts_says[i] == Some(new_winner);
     }
 
     // A round cut off by the end of the video has no visible ending: the
@@ -2116,6 +2290,8 @@ fn compute_match_stats(
     };
 
     let comeback_count = rounds.iter().filter(|r| r.is_comeback).count();
+    // HP is the filled fraction of the bar: a close round is one the winner
+    // ended under 20 % of the bar (as the UI shows it).
     let close_rounds = rounds.iter().filter(|r| r.winner_final_hp < 0.20).count();
     let avg_winner_hp = if rounds.is_empty() {
         0.0
@@ -2318,6 +2494,15 @@ fn get_frame_data(db_path: String, replay_id: String) -> Result<Vec<FrameDataPoi
             .map_err(|e| e.to_string())?;
         rows.filter_map(|r| r.ok()).collect()
     };
+    // Older data reads a full bar at 0.875 (see replay_hp_full).
+    let hp_full = replay_hp_full(&conn, &replay_id);
+    let mut points = points;
+    if hp_full != 1.0 {
+        for p in points.iter_mut() {
+            p.p1_health_pct = p.p1_health_pct.map(|v| (v / hp_full).min(1.0));
+            p.p2_health_pct = p.p2_health_pct.map(|v| (v / hp_full).min(1.0));
+        }
+    }
 
     Ok(points)
 }
@@ -2335,7 +2520,7 @@ fn get_damage_events(db_path: String, replay_id: String) -> Result<Vec<DamageEve
         )
         .map_err(|e| e.to_string())?;
 
-    let events: Vec<DamageEvent> = stmt
+    let mut events: Vec<DamageEvent> = stmt
         .query_map([&replay_id], |row| {
             Ok(DamageEvent {
                 event_id: row.get(0)?,
@@ -2352,6 +2537,7 @@ fn get_damage_events(db_path: String, replay_id: String) -> Result<Vec<DamageEve
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
         .collect();
+    rescale_events(&mut events, replay_hp_full(&conn, &replay_id));
 
     Ok(events)
 }
@@ -2414,7 +2600,7 @@ fn get_match_stats(db_path: String, replay_id: String) -> Result<MatchStats, Str
         )
         .map_err(|e| e.to_string())?;
 
-    let events: Vec<DamageEvent> = stmt
+    let mut events: Vec<DamageEvent> = stmt
         .query_map([&replay_id], |row| {
             Ok(DamageEvent {
                 event_id: row.get(0)?,
@@ -2431,6 +2617,7 @@ fn get_match_stats(db_path: String, replay_id: String) -> Result<MatchStats, Str
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
         .collect();
+    rescale_events(&mut events, replay_hp_full(&conn, &replay_id));
 
     Ok(compute_match_stats(&replay, &rounds, &events))
 }
@@ -2448,7 +2635,7 @@ fn get_highlights(db_path: String, replay_id: String) -> Result<Vec<Highlight>, 
         )
         .map_err(|e| e.to_string())?;
 
-    let events: Vec<DamageEvent> = stmt
+    let mut events: Vec<DamageEvent> = stmt
         .query_map([&replay_id], |row| {
             Ok(DamageEvent {
                 event_id: row.get(0)?,
@@ -2465,6 +2652,7 @@ fn get_highlights(db_path: String, replay_id: String) -> Result<Vec<Highlight>, 
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
         .collect();
+    rescale_events(&mut events, replay_hp_full(&conn, &replay_id));
 
     Ok(generate_highlights(&rounds, &events))
 }
@@ -4208,7 +4396,7 @@ mod tests {
             for j in 0..n_play {
                 let s = j as f64 / rate;
                 let x = s / 44.0;
-                let hp = |f: f64| -> f64 { HP_CEILING * (1.0 - (1.0 - f) * x.min(1.0)) };
+                let hp = |f: f64| -> f64 { 1.0 - (1.0 - f) * x.min(1.0) };
                 let timer = if s < 3.0 { 99 } else { 99 - (s - 3.0) as i32 };
                 conn.execute(
                     "INSERT INTO frame_data VALUES ('r', ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -4346,9 +4534,132 @@ mod tests {
     }
 
     #[test]
+    fn test_match_rules_flip_a_near_double_ko_when_it_is_the_only_fix() {
+        // New VOD set 04 round 3: both sides end on slivers and the cleaner
+        // takes P1's for a KO, so on HP P2 won with 2 % left.  The hearts
+        // show P1 had won round 0 and that the match ended after round 1
+        // (a new match starts): P2 winning round 1 would leave it 1-1.  The
+        // only fix is round 1 itself: flipped to P1, but left uncertain (only
+        // the hearts and the match rules support it, and the hearts misread
+        // lost hearts).  With P2's bar still clearly drawn (10 %, 30 %) the
+        // KO is never flipped
+        // (test_match_rules_never_flip_a_clean_ko_on_a_misread_heart).
+        for (p2_final, winner, confident) in [(0.02, "P1", false), (0.1, "P2", false), (0.3, "P2", false)] {
+            let rounds = [(0.6, 0.0, 0, 0), (0.0, p2_final, 0, 1), (0.6, 0.0, 0, 0), (0.6, 0.0, 0, 1)];
+            let conn = synthetic_replay(&rounds, 30.0);
+            let r = detect_rounds_for_replay(&conn, "r").unwrap();
+            assert_eq!(r.len(), 4);
+            let starts: Vec<bool> = r.iter().map(|x| x.is_match_start).collect();
+            assert_eq!(starts, [true, false, true, false]);
+            assert_eq!((r[1].winner.as_str(), r[1].winner_confident), (winner, confident), "p2_final {}", p2_final);
+            assert_eq!((r[0].winner.as_str(), r[0].winner_confident), ("P1", true));
+            if winner == "P1" {
+                assert!(r[1].winner_final_hp <= KO_HP && r[1].loser_final_hp > KO_HP, "HP pair follows the winner");
+            }
+        }
+    }
+
+    #[test]
+    fn test_round_ends_at_its_last_timer_reading_plus_ko_margin() {
+        // The last round's KO lands at 93 s; the timer is hidden from 90 s
+        // (a super cinematic), so the KO comes 3 s after the last reading.
+        // Then 10 s of lobby follow with the cleaned HP carried and no
+        // timer (18 s without a timer in all, under the 20 s non-gameplay
+        // threshold).
+        // The round keeps its KO and ends within the KO margin of its last
+        // timer reading, not at the end of the lobby.
+        let conn = synthetic_replay(&[(0.6, 0.0, 0, 0), (0.5, 0.0, 0, 1)], 30.0);
+        conn.execute("UPDATE frame_data SET timer_value = NULL WHERE timestamp_ms >= 90000", []).unwrap();
+        for j in 0..(10 * 30) {
+            conn.execute(
+                "INSERT INTO frame_data VALUES ('r', ?1, ?2, 0.5, 0.0, NULL, NULL, NULL)",
+                rusqlite::params![10_000 + j, 98_000.0 + j as f64 * 1000.0 / 30.0],
+            ).unwrap();
+        }
+        let r = detect_rounds_for_replay(&conn, "r").unwrap();
+        assert_eq!(r.len(), 2);
+        assert_eq!((r[1].winner.as_str(), r[1].winner_confident), ("P1", true));
+        assert!(r[1].loser_final_hp <= KO_HP);
+        assert!(r[1].round_end_ms >= 93_000.0 && r[1].round_end_ms <= 96_000.0, "end {}", r[1].round_end_ms);
+    }
+
+    #[test]
+    fn test_ko_after_the_last_timer_reading_before_a_long_lobby_is_kept() {
+        // As above, but the lobby after the KO is long enough (25 s) to be
+        // non-gameplay (new VOD set 10 R9: the last round of a set, KO'd
+        // under the slash, the HUD never shown again).  The KO in the KO
+        // margin still decides the round.
+        let conn = synthetic_replay(&[(0.6, 0.0, 0, 0), (0.5, 0.0, 0, 1)], 30.0);
+        conn.execute("UPDATE frame_data SET timer_value = NULL WHERE timestamp_ms >= 90000", []).unwrap();
+        for j in 0..(25 * 30) {
+            conn.execute(
+                "INSERT INTO frame_data VALUES ('r', ?1, ?2, 0.5, 0.0, NULL, NULL, NULL)",
+                rusqlite::params![10_000 + j, 98_000.0 + j as f64 * 1000.0 / 30.0],
+            ).unwrap();
+        }
+        let r = detect_rounds_for_replay(&conn, "r").unwrap();
+        assert_eq!(r.len(), 2);
+        assert_eq!((r[1].winner.as_str(), r[1].winner_confident), ("P1", true));
+        assert!(r[1].loser_final_hp <= KO_HP, "l_hp {}", r[1].loser_final_hp);
+        // The KO (P2 under KO_HP from 92.8 s) ends the round.
+        assert!(r[1].round_end_ms >= 92_500.0 && r[1].round_end_ms <= 96_000.0, "end {}", r[1].round_end_ms);
+    }
+
+    #[test]
+    fn test_long_hud_gap_with_the_clock_running_is_not_a_round_break() {
+        // Tappa #4 14_Grands R6: a super cinematic hides the whole HUD for
+        // 6 s mid-round (more than the 5 s game-break gap); the clock reads
+        // 82 before and 76 after it.  Still one round.  The same gap with
+        // the clock showing a new round's 99 after it is a break.
+        let conn = synthetic_replay(&[(0.6, 0.0, 0, 0), (0.5, 0.0, 0, 1)], 30.0);
+        conn.execute("UPDATE frame_data SET p1_health_pct = NULL, p2_health_pct = NULL, timer_value = NULL
+                      WHERE timestamp_ms >= 69000 AND timestamp_ms < 75000", []).unwrap();
+        let r = detect_rounds_for_replay(&conn, "r").unwrap();
+        assert_eq!(r.len(), 2);
+        assert!(r[1].round_start_ms < 52_000.0, "start {}", r[1].round_start_ms);
+        assert_eq!((r[1].winner.as_str(), r[1].winner_confident), ("P1", true));
+
+        let ts: Vec<f64> = (0..400).map(|j| j as f64 * 1000.0 / 30.0).collect();
+        let mut timer: Vec<Option<i32>> = ts.iter().map(|&t| Some(84 - (t / 1000.0) as i32)).collect();
+        for v in timer[100..280].iter_mut() {
+            *v = None;
+        }
+        assert!(clock_continues(&timer, &ts, 99, 280));
+        // A lone misread after the gap is not supported; the next value is.
+        timer[280] = Some(99);
+        assert!(clock_continues(&timer, &ts, 99, 280));
+        for v in timer[280..].iter_mut() {
+            *v = Some(99);
+        }
+        assert!(!clock_continues(&timer, &ts, 99, 280), "a new round's intro");
+    }
+
+    #[test]
+    fn test_legacy_hp_scale_is_recognised() {
+        // Data from the March 2026 builds reads a full bar at 0.875: the
+        // same rounds give the same results on the 0..1 scale.
+        assert_eq!(hp_full_from_counts(9353, 1008), LEGACY_HP_FULL);
+        assert_eq!(hp_full_from_counts(1253, 2138), 1.0);
+        assert_eq!(hp_full_from_counts(10, 0), 1.0, "too few readings to tell");
+        let rounds = [(0.6, 0.0, 0, 0), (0.5, 0.0, 0, 1)];
+        let conn = synthetic_replay(&rounds, 30.0);
+        let now = detect_rounds_for_replay(&conn, "r").unwrap();
+        conn.execute("UPDATE frame_data SET p1_health_pct = p1_health_pct * 0.875,
+                      p2_health_pct = p2_health_pct * 0.875", []).unwrap();
+        assert_eq!(replay_hp_full(&conn, "r"), LEGACY_HP_FULL);
+        let old = detect_rounds_for_replay(&conn, "r").unwrap();
+        assert_eq!(old.len(), now.len());
+        for (a, b) in old.iter().zip(&now) {
+            assert_eq!((a.winner.as_str(), a.winner_confident), (b.winner.as_str(), b.winner_confident));
+            assert!((a.winner_final_hp - b.winner_final_hp).abs() < 1e-6);
+        }
+    }
+
+    #[test]
     fn test_a_one_pixel_sliver_is_not_a_ko() {
-        // P1 survives on a 1-px sliver (0.9 %) while P2 is KO'd (exactly 0).
-        let conn = synthetic_replay(&[(0.6, 0.0, 0, 0), (0.009, 0.0, 0, 1)], 30.0);
+        // P1 survives on a 1-px sliver (0.8 % of the bar at 1080p) while P2
+        // is KO'd (exactly 0).
+        let conn = synthetic_replay(&[(0.6, 0.0, 0, 0), (0.008, 0.0, 0, 1)], 30.0);
         let r = detect_rounds_for_replay(&conn, "r").unwrap();
         assert_eq!(r.len(), 2);
         assert_eq!((r[1].winner.as_str(), r[1].winner_confident), ("P1", true));
@@ -4549,7 +4860,7 @@ mod tests {
         let rounds = detect_rounds_for_replay(&conn, &replay).unwrap();
         for r in &rounds {
             println!(
-                "ROUND {} t={:.1}s-{:.1}s winner={} w_hp={:.3} l_hp={:.3} confident={} match_start={}",
+                "ROUND {} t={:.1}s-{:.1}s winner={} w_hp={:.3} l_hp={:.3} confident={} match_start={} w_min={:.3} deficit={:.3} comeback={}",
                 r.round_index,
                 r.round_start_ms / 1000.0,
                 r.round_end_ms / 1000.0,
@@ -4558,6 +4869,9 @@ mod tests {
                 r.loser_final_hp,
                 r.winner_confident,
                 r.is_match_start,
+                r.winner_min_hp,
+                r.max_deficit,
+                r.is_comeback,
             );
         }
     }

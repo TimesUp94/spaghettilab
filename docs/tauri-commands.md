@@ -173,7 +173,7 @@ fn get_frame_data(db_path: String, replay_id: String) -> Result<Vec<FrameDataPoi
 
 **Query:** `SELECT timestamp_ms, p1_health_pct, p2_health_pct, p1_tension_pct, p2_tension_pct FROM frame_data WHERE replay_id = ? ORDER BY timestamp_ms`
 
-**Notes:** Handles schema migrations gracefully. If the `p1_tension_pct` column doesn't exist (older DB), falls back to a query without tension columns and returns `None` for tension fields.
+**Notes:** Handles schema migrations gracefully. If the `p1_tension_pct` column doesn't exist (older DB), falls back to a query without tension columns and returns `None` for tension fields. HP from older data that reads a full bar at 0.875 is divided by 0.875 (`replay_hp_full`, see `docs/round-detection.md`, "HP scale").
 
 ---
 
@@ -186,6 +186,8 @@ fn get_damage_events(db_path: String, replay_id: String) -> Result<Vec<DamageEve
 **Purpose:** Fetch all damage events for a replay.
 
 **Query:** `SELECT event_id, replay_id, timestamp_ms, frame_start, frame_end, target_side, damage_pct, pre_health_pct, post_health_pct FROM damage_events WHERE replay_id = ? ORDER BY timestamp_ms`
+
+HP values of older (0.875-scale) data are rescaled as in `get_frame_data`.
 
 ---
 
@@ -218,7 +220,9 @@ fn get_match_stats(db_path: String, replay_id: String) -> Result<MatchStats, Str
 3. Fetch damage events
 4. Call `compute_match_stats()` which aggregates across all rounds and events
 
-**Computed fields:** Round wins, damage totals, biggest hits, duration stats, comeback count, close rounds, average winner HP.
+**Computed fields:** Round wins, damage totals, biggest hits, duration stats, comeback count, close rounds (winner ended under 20 % of the bar), average winner HP.
+
+All HP values (`winner_final_hp`, `loser_final_hp`, `winner_min_hp`, `max_deficit`, `damage_pct`, `p1/p2_health_pct`) are fractions of the bar: full = 1.0, KO = 0 (no `HP_CEILING` normalisation; see `docs/round-detection.md`, "HP scale").
 
 ---
 

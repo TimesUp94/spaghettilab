@@ -17,7 +17,8 @@ import numpy as np
 
 
 # -- Health signal constants --------------------------------------------------
-HP_CEILING = 0.875
+# HP is the filled fraction of the bar (a full bar is 1.0); the HP
+# thresholds are the old values (tuned on HP / 0.875) times 0.875.
 SMOOTH_WINDOW = 31        # ~2s at 15fps effective rate
 
 # -- Round detection ----------------------------------------------------------
@@ -64,8 +65,8 @@ def _find_round_boundaries(
 
     Returns the index of the first both-near-zero frame for each transition.
     """
-    BOTH_ZERO_THRESH = 0.08  # raw health below this = "near zero"
-    RECOVERY_THRESH = 0.55   # both bars must recover above this
+    BOTH_ZERO_THRESH = 0.07  # health below this = "near zero"
+    RECOVERY_THRESH = 0.48125  # both bars must recover above this
     RECOVERY_WINDOW = 120    # ~8s at 15fps — allow for long transitions
     MIN_ZERO_HOLD = 1        # at least 1 frame of both-near-zero
 
@@ -151,13 +152,13 @@ def _find_combat_start(
 ) -> int:
     """Walk backward from a round boundary to find where combat started.
 
-    Combat start = the frame where at least one player drops below 85%.
+    Combat start = the frame where at least one player drops below 74%.
     Stops at max lookback of MAX_ROUND_FRAMES or if another "both full"
     region is found (= previous round boundary).
     """
-    COMBAT_HP = 0.85
-    FULL_HP = 0.90
-    FULL_RUN_NEEDED = 5  # both above 90% for 5 frames = "both full"
+    COMBAT_HP = 0.74375
+    FULL_HP = 0.7875
+    FULL_RUN_NEEDED = 5  # both above FULL_HP for 5 frames = "both full"
 
     start = max(0, boundary_idx - MAX_ROUND_FRAMES)
     full_run = 0
@@ -201,11 +202,11 @@ def detect_rounds(conn: sqlite3.Connection, replay_id: str) -> list[RoundResult]
     p1_raw = np.array([r[1] for r in rows])
     p2_raw = np.array([r[2] for r in rows])
 
-    # Smooth + normalise
-    p1 = np.clip(_rolling_median(p1_raw, SMOOTH_WINDOW) / HP_CEILING, 0.0, 1.0)
-    p2 = np.clip(_rolling_median(p2_raw, SMOOTH_WINDOW) / HP_CEILING, 0.0, 1.0)
-    p1_raw_norm = np.clip(p1_raw / HP_CEILING, 0.0, 1.0)
-    p2_raw_norm = np.clip(p2_raw / HP_CEILING, 0.0, 1.0)
+    # Smooth + clip to [0, 1]
+    p1 = np.clip(_rolling_median(p1_raw, SMOOTH_WINDOW), 0.0, 1.0)
+    p2 = np.clip(_rolling_median(p2_raw, SMOOTH_WINDOW), 0.0, 1.0)
+    p1_raw_norm = np.clip(p1_raw, 0.0, 1.0)
+    p2_raw_norm = np.clip(p2_raw, 0.0, 1.0)
 
     # Find round boundaries (SLASH!/DESTROYED transitions)
     boundaries = _find_round_boundaries(ts, p1_raw_norm, p2_raw_norm)

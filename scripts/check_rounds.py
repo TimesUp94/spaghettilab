@@ -14,7 +14,9 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 DB = ROOT / "output" / "sets_test" / "analysis.db"
 
-HP_CEILING = 0.875
+# HP is the filled fraction of the bar (health.py measures fill/total, so a
+# full bar is 1.0).  The HP thresholds below are the old values (tuned on HP
+# divided by 0.875 a second time) times 0.875, as in lib.rs.
 MIN_ROUND_FRAMES = 450  # ~15 seconds
 TIMER_SMOOTH_WINDOW = 61
 HP_RESET_WINDOW = 90
@@ -83,12 +85,12 @@ def main():
     p2_raw = [r[2] if r[2] is not None else float('nan') for r in rows]
     timer_raw = [r[3] for r in rows]  # None or int
 
-    # Normalize by ceiling
-    p1_norm = [min(1.0, max(0.0, v / HP_CEILING)) if not np.isnan(v) else float('nan') for v in p1_raw]
-    p2_norm = [min(1.0, max(0.0, v / HP_CEILING)) if not np.isnan(v) else float('nan') for v in p2_raw]
+    # Clip to [0, 1] (HP is already the filled fraction of the bar)
+    p1_norm = [min(1.0, max(0.0, v)) if not np.isnan(v) else float('nan') for v in p1_raw]
+    p2_norm = [min(1.0, max(0.0, v)) if not np.isnan(v) else float('nan') for v in p2_raw]
 
     # Junk data filter
-    junk_thresh = 0.35
+    junk_thresh = 0.30625
     junk_window = 150
     p1_junk = rolling_median(p1_norm, junk_window)
     p2_junk = rolling_median(p2_norm, junk_window)
@@ -137,7 +139,7 @@ def main():
         if not np.isnan(p1_rm[i]) and not np.isnan(p2_rm[i]):
             current_min = min(p1_rm[i], p2_rm[i])
             min_hp_since_reset = min(min_hp_since_reset, current_min)
-            if p1_rm[i] > 0.85 and p2_rm[i] > 0.85 and min_hp_since_reset < 0.50:
+            if p1_rm[i] > 0.74375 and p2_rm[i] > 0.74375 and min_hp_since_reset < 0.4375:
                 if not hp_resets or i - hp_resets[-1] > MIN_ROUND_FRAMES:
                     hp_resets.append(i)
                     min_hp_since_reset = current_min
@@ -214,13 +216,13 @@ def main():
 
         search_start = s + int(span * 0.4)
 
-        # Count KO frames (HP < 0.15 with other player NOT at full)
+        # Count KO frames (HP < 0.13125 with other player NOT at full)
         p1_ko = sum(1 for j in range(search_start, e)
-                     if not np.isnan(p1_norm[j]) and p1_norm[j] < 0.15
-                     and not np.isnan(p2_norm[j]) and p2_norm[j] < 0.90)
+                     if not np.isnan(p1_norm[j]) and p1_norm[j] < 0.13125
+                     and not np.isnan(p2_norm[j]) and p2_norm[j] < 0.7875)
         p2_ko = sum(1 for j in range(search_start, e)
-                     if not np.isnan(p2_norm[j]) and p2_norm[j] < 0.15
-                     and not np.isnan(p1_norm[j]) and p1_norm[j] < 0.90)
+                     if not np.isnan(p2_norm[j]) and p2_norm[j] < 0.13125
+                     and not np.isnan(p1_norm[j]) and p1_norm[j] < 0.7875)
 
         winner = None
         method = ""
@@ -235,15 +237,15 @@ def main():
             # Both have KO frames — check first-to-zero
             if p1_ko >= 3 and p2_ko >= 3:
                 first_p1 = next((j for j in range(search_start, e)
-                                 if not np.isnan(p1_norm[j]) and p1_norm[j] < 0.05), None)
+                                 if not np.isnan(p1_norm[j]) and p1_norm[j] < 0.04375), None)
                 first_p2 = next((j for j in range(search_start, e)
-                                 if not np.isnan(p2_norm[j]) and p2_norm[j] < 0.05), None)
+                                 if not np.isnan(p2_norm[j]) and p2_norm[j] < 0.04375), None)
                 if first_p1 is not None and first_p2 is not None:
                     gap = abs(first_p1 - first_p2)
                     if gap <= 90:
                         earlier, later, earlier_is_p1 = (first_p1, first_p2, True) if first_p1 < first_p2 else (first_p2, first_p1, False)
                         other_at_earlier = p2_norm[earlier] if earlier_is_p1 else p1_norm[earlier]
-                        if not np.isnan(other_at_earlier) and other_at_earlier > 0.15:
+                        if not np.isnan(other_at_earlier) and other_at_earlier > 0.13125:
                             winner = "P2" if earlier_is_p1 else "P1"
                             method = "first-to-zero"
 
@@ -266,7 +268,7 @@ def main():
 
                 # Cluster KO frames
                 ko_frames = [(j, p1, p2) for j, p1, p2 in valid_frames
-                             if min(p1, p2) < best_min_hp + 0.10]
+                             if min(p1, p2) < best_min_hp + 0.0875]
 
                 if ko_frames:
                     clusters = [[ko_frames[0]]]
@@ -288,7 +290,7 @@ def main():
                     ep2 = best_p2
 
                 hp_diff = abs(ep1 - ep2)
-                if hp_diff >= 0.15:
+                if hp_diff >= 0.13125:
                     winner = "P1" if ep1 >= ep2 else "P2"
                     method = f"KO-moment(diff={hp_diff:.2f})"
                 else:
@@ -304,8 +306,8 @@ def main():
                     min_signal = p2_min_last - p1_min_last
 
                     # Transition artifact detection
-                    if (0.40 <= p1_min_last <= 0.55 and 0.40 <= p2_min_last <= 0.55
-                            and abs(min_signal) < 0.05):
+                    if (0.35 <= p1_min_last <= 0.48125 and 0.35 <= p2_min_last <= 0.48125
+                            and abs(min_signal) < 0.04375):
                         min_signal = 0.0
 
                     # Avg HP in last 25%
@@ -314,7 +316,7 @@ def main():
                     p2_avg_vals = []
                     for j in range(last_quarter, e):
                         if not np.isnan(p1_smooth[j]) and not np.isnan(p2_smooth[j]):
-                            if p1_smooth[j] < 0.60 and p2_smooth[j] < 0.60:
+                            if p1_smooth[j] < 0.525 and p2_smooth[j] < 0.525:
                                 continue
                             p1_avg_vals.append(p1_smooth[j])
                             p2_avg_vals.append(p2_smooth[j])
@@ -325,7 +327,7 @@ def main():
                         avg_signal = ep2 - ep1
 
                     hp_range = abs(p1_min_last - p2_min_last)
-                    min_weight = min(hp_range / 0.20, 0.8)
+                    min_weight = min(hp_range / 0.175, 0.8)
                     avg_weight = 1.0 - min_weight
                     combined = min_signal * min_weight + avg_signal * avg_weight
                     winner = "P2" if combined > 0 else "P1"

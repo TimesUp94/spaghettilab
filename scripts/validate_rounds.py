@@ -7,7 +7,9 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-HP_CEILING = 0.875
+# HP is the filled fraction of the bar (health.py measures fill/total, so a
+# full bar is 1.0).  The HP thresholds below are the old values (tuned on HP
+# divided by 0.875 a second time) times 0.875, as in lib.rs.
 MIN_ROUND_FRAMES = 450  # 15s at 30fps
 
 
@@ -44,17 +46,17 @@ def find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm=None, p2_norm=None, 
     """
     span = e_idx - s_idx
     search_start = s_idx + int(span * 0.4)
-    # Early check: count raw frames with HP < 0.15 in last 60%.
+    # Early check: count raw frames with HP < 0.13125 in last 60%.
     # Filter post-KO garbage: only count if the OTHER player is NOT at full HP.
     # After a KO, the winning player's bar resets to ~1.0 while the loser's
     # shows residual low values — these aren't real combat frames.
     if p1_norm is not None and p2_norm is not None:
         p1_ko = sum(1 for j in range(search_start, e_idx)
-                    if not np.isnan(p1_norm[j]) and p1_norm[j] < 0.15
-                    and not np.isnan(p2_norm[j]) and p2_norm[j] < 0.90)
+                    if not np.isnan(p1_norm[j]) and p1_norm[j] < 0.13125
+                    and not np.isnan(p2_norm[j]) and p2_norm[j] < 0.7875)
         p2_ko = sum(1 for j in range(search_start, e_idx)
-                    if not np.isnan(p2_norm[j]) and p2_norm[j] < 0.15
-                    and not np.isnan(p1_norm[j]) and p1_norm[j] < 0.90)
+                    if not np.isnan(p2_norm[j]) and p2_norm[j] < 0.13125
+                    and not np.isnan(p1_norm[j]) and p1_norm[j] < 0.7875)
         if p1_ko >= 3 and p1_ko >= p2_ko * 3 + 1:
             return "P2", "[0.00, 1.00]"
         if p2_ko >= 3 and p2_ko >= p1_ko * 3 + 1:
@@ -66,27 +68,27 @@ def find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm=None, p2_norm=None, 
         # it's a wallbreak/comeback — let the KO clustering handle it.
         if p1_ko >= 3 and p2_ko >= 3:
             first_p1 = next((j for j in range(search_start, e_idx)
-                            if not np.isnan(p1_norm[j]) and p1_norm[j] < 0.05), None)
+                            if not np.isnan(p1_norm[j]) and p1_norm[j] < 0.04375), None)
             first_p2 = next((j for j in range(search_start, e_idx)
-                            if not np.isnan(p2_norm[j]) and p2_norm[j] < 0.05), None)
+                            if not np.isnan(p2_norm[j]) and p2_norm[j] < 0.04375), None)
             if first_p1 is not None and first_p2 is not None:
                 gap = abs(first_p1 - first_p2)
                 if gap <= 90:
                     # KO animation: first to zero is real loser, BUT only
-                    # if it's a one-sided KO (other player > 0.15).
+                    # if it's a one-sided KO (other player > 0.13125).
                     # If the earlier zero has both players near KO, it's
                     # ambiguous — check the later zero instead.
                     earlier, later = (first_p1, first_p2) if first_p1 < first_p2 else (first_p2, first_p1)
                     earlier_is_p1 = first_p1 < first_p2
                     other_at_earlier = p2_norm[earlier] if earlier_is_p1 else p1_norm[earlier]
                     other_at_later = p1_norm[later] if earlier_is_p1 else p2_norm[later]
-                    if other_at_earlier > 0.15:
+                    if other_at_earlier > 0.13125:
                         # Earlier zero is one-sided — earlier player died
                         if earlier_is_p1:
                             return "P2", "[0.00, 1.00]"
                         else:
                             return "P1", "[1.00, 0.00]"
-                    elif other_at_later > 0.15:
+                    elif other_at_later > 0.13125:
                         # Earlier zero was ambiguous, but later zero is
                         # one-sided — later player died
                         if earlier_is_p1:
@@ -113,7 +115,7 @@ def find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm=None, p2_norm=None, 
         # temporal clusters. Use the LAST cluster since KO happens at round end.
         # This avoids mixing disconnected mid-round dips with the actual KO.
         ko_frames = [(j, p1, p2) for j, p1, p2 in valid_frames
-                     if min(p1, p2) < best_min_hp + 0.10]
+                     if min(p1, p2) < best_min_hp + 0.0875]
         if not ko_frames:
             ko_frames = [(search_start, best_p1, best_p2)]
 
@@ -134,7 +136,7 @@ def find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm=None, p2_norm=None, 
         hp_diff = abs(p1_med - p2_med)
 
         # Clear KO moment — use it directly
-        if hp_diff >= 0.15:
+        if hp_diff >= 0.13125:
             winner = "P1" if p1_med > p2_med else "P2"
             return winner, f"[{p1_med:.2f}, {p2_med:.2f}]"
 
@@ -152,19 +154,19 @@ def find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm=None, p2_norm=None, 
 
         min_signal = p2_min_last - p1_min_last  # positive = P1 went lower = P2 wins
 
-        # Detect transition artifact: both min values in [0.40, 0.55] with
+        # Detect transition artifact: both min values in [0.35, 0.48125] with
         # tiny difference = "loading screen" where both bars show ~50%.
-        if (0.40 <= p1_min_last <= 0.55 and 0.40 <= p2_min_last <= 0.55
-                and abs(min_signal) < 0.05):
+        if (0.35 <= p1_min_last <= 0.48125 and 0.35 <= p2_min_last <= 0.48125
+                and abs(min_signal) < 0.04375):
             min_signal = 0.0
 
         # Average HP in last 25%. Exclude transition artifacts where both
-        # bars drop simultaneously below 0.60 (loading screen pattern).
+        # bars drop simultaneously below 0.525 (loading screen pattern).
         p1_vals = []
         p2_vals = []
         for j in range(last_q_start, e_idx):
             if not np.isnan(p1_smooth[j]) and not np.isnan(p2_smooth[j]):
-                if p1_smooth[j] < 0.60 and p2_smooth[j] < 0.60:
+                if p1_smooth[j] < 0.525 and p2_smooth[j] < 0.525:
                     continue
                 p1_vals.append(p1_smooth[j])
                 p2_vals.append(p2_smooth[j])
@@ -177,7 +179,7 @@ def find_winner(p1_smooth, p2_smooth, s_idx, e_idx, p1_norm=None, p2_norm=None, 
         # difference is noise (transition artifacts, OCR jitter). Use
         # avg_signal which captures the post-round result screen HP.
         hp_range = abs(p1_min_last - p2_min_last)
-        min_weight = min(hp_range / 0.20, 0.8)
+        min_weight = min(hp_range / 0.175, 0.8)
         avg_weight = 1.0 - min_weight
         combined = min_signal * min_weight + avg_signal * avg_weight
         winner = "P2" if combined > 0 else "P1"
@@ -191,8 +193,8 @@ def detect_rounds(rows):
     """Detect rounds from frame data rows."""
     n = len(rows)
     timestamps = [r[1] for r in rows]
-    p1_norm = [min(r[2] / HP_CEILING, 1.0) if r[2] is not None else float("nan") for r in rows]
-    p2_norm = [min(r[3] / HP_CEILING, 1.0) if r[3] is not None else float("nan") for r in rows]
+    p1_norm = [min(r[2], 1.0) if r[2] is not None else float("nan") for r in rows]
+    p2_norm = [min(r[3], 1.0) if r[3] is not None else float("nan") for r in rows]
     timer_raw = [r[4] for r in rows]
 
     # Forward-fill + smooth timer with wider window (61 frames = ~2s)
@@ -212,7 +214,7 @@ def detect_rounds(rows):
     p2_junk = rolling_median(p2_norm, 150)
     for i in range(n):
         if not np.isnan(p1_junk[i]) and not np.isnan(p2_junk[i]):
-            if p1_junk[i] < 0.35 and p2_junk[i] < 0.35:
+            if p1_junk[i] < 0.30625 and p2_junk[i] < 0.30625:
                 p1_norm[i] = float("nan")
                 p2_norm[i] = float("nan")
 
@@ -244,7 +246,7 @@ def detect_rounds(rows):
                         lowest_since_start = t
 
     # HP reset detection: both HP go from low to high, indicating new round
-    # Use rolling median HP over 90 frames (3s). When BOTH medians are > 0.85
+    # Use rolling median HP over 90 frames (3s). When BOTH medians are > 0.74375
     # after a point where at least one was < 0.50, that's a round boundary.
     hp_resets = []
     p1_rm = rolling_median(p1_norm, 90)
@@ -254,7 +256,7 @@ def detect_rounds(rows):
         if not np.isnan(p1_rm[i]) and not np.isnan(p2_rm[i]):
             current_min = min(p1_rm[i], p2_rm[i])
             min_hp_since_reset = min(min_hp_since_reset, current_min)
-            if p1_rm[i] > 0.85 and p2_rm[i] > 0.85 and min_hp_since_reset < 0.50:
+            if p1_rm[i] > 0.74375 and p2_rm[i] > 0.74375 and min_hp_since_reset < 0.4375:
                 if not hp_resets or (i - hp_resets[-1]) > MIN_ROUND_FRAMES:
                     hp_resets.append(i)
                     min_hp_since_reset = current_min
@@ -320,14 +322,14 @@ def detect_rounds(rows):
     # Alternative confirmation: KO evidence before gap + HP reset after.
     # Handles wallbreak transitions where timer reads ~90 (OCR confusion with 99).
     # Requires: 1) one player's HP was near zero before the gap (KO happened),
-    #           2) timer ≥ 90 nearby, 3) both HP reset to > 0.90 after gap.
+    #           2) timer ≥ 90 nearby, 3) both HP reset to > 0.7875 after gap.
     def round_reset_ok(idx):
         # Check for KO evidence before the gap (within preceding 450 frames / 15s)
         ko_start = max(0, idx - 450)
         p1_ko = sum(1 for j in range(ko_start, idx)
-                    if not np.isnan(p1_norm[j]) and p1_norm[j] < 0.10)
+                    if not np.isnan(p1_norm[j]) and p1_norm[j] < 0.0875)
         p2_ko = sum(1 for j in range(ko_start, idx)
-                    if not np.isnan(p2_norm[j]) and p2_norm[j] < 0.10)
+                    if not np.isnan(p2_norm[j]) and p2_norm[j] < 0.0875)
         if p1_ko < 3 and p2_ko < 3:
             return False
         # Timer must be ≥ 90 nearby
@@ -336,11 +338,11 @@ def detect_rounds(rows):
                         for j in range(idx, timer_near))
         if not has_timer:
             return False
-        # Both HP must reset to > 0.90 after the gap
+        # Both HP must reset to > 0.7875 after the gap
         hp_check = min(idx + 300, n)
         for j in range(idx, hp_check):
             if not np.isnan(p1_smooth[j]) and not np.isnan(p2_smooth[j]):
-                if p1_smooth[j] > 0.90 and p2_smooth[j] > 0.90:
+                if p1_smooth[j] > 0.7875 and p2_smooth[j] > 0.7875:
                     return True
         return False
 
@@ -381,7 +383,7 @@ def detect_rounds(rows):
             if not np.isnan(p1_local[j]) and not np.isnan(p2_local[j]):
                 current_min = min(p1_local[j], p2_local[j])
                 min_hp_local = min(min_hp_local, current_min)
-                if p1_local[j] > 0.75 and p2_local[j] > 0.75 and min_hp_local < 0.55:
+                if p1_local[j] > 0.65625 and p2_local[j] > 0.65625 and min_hp_local < 0.48125:
                     real_idx = s_idx + j
                     mid_t = timestamps[real_idx] / 1000.0
                     dur1 = mid_t - start_t
