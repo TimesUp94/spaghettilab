@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 from replanal.config import PipelineConfig
-from replanal.extractors.timer import TimerExtractor
+from replanal.extractors.timer import TimerExtractor, finalize_timer
 from replanal.models import FrameContext, FrameData
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -142,3 +142,57 @@ def test_labels_cover_every_digit():
               if e["label"] not in ("none", "unreadable")]
     assert {v % 10 for v in values} == set(range(10))
     assert {v // 10 for v in values} >= {2, 3, 4, 5, 6, 7, 8, 9}
+
+
+# New-VOD set 07 (720p60, upscaled), the last seconds of R3: GGST draws one
+# centred orange/yellow digit, a little larger than the two-digit glyphs.
+@pytest.mark.parametrize("name,expected", [
+    ("single_9.png", 9),
+    ("single_8.png", 8),
+    ("single_7.png", 7),
+    ("single_6.png", 6),
+    ("single_5.png", 5),
+    ("single_covered8.png", None),  # an 8 under a white streak (read 3 without the quadrant check)
+])
+def test_reads_single_digit_timer(extractor, config, name, expected):
+    assert _read_crop(extractor, config, DATA / name) == expected
+
+
+def test_single_digit_path_needs_the_warm_colour(extractor):
+    # The same glyph in grey (or the cream two-digit colour) is not read as a
+    # single digit: grey-only input never takes that path.
+    crop = cv2.imread(str(DATA / "single_8.png"))
+    grey = cv2.cvtColor(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
+    frame = np.zeros((1080, 1920, 3), np.uint8)
+    frame[100:185, 895:1025] = grey
+    roi = frame[115:170, 920:1000]
+    assert extractor.read(roi) is None
+
+
+def _timed(values, fps=30.0):
+    out = []
+    for i, v in enumerate(values):
+        f = FrameData(frame_number=i, timestamp_ms=i * 1000.0 / fps)
+        f.timer_value = v
+        out.append(f)
+    return out
+
+
+def test_single_digit_must_continue_the_countdown():
+    # S07 R3: 11, 10, then the single warm digits 9..5: all kept.
+    vals = [11] * 30 + [10] * 30 + [d for d in range(9, 4, -1) for _ in range(30)]
+    frames = _timed(vals)
+    assert finalize_timer(frames) == 0
+    assert [f.timer_value for f in frames] == vals
+
+
+def test_single_digit_with_the_tens_digit_covered_is_dropped():
+    # Tappa #4 04_UF 144.47 s: "7" read for one frame while the clock shows
+    # 97; a covered tens digit held for a second ("7" for 67) is dropped too.
+    vals = [97] * 20 + [7] + [97] * 9 + [96] * 30 + [67] * 20 + [7] * 30 + [66] * 30
+    frames = _timed(vals)
+    assert finalize_timer(frames) == 31
+    assert frames[20].timer_value is None and frames[20].timer_raw == 7
+    assert all(f.timer_value != 7 for f in frames)
+    # Re-running from the raw readings gives the same result.
+    assert finalize_timer(frames) == 31

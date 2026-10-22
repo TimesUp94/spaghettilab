@@ -1,6 +1,7 @@
 """Timer digit reader.
 
-Reads the two-digit round timer from the GGS HUD.
+Reads the round timer from the GGS HUD: two digits, or the single warm
+digit of the last 9 seconds.
 
 The digits are cream-coloured glyphs on the dark circular "ROUND TIME" badge.
 The two digits sit at fixed, *staggered* positions (the ones digit is drawn
@@ -60,6 +61,30 @@ RETRY_SCORE = 0.5
 MAX_QUADRANT = {"tens": 0.95, "ones": 1.2}
 
 _DEFAULT_TEMPLATES = Path(__file__).resolve().parent / "timer_glyphs.npz"
+
+# Single digits (the last 9 seconds): GGST draws one centred digit, in orange
+# / yellow instead of cream, pulsing slightly larger now and then.  Read only
+# when the two cells give no value and the lit glyph pixels are clearly warm
+# (median HSV saturation of pixels with V >= SINGLE_LIT_V at least
+# SINGLE_MIN_SAT, on at least SINGLE_MIN_LIT of the ROI), so the cream
+# two-digit timer and grey-only input never take this path.  The glyph is
+# searched within +-SINGLE_SEARCH px of the ROI centre at each scale of
+# SINGLE_SCALES (glyph size relative to the templates; the single digit is
+# drawn ~10-25 % larger than the two-digit glyphs).
+SINGLE_LIT_V = 140
+SINGLE_MIN_SAT = 90
+SINGLE_MIN_LIT = 0.05
+# ... at most SINGLE_MAX_LIT of the ROI lit (the digits measure 0.12-0.24;
+# fire and flash cinematics 0.9+), and at most SINGLE_MAX_STRAY of the lit
+# pixels outside the centred glyph box SINGLE_BOX (y1, y2, x1, x2 at the
+# 80x55 reference size; digits <= 0.08, two sprite streaks 0.15).
+SINGLE_MAX_LIT = 0.35
+SINGLE_MAX_STRAY = 0.10
+SINGLE_BOX = (2, 53, 18, 62)
+SINGLE_SEARCH = 8
+SINGLE_SCALES = (1.0, 1.05, 1.1, 1.15, 1.2, 1.25, 1.3)
+SINGLE_MARGIN = 0.06
+SINGLE_QUADRANT = 1.05
 
 # Nominal top-left corner (y, x) of each glyph box in the padded ROI.
 # Overridden by the "cells" array stored with the templates.
@@ -156,6 +181,27 @@ def read_cell(padded: np.ndarray, cell: tuple[int, int], glyph_sets: list[np.nda
     return None
 
 
+def is_warm_digit(roi_bgr: np.ndarray) -> bool:
+    """Does the ROI look like the single warm digit (see SINGLE_*)?
+
+    Lit pixels must be warm, cover a digit's share of the ROI (not a whole
+    fire or flash cinematic) and stay inside the centred glyph box (two
+    sprite streaks side by side are not one digit).
+    """
+    if roi_bgr.shape[:2] != (ROI_H, ROI_W):
+        roi_bgr = cv2.resize(roi_bgr, (ROI_W, ROI_H), interpolation=cv2.INTER_AREA)
+    hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+    lit = hsv[..., 2] >= SINGLE_LIT_V
+    share = float(lit.mean())
+    if share < SINGLE_MIN_LIT or share > SINGLE_MAX_LIT:
+        return False
+    y1, y2, x1, x2 = SINGLE_BOX
+    inside = int(lit[y1:y2, x1:x2].sum())
+    if 1.0 - inside / lit.sum() > SINGLE_MAX_STRAY:
+        return False
+    return float(np.median(hsv[..., 1][lit])) >= SINGLE_MIN_SAT
+
+
 def load_templates(path: Path | None = None) -> tuple[np.ndarray, dict[str, tuple[int, int]]] | None:
     path = Path(path or _DEFAULT_TEMPLATES)
     if not path.exists():
@@ -199,11 +245,100 @@ class TimerExtractor(BaseExtractor):
         for name in ("tens", "ones"):
             d = read_cell(padded, self._cells[name], self._glyph_sets, MAX_QUADRANT[name])
             if d is None:
-                return None
+                return self._read_single(roi, padded)
             digits.append(d)
         return digits[0] * 10 + digits[1]
+
+    def _read_single(self, roi: np.ndarray, padded: np.ndarray) -> int | None:
+        """The one centred warm digit shown for the last 9 seconds, or None.
+
+        Every scale of SINGLE_SCALES is tried; the best-scoring (scale, digit)
+        wins if it beats the runner-up digit at that scale by SINGLE_MARGIN
+        and passes the per-quadrant check.
+        """
+        if roi.ndim != 3 or not is_warm_digit(roi):
+            return None
+        best = None
+        for scale in SINGLE_SCALES:
+            img = padded if scale == 1.0 else cv2.resize(
+                padded, (round(padded.shape[1] / scale), round(padded.shape[0] / scale)),
+                interpolation=cv2.INTER_AREA)
+            h, w = img.shape
+            y0 = (h - GLYPH_H) // 2 - SINGLE_SEARCH
+            x0 = (w - GLYPH_W) // 2 - SINGLE_SEARCH
+            window = img[max(0, y0):y0 + GLYPH_H + 2 * SINGLE_SEARCH,
+                         max(0, x0):x0 + GLYPH_W + 2 * SINGLE_SEARCH]
+            if window.shape[0] < GLYPH_H or window.shape[1] < GLYPH_W:
+                continue
+            scores, locs = score_cell(window, self._glyphs)
+            order = np.argsort(scores)[::-1]
+            d, top, second = int(order[0]), float(scores[order[0]]), float(scores[order[1]])
+            if best is None or top > best[0]:
+                best = (top, top - second, d, window, locs[d])
+        if best is None:
+            return None
+        top, margin, d, window, (by, bx) = best
+        if top < MIN_SCORE or margin < SINGLE_MARGIN or d == 1:
+            # A lone "1" is a plain bar: vertical orange beams and streaks
+            # match it.  It is shown for the round's last second only.
+            return None
+        patch = window[by:by + GLYPH_H, bx:bx + GLYPH_W]
+        if worst_quadrant(patch, self._glyphs[d]) > SINGLE_QUADRANT:
+            return None
+        return d
 
     def extract(self, ctx: FrameContext, data: FrameData) -> None:
         value = self.read(ctx.rois.get("timer_digits"))
         if value is not None:
             data.timer_value = value
+
+
+# finalize_timer: a reading is supported when at least SUPPORT_RUN readings
+# (itself included) within +-SUPPORT_MS show the same value (the clock shows
+# each value for a second).
+SUPPORT_RUN = 3
+SUPPORT_MS = 500.0
+
+
+def finalize_timer(frames: list[FrameData]) -> int:
+    """Replay-level check of the single-digit readings, in place.
+
+    The single warm digit is only shown for the last 9 seconds of a round,
+    so it must continue the countdown: a single-digit reading is kept only
+    when it is supported (see SUPPORT_RUN) and the last supported reading
+    before it (``p``, ``dt`` seconds earlier) could have counted down to it:
+    ``p - dt - 1 <= value <= p``.  A tens digit covered by a hit spark or a
+    fist reads "7" for 97 or 67 on a frame or two, which would otherwise
+    look like a timer jump (round end / new round).  Two-digit readings are
+    left alone.  The raw values stay in ``timer_raw``.  Returns the number
+    of readings dropped.
+    """
+    for f in frames:
+        if f.timer_raw is None:
+            f.timer_raw = f.timer_value
+    seen = [i for i, f in enumerate(frames) if f.timer_raw is not None]
+    vals = [frames[i].timer_raw for i in seen]
+    ts = [frames[i].timestamp_ms for i in seen]
+    supported = []
+    lo = hi = 0
+    for k in range(len(seen)):
+        while ts[lo] < ts[k] - SUPPORT_MS:
+            lo += 1
+        while hi < len(seen) and ts[hi] <= ts[k] + SUPPORT_MS:
+            hi += 1
+        supported.append(sum(1 for j in range(lo, hi) if vals[j] == vals[k]) >= SUPPORT_RUN)
+    dropped = 0
+    prev = None  # (value, timestamp_ms) of the last supported, kept reading
+    for k, i in enumerate(seen):
+        v = vals[k]
+        keep = True
+        if v <= 9:
+            keep = supported[k]
+            if keep and prev is not None:
+                p, tp = prev
+                keep = p - (ts[k] - tp) / 1000.0 - 1 <= v <= p
+        frames[i].timer_value = v if keep else None
+        dropped += not keep
+        if keep and supported[k]:
+            prev = (v, ts[k])
+    return dropped
