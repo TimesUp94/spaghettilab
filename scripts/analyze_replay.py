@@ -17,8 +17,8 @@ from replanal.config import PipelineConfig
 from replanal.extractors.health import HealthBarExtractor
 from replanal.extractors.round_counter import RoundCounterExtractor
 from replanal.extractors.scene import SceneDetector
-from replanal.extractors.tension import TensionExtractor
-from replanal.extractors.timer import TimerExtractor
+from replanal.extractors.tension import TensionExtractor, finalize_tension
+from replanal.extractors.timer import TimerExtractor, finalize_timer
 from replanal.pipeline import ReplayPipeline
 from replanal.extractors.combo import ComboCounterExtractor, combos_to_records, derive_combos
 from replanal.storage import init_db, write_combos, write_damage_events, write_frame_data, write_frame_parquet, write_replay
@@ -58,6 +58,13 @@ def main():
 
     frames = pipeline.process_video(video_path)
     print(f"  Processed {len(frames)} frames")
+    dropped = finalize_timer(frames)
+    if dropped:
+        print(f"  Dropped {dropped} single-digit timer readings that do not continue the countdown")
+    ceilings = finalize_tension(frames)
+    for attr, c in ceilings.items():
+        if c is not None:
+            print(f"  {attr[:2].upper()} tension bar covered beyond {c:.0%} (stream overlay): readings there dropped")
 
     # Aggregate damage events
     aggregator = HealthAggregator(config.health_bar)

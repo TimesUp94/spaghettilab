@@ -54,6 +54,11 @@ class FrameData:
     timer_value: Optional[int] = None
     p1_tension_pct: Optional[float] = None
     p2_tension_pct: Optional[float] = None
+    # Per-frame readings before the replay-level clean-up (finalize_timer,
+    # finalize_tension), kept so it can be re-run from the parquet.
+    timer_raw: Optional[int] = None
+    p1_tension_raw: Optional[float] = None
+    p2_tension_raw: Optional[float] = None
     p1_burst_available: Optional[bool] = None
     p2_burst_available: Optional[bool] = None
     p1_rounds_won: Optional[int] = None

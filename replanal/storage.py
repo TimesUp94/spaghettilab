@@ -180,6 +180,12 @@ def write_frame_parquet(output_dir: Path, replay_id: str, frames: list[FrameData
             ("p2_pending_pct", pa.float64()),
             ("p1_health_conf", pa.float64()),
             ("p2_health_conf", pa.float64()),
+            # Readings before the replay-level clean-up (finalize_timer,
+            # finalize_tension; timer_value and p1/p2_tension_pct above are
+            # the cleaned values), so reclean_replay.py can re-run it.
+            ("timer_raw", pa.int32()),
+            ("p1_tension_raw", pa.float64()),
+            ("p2_tension_raw", pa.float64()),
         ])
 
         arrays = [
@@ -200,6 +206,11 @@ def write_frame_parquet(output_dir: Path, replay_id: str, frames: list[FrameData
             pa.array([_raw_attr(f.p2_health_raw, "pending_pct") for f in frames], type=pa.float64()),
             pa.array([_raw_attr(f.p1_health_raw, "confidence") for f in frames], type=pa.float64()),
             pa.array([_raw_attr(f.p2_health_raw, "confidence") for f in frames], type=pa.float64()),
+            pa.array([f.timer_raw if f.timer_raw is not None else f.timer_value for f in frames], type=pa.int32()),
+            pa.array([f.p1_tension_raw if f.p1_tension_raw is not None else f.p1_tension_pct for f in frames],
+                     type=pa.float64()),
+            pa.array([f.p2_tension_raw if f.p2_tension_raw is not None else f.p2_tension_pct for f in frames],
+                     type=pa.float64()),
         ]
 
         table = pa.Table.from_arrays(arrays, schema=schema)

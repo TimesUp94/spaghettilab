@@ -1,7 +1,10 @@
 """Re-run health cleaning, damage events and combos from a frames parquet (no video decode).
 
 Rebuilds the per-frame data from ``<dir>/frames/<replay_id>_frames.parquet`` (the
-raw extractor readings are stored there), re-applies ``HealthAggregator`` and
+raw extractor readings are stored there), re-applies ``finalize_timer``,
+``finalize_tension`` (from the raw ``timer_raw`` / ``p1/p2_tension_raw`` columns when
+the parquet has them; older parquets only hold the cleaned values, which the
+clean-ups leave as they are, apart from the tension median), ``HealthAggregator`` and
 ``derive_combos`` with the current code, and writes a fresh ``analysis.db``,
 parquet and combos JSON into ``--output``.  Use after changing
 ``replanal/health_clean.py``, ``replanal/aggregator.py`` or the combo grouping.
@@ -24,6 +27,8 @@ import pyarrow.parquet as pq  # noqa: E402
 from replanal.aggregator import HealthAggregator  # noqa: E402
 from replanal.config import PipelineConfig  # noqa: E402
 from replanal.extractors.combo import combos_to_records, derive_combos  # noqa: E402
+from replanal.extractors.tension import finalize_tension  # noqa: E402
+from replanal.extractors.timer import finalize_timer  # noqa: E402
 from replanal.models import FrameData, HealthReading, Side  # noqa: E402
 from replanal.storage import (  # noqa: E402
     init_db, write_combos, write_damage_events, write_frame_data, write_frame_parquet, write_replay,
@@ -51,11 +56,16 @@ def frames_from_parquet(path: Path) -> list[FrameData]:
         f.p2_tension_pct = r["p2_tension_pct"]
         f.combo_count = r["combo_count"]
         f.combo_side = Side(r["combo_side"]) if r["combo_side"] is not None else None
+        # Readings before finalize_timer / finalize_tension (newer parquets).
+        f.timer_raw = r.get("timer_raw")
+        f.p1_tension_raw = r.get("p1_tension_raw")
+        f.p2_tension_raw = r.get("p2_tension_raw")
         # The scene detector stops all later extractors on non-gameplay frames,
         # so those frames have no readings at all.
         f.is_gameplay = any(r[k] is not None for k in (
             "p1_health_raw", "p2_health_raw", "timer_value", "p1_tension_pct", "p2_tension_pct",
-            "p1_rounds_won", "p2_rounds_won", "combo_count"))
+            "p1_rounds_won", "p2_rounds_won", "combo_count")) or any(
+            r.get(k) is not None for k in ("timer_raw", "p1_tension_raw", "p2_tension_raw"))
         frames.append(f)
     return frames
 
@@ -77,6 +87,8 @@ def main() -> None:
     config = PipelineConfig.from_yaml(Path(args.config))
 
     frames = frames_from_parquet(src)
+    finalize_timer(frames)
+    finalize_tension(frames)
     events = HealthAggregator(config.health_bar).aggregate(frames)
     combos = derive_combos(frames)
 
