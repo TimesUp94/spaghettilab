@@ -33,12 +33,23 @@ Scored against `output/e2e/split/truth_rounds_vod.json` (runs in
 | False sets (stream "TIMESUP" lobby, intro) | 5 | 0 |
 | Split / merged sets | 4 split (04, 07, 09, 13), 05b+06 merged | none |
 | Game counts right | - | 16 / 16 |
-| Names exact / near / wrong (32 names) | 1 / 6 / 27 (+2 empty) | 30 / 2 / 0 |
+| Names exact / near / wrong (32 names) | 1 / 6 / 27 (+2 empty) | 31 / 1 / 0 |
 | Round spans inside their file (10 s / end pad) | 143 / 152 (5 s pad) | 152 / 152 (20 s pad) |
 
 The same 16/16 holds on the original (overlay) VOD, with the scan shifted by
 1-3 s, with 15 % of timer reads and 30 % of name crops dropped at random, and
-without OCR (grouping by the tags' look).
+without OCR (grouping by the tags' look). The one near name is "LeftOver" for
+"Left0ver" (OCR can't tell the zero from O in the game's font).
+
+### Results (new VOD, 2 h 20 min 720p60, Italian HUD, webcam and chat over the game)
+
+YouTube 4bSjzC6a59Q, truth in `output/newvod/` (`stage1_report.md`,
+`sets.json`), runs in `output/fix2/track4/`: 10 files for 11 true sets (the
+grand final and its bracket reset are one file, see Grouping), no false or
+missed sets, game counts 10/10, names **20/20 exact**; without OCR the same
+10 sets. Before the wider P2 quad and the name normalisation: 16 exact,
+"Elegant Dand" (cut by the P2 quad) and "Junker Boy" in 3 files (OCR lost
+the underscore), so one player's files had two spellings.
 
 ---
 
@@ -118,28 +129,44 @@ The Rust bridge forwards both as `vod-scan-progress` events.
 ### Name tag quads
 
 GGS draws the player name slightly rotated (P1 rising to the right, P2
-falling), centred in the tag (P1 ~x 258, P2 ~x 1690) with the platform icon
+falling), centred in the tag (P1 ~x 245, P2 ~x 1670) with the platform icon
 just before it, under a smaller "Player 1/2" label ("Giocatore 1", "Joueur 1",
 ...) that sits up and out (left of the P1 name, right of the P2 name). The
 quads follow the name text and leave the label out:
 
 | Player | Quad Corners (tl, tr, br, bl) |
 |--------|-------------------------------|
-| P1 | (145,168), (400,147), (400,172), (145,193) |
-| P2 | (1560,150), (1748,165), (1748,190), (1560,175) |
+| P1 | (145,168), (400,147), (400,174), (145,195) |
+| P2 | (1550,153), (1795,177), (1795,200), (1550,178) |
+
+A long name also grows towards the label, since it is centred. The P2 label
+starts at x ~1755 and ends at y ~175, and a long name's end sits just below
+it ("Elegant Dandy" ends at x ~1750): P2's quad runs on under the label to
+x 1795, its top edge dropping below the label's baseline (a steeper slope
+than the bottom edge). The P1 label ends at x ~150, so the P1 quad still
+starts at 145; its right edge stays at 400, because past the tag's end
+(x ~405) the background changes from segment to segment and breaks the
+no-OCR look comparison. Both bottom edges leave a few pixels below the text
+for descenders and underscores (the old P1 bottom edge touched the text at
+x ~300).
 
 `scripts/split_vod.py` (`P1_NAME_QUAD`, `P2_NAME_QUAD`), the RoiPicker
-`DEFAULT_ROIS` and this table must agree. The old quads included the label
-(17 of 36 names read as "Giocatore") and the app's P1 quad slanted the wrong
-way.
+`DEFAULT_ROIS` (checked by `test_name_quads_match_the_app_defaults`) and this
+table must agree. Earlier quads: P2 ended at x 1748, which cut long names
+("Elegant Dand"); before that the quads included the label (17 of 36 names
+read as "Giocatore") and the app's P1 quad slanted the wrong way.
 
 `name_strip()` warps a quad to a rectangle (`warp_quad()`,
 `cv2.getPerspectiveTransform`) at 2x for OCR.
 
 ### EasyOCR
 
-The reader is created lazily (GPU when torch sees CUDA). Per strip
-(`pick_name`):
+The reader is created lazily (GPU when torch sees CUDA). It runs with
+`width_ths=0.2` (`OCR_JOIN_WIDTH`; EasyOCR's default 0.5 joins boxes closer
+than half their height). At the default the platform icon was often glued to
+the name ("XUMAmusume", from the crossplay icon) and the underscore was lost
+("Junker Boy" in 9 of 10 P1 reads). With the boxes kept apart, the icon is
+dropped and the words are joined below. Per strip (`pick_name`):
 
 1. Drop the "Player 1/2" label (`_drop_labels`): a box that looks like it (a
    fuzzy match, ratio >= 0.7, trailing 1/2/z/l ignored, against the label in
@@ -153,10 +180,46 @@ The reader is created lazily (GPU when torch sees CUDA). Per strip
    label), and join boxes next to it on the same line (names with spaces).
 4. Drop a 1-character token, or a 2-character token made of icon-like
    characters ("CI"), that the icon left glued to the front ("CI Dona").
+5. `clean_text` keeps ASCII letters, digits and ` _-.`, and drops the space
+   OCR often reads next to an underscore ("Junker_ Boy" -> "Junker_Boy").
 
 Per segment, up to 9 clean HUD seconds spread over it are OCR'd and each side
 is **voted** (`vote_names`): reads are clustered by similarity (>= 0.75), the
-biggest cluster wins, represented by its most frequent spelling.
+biggest cluster wins, represented by `best_spelling`.
+
+### Name keys and one spelling per player
+
+Names are compared, clustered and counted by **key** (`name_key`), never by
+raw spelling. A key is lower case, letters and digits only, with the glyphs
+OCR swaps in the game's font folded (0 = o, 1 = i = l). "Junker_Boy",
+"Junker Boy" and "JunkerBoy" share a key, as do "U.M.A.musume" and
+"UMAmusume", and "Left0ver" and "LeftOver". `name_similarity` (set grouping,
+side swaps) compares keys.
+
+`best_spelling` picks the spelling shown for a group of reads: the most
+common key, then that key's most common raw spelling. OCR drops a thin mark
+inside a name (`_`, `.` or `-` between letters), or reads it as a space, far
+more often than it invents one. So a spelling with a mark wins once at least
+a quarter of the key's reads have it (`MARK_MIN_SHARE`; "Junker_Boy" kept
+its underscore in about a third of the reads before `OCR_JOIN_WIDTH`). A mark
+at an edge ("TimesUp.") doesn't count.
+
+After grouping, `vod_name_spellings` gives every player **one spelling for
+the whole VOD**, so all their files are named alike. Per key it applies
+`best_spelling` to every read of every set, on both sides. A rarely read key
+is mapped to a more common key it misreads by a letter ("UMAmusumi" for
+"UMAmusume") when all of these hold:
+
+- similarity >= 0.85 (`NAME_VARIANT_SAME`);
+- both keys have at least 6 characters;
+- the common key is read at least twice as often;
+- the two names never face each other in a set.
+
+Short names never merge ("Dona" and "Dana", or "Revil" and "Revill", may be
+two players). A key is only mapped to a key that keeps its own spelling: a
+chain of misreads ("UMAmusumii" -> "UMAmusumi" -> "UMAmusume") ends at the most
+read one. Two different long handles this alike that never meet in a set
+would still merge; the count and similarity tests are the only guard.
 
 The reader is loaded before the 1 fps scan, so a problem shows at once. If
 easyocr is not installed, or fails to load (a torch DLL error on Windows) or
@@ -201,7 +264,12 @@ There is no hard gap rule: players often spend 12-100 s in the lobby between
 games of one set, which split 4 of 16 sets before. The flip side: consecutive
 sets of the same two players (a grand final and its bracket reset, a
 rematch) become one set, however long the break between them; split that
-file by hand. The hearts only break ties:
+file by hand. On the new VOD the grand final (4 games) and its reset (4 games)
+are one 8-game file; Tappa #4's truth counts its grand final and reset as one
+set too. Splitting by game wins (a new set starts once a player reaches the
+set's win count) is not done. It needs each game's winner, which the hearts
+reader gets wrong too often (it misses lost hearts), and the set length,
+which is not on the HUD and can change within one bracket. The hearts only break ties:
 the reader misses lost hearts often enough (a new set's first frames can read
 as 0-1) that they never override readable names or tags.
 
@@ -354,8 +422,8 @@ An interactive ROI editor overlaid on the preview frame.
 p1_tension: { y1: 1000, y2: 1040, x1: 260, x2: 750 },
 p2_tension: { y1: 1000, y2: 1040, x1: 1170, x2: 1660 },
 timer: { y1: 110, y2: 180, x1: 920, x2: 1000 },
-p1_name: { tl: [145, 168], tr: [400, 147], br: [400, 172], bl: [145, 193] },
-p2_name: { tl: [1560, 150], tr: [1748, 165], br: [1748, 190], bl: [1560, 175] },
+p1_name: { tl: [145, 168], tr: [400, 147], br: [400, 174], bl: [145, 195] },
+p2_name: { tl: [1550, 153], tr: [1795, 177], br: [1795, 200], bl: [1550, 178] },
 ```
 
 ### Rect ROI Interaction

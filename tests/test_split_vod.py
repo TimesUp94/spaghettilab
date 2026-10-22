@@ -128,6 +128,35 @@ def test_vote_names_prefers_the_consistent_read(sv):
     assert name == "Salkazko" and support == 4
 
 
+def test_name_key_ignores_punctuation_and_ocr_lookalikes(sv):
+    assert sv.name_key("Junker_Boy") == sv.name_key("Junker Boy") == sv.name_key("JunkerBoy")
+    assert sv.name_key("U.M.A.musume") == sv.name_key("UMAmusume")
+    assert sv.name_key("Left0ver") == sv.name_key("LeftOver")
+    assert sv.name_key("Revill") == sv.name_key("ReviII")
+    assert sv.name_key("Dona") != sv.name_key("Dana")
+
+
+def test_vote_names_counts_spellings_of_one_name_together(sv):
+    # Five reads of one name in two spellings beat four reads of another
+    reads = ["Junker Boy"] * 3 + ["Junker_Boy"] * 2 + ["Salkazko"] * 4
+    assert sv.vote_names(reads) == ("Junker_Boy", 5)
+    # OCR drops the underscore more often than it reads it, and never adds
+    # one: a spelling with it wins once a quarter of the reads have it
+    assert sv.vote_names(["Junker Boy"] * 6 + ["Junker_Boy"] * 2)[0] == "Junker_Boy"
+    assert sv.vote_names(["Junker Boy"] * 7 + ["Junker_Boy"])[0] == "Junker Boy"
+    assert sv.vote_names(["UMAmusume"] * 5 + ["U.M.A.musume"] * 2)[0] == "U.M.A.musume"
+    # A stray mark at an edge is noise, not part of the name
+    assert sv.vote_names(["TimesUp"] * 5 + ["TimesUp."] * 3)[0] == "TimesUp"
+
+
+def test_clean_text_joins_an_underscore_read_with_a_space(sv):
+    assert sv.clean_text("Junker_ Boy") == "Junker_Boy"
+    assert sv.clean_text("Junker _Boy ") == "Junker_Boy"
+    assert sv.clean_text("Dave  Fennoy") == "Dave Fennoy"
+    # also across the boxes pick_name joins
+    assert sv.pick_name([_box(40, 120, 10, 40, "Junker_"), _box(130, 200, 10, 40, "Boy")]) == "Junker_Boy"
+
+
 def test_names_relation(sv):
     assert sv.names_relation(("Dona", "umadacchi"), ("Dona", "umadacch")) == "same"
     assert sv.names_relation(("Dona", "umadacchi"), ("umadacchi", "Dona")) == "same"   # side swap
@@ -277,6 +306,70 @@ def test_set_names_align_side_swaps(sv):
     assert sv.set_names(segs) == ("Dona", "umadacchi")
 
 
+def _set(sv, start, p1_reads, p2_reads):
+    seg = sv.Segment(float(start), float(start + 300))
+    seg.p1_votes, seg.p2_votes = list(p1_reads), list(p2_reads)
+    seg.p1_name, seg.p2_name = sv.vote_names(seg.p1_votes)[0], sv.vote_names(seg.p2_votes)[0]
+    return [seg]
+
+
+def test_one_player_keeps_one_spelling_across_the_vod(sv):
+    # OCR keeps the underscore on one side and drops it on the other: every
+    # file gets the spelling read most over the whole VOD
+    groups = [
+        _set(sv, 0, ["FFShadey"] * 9, ["Junker_Boy"] * 8 + ["Junker Boy"]),
+        _set(sv, 1000, ["VituzULF"] * 9, ["Junker_Boy"] * 9),
+        _set(sv, 2000, ["Junker Boy"] * 7 + ["Junker_Boy"] * 2, ["TimesUp"] * 9),
+    ]
+    sets = sv.group_sets(groups)
+    assert [ds.p2_name for ds in sets[:2]] + [sets[2].p1_name] == ["Junker_Boy"] * 3
+    assert sv.set_label(sets[2]) == "03_Junker_Boy_vs_TimesUp"
+
+
+def test_a_rare_one_letter_misread_takes_the_common_spelling(sv):
+    groups = [
+        _set(sv, 0, ["UMAmusume"] * 9, ["RicBionicle"] * 9),
+        _set(sv, 1000, ["Dona"] * 9, ["UMAmusumi"] * 6 + ["UMAmusume"] * 3),
+        _set(sv, 2000, ["UMAmusume"] * 9, ["Salkazko"] * 9),
+    ]
+    assert sv.group_sets(groups)[1].p2_name == "UMAmusume"
+
+
+def test_similar_names_of_two_players_stay_apart(sv):
+    # Short names never merge, nor do names that face each other in a set
+    groups = [
+        _set(sv, 0, ["Dona"] * 9, ["Salkazko"] * 9),
+        _set(sv, 1000, ["Dana"] * 2, ["Revill"] * 9),
+        _set(sv, 2000, ["Kazuma99"] * 9, ["Kazuma98"] * 3),
+    ]
+    sets = sv.group_sets(groups)
+    assert sets[1].p1_name == "Dana"
+    assert (sets[2].p1_name, sets[2].p2_name) == ("Kazuma99", "Kazuma98")
+
+
+def test_a_long_name_never_merges_into_a_short_one(sv):
+    # "Revill" read rarely, "Revil" (a different, 5-letter handle) often:
+    # both keys must be long enough to merge.
+    groups = [
+        _set(sv, 0, ["Revil"] * 9, ["Salkazko"] * 9),
+        _set(sv, 1000, ["Revill"] * 4, ["TimesUp"] * 9),
+    ]
+    assert sv.group_sets(groups)[1].p1_name == "Revill"
+
+
+def test_misread_chain_ends_at_the_common_spelling(sv):
+    # "UMAmusumii" -> "UMAmusumi" -> "UMAmusume": each variant gets the
+    # spelling of the name read most, not an intermediate misread.
+    groups = [
+        _set(sv, 0, ["UMAmusume"] * 15, ["RicBionicle"] * 9),
+        _set(sv, 1000, ["Dona"] * 9, ["UMAmusumi"] * 6),
+        _set(sv, 2000, ["UMAmusumii"] * 2, ["Salkazko"] * 9),
+    ]
+    sets = sv.group_sets(groups)
+    assert sets[1].p2_name == "UMAmusume"
+    assert sets[2].p1_name == "UMAmusume"
+
+
 # ── Tools ───────────────────────────────────────────────────────────────────
 
 def test_find_tool_honours_env_override(sv, tmp_path, monkeypatch):
@@ -291,4 +384,13 @@ def test_name_strip_is_upscaled_quad(sv):
     x0, y0, x1, y1 = sv.quad_bbox(q)
     crop = np.zeros((y1 - y0, x1 - x0), np.uint8)
     strip = sv.name_strip(crop, q)
-    assert strip.shape == (50, 512)
+    assert strip.shape == (54, 512)
+
+
+def test_name_quads_match_the_app_defaults(sv):
+    # RoiPicker's DEFAULT_ROIS and the splitter must agree
+    import re
+    src = (ROOT / "app" / "src" / "components" / "RoiPicker.tsx").read_text(encoding="utf-8")
+    for key, quad in (("p1_name", sv.P1_NAME_QUAD), ("p2_name", sv.P2_NAME_QUAD)):
+        m = re.search(key + r": \{ tl: \[(\d+), (\d+)\], tr: \[(\d+), (\d+)\], br: \[(\d+), (\d+)\], bl: \[(\d+), (\d+)\] \}", src)
+        assert m and tuple(int(v) for v in m.groups()) == quad, key

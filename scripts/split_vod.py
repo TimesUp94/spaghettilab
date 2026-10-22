@@ -61,10 +61,13 @@ TIMER_ROI = (110, 180, 920, 1000)      # in-game round timer badge
 # around the name text only.  GGS draws the name slightly rotated (P1 rising to
 # the right, P2 falling), under a smaller "Player 1/2" label ("Giocatore 1",
 # ...) that sits up and out (left of the P1 name, right of the P2 name) and is
-# left outside the quads.  Names are centred in the tag (P1 ~x 258, P2 ~1690)
-# with the platform icon just before them.
-P1_NAME_QUAD = (145, 168, 400, 147, 400, 172, 145, 193)
-P2_NAME_QUAD = (1560, 150, 1748, 165, 1748, 190, 1560, 175)
+# left outside the quads.  Names are centred in the tag (P1 ~x 245, P2 ~1670)
+# with the platform icon just before them, so a long name grows towards the
+# label too: P2's quad runs under the label (x 1755-1830, above y ~175) to
+# x 1795, its top edge dropping below the label's baseline.  The bottom edges
+# leave room for descenders and underscores.
+P1_NAME_QUAD = (145, 168, 400, 147, 400, 174, 145, 195)
+P2_NAME_QUAD = (1550, 153, 1795, 177, 1795, 200, 1550, 178)
 
 TIMER_SUPPORT_WINDOW = 5   # a timer read needs a consistent read within N s
 GAMEPLAY_MERGE_GAP = 12    # merge HUD runs with < N second gaps (supers, round transitions)
@@ -559,12 +562,31 @@ _LABEL_RE = re.compile(r"(プレイヤー|플레이어|玩家|игрок)")
 
 
 def clean_text(text: str) -> str:
-    """ASCII-safe name text for filenames and JSON."""
-    return "".join(c for c in text.strip() if c.isascii() and (c.isalnum() or c in " _-.")).strip()
+    """ASCII-safe name text for filenames and JSON.
+
+    OCR often reads an underscore with a space next to it ("Junker_ Boy"):
+    the space is dropped.
+    """
+    t = "".join(c for c in text.strip() if c.isascii() and (c.isalnum() or c in " _-."))
+    return re.sub(r" +", " ", re.sub(r" *_ *", "_", t)).strip()
 
 
 def norm_name(text: str) -> str:
     return "".join(c for c in text.lower() if c.isalnum())
+
+
+# Glyphs OCR swaps for each other in the game's name font: zero and O, one,
+# capital I and small l (a name key folds them so "Left0ver" = "LeftOver")
+_OCR_FOLD = str.maketrans({"0": "o", "1": "l", "i": "l"})
+
+
+def name_key(text: str) -> str:
+    """What two spellings of one name have in common: letters and digits only,
+    lower case, OCR look-alikes folded.  OCR drops underscores and dots and
+    sometimes the space ("Junker_Boy", "Junker Boy", "JunkerBoy" share a key),
+    so names are compared, voted and counted by key, never by raw spelling.
+    """
+    return norm_name(text).translate(_OCR_FOLD)
 
 
 def is_label(text: str) -> bool:
@@ -655,7 +677,14 @@ def pick_name(results: list) -> str:
     tokens = " ".join(p[4] for p in parts).split()
     if len(tokens) > 1 and (len(tokens[0]) == 1 or (len(tokens[0]) == 2 and set(tokens[0]) <= _ICON_CHARS)):
         tokens = tokens[1:]
-    return " ".join(tokens)
+    return clean_text(" ".join(tokens))
+
+
+# EasyOCR joins detected text boxes closer than this share of their height
+# into one (default 0.5).  At the default the platform icon is often glued to
+# the name ("XUMAmusume", from the crossplay icon) and the underscore lost
+# ("Junker Boy"); kept apart, pick_name drops the icon and joins the words.
+OCR_JOIN_WIDTH = 0.2
 
 
 def ocr_name_strip(strip: np.ndarray) -> str:
@@ -663,7 +692,7 @@ def ocr_name_strip(strip: np.ndarray) -> str:
     reader = _get_ocr_reader()
     if reader is None or strip.size == 0:
         return ""
-    return pick_name(reader.readtext(strip, detail=1))
+    return pick_name(reader.readtext(strip, detail=1, width_ths=OCR_JOIN_WIDTH))
 
 
 def ocr_name_region(region: np.ndarray) -> str:
@@ -671,14 +700,35 @@ def ocr_name_region(region: np.ndarray) -> str:
     return ocr_name_strip(region)
 
 
+# OCR drops a thin mark inside a name (an underscore, a dot), or reads it as a
+# space, far more often than it reads one that isn't there: on the 720p
+# new-VOD test it kept "Junker_Boy"'s underscore in only about a third of the
+# reads.  So a spelling with a mark wins once at least this share of a name's
+# reads have one.
+_MARK_RE = re.compile(r"[0-9A-Za-z][_.-]+[0-9A-Za-z]")
+MARK_MIN_SHARE = 0.25
+
+
+def best_spelling(reads: list[str]) -> str:
+    """The spelling to show for reads of one name: the most common key among
+    them, then that key's most common raw spelling, preferring one with a
+    mark when enough reads have it (MARK_MIN_SHARE)."""
+    keys = Counter(name_key(r) for r in reads)
+    key = max(keys, key=lambda k: (keys[k], len(k)))
+    counts = Counter(r for r in reads if name_key(r) == key)
+    marked = Counter({s: n for s, n in counts.items() if _MARK_RE.search(s)})
+    if marked and sum(marked.values()) >= MARK_MIN_SHARE * sum(counts.values()):
+        counts = marked
+    return max(counts, key=lambda s: (counts[s], len(s)))
+
+
 def vote_names(reads: list[str]) -> tuple[str, int]:
     """Most supported name among per-frame reads, and its support.
 
     Reads are clustered by similarity (OCR drops or swaps a letter now and
-    then); the biggest cluster wins and is represented by its most frequent
-    exact spelling (ties: the longer one).
+    then); the biggest cluster wins and is represented by `best_spelling`.
     """
-    reads = [r for r in reads if norm_name(r)]
+    reads = [r for r in reads if name_key(r)]
     if not reads:
         return "", 0
     clusters: list[list[str]] = []
@@ -690,13 +740,11 @@ def vote_names(reads: list[str]) -> tuple[str, int]:
         else:
             clusters.append([r])
     best = max(clusters, key=len)
-    counts = Counter(best)
-    rep = max(counts, key=lambda s: (counts[s], len(norm_name(s))))
-    return rep, len(best)
+    return best_spelling(best), len(best)
 
 
 def name_similarity(a: str, b: str) -> float:
-    a, b = norm_name(a), norm_name(b)
+    a, b = name_key(a), name_key(b)
     if not a or not b:
         return 0.0
     return difflib.SequenceMatcher(None, a, b).ratio()
@@ -965,12 +1013,63 @@ def set_names(segments: list[Segment]) -> tuple[str, str]:
     return vote_names(p1_votes)[0], vote_names(p2_votes)[0]
 
 
+# A name read rarely over the VOD that is this similar (by key) to one read at
+# least twice as often is the same player with a letter misread in one set
+# ("UMAmusumi" for "UMAmusume"), unless the two names face each other in a
+# set.  Both keys must be NAME_VARIANT_MIN_LEN long: one letter is a bigger
+# share of a short key, and "Dona" / "Dana" or "Revil" / "Revill" may well be
+# two players.
+NAME_VARIANT_SAME = 0.85
+NAME_VARIANT_MIN_LEN = 6
+
+
+def vod_name_spellings(sets: list[DetectedSet]) -> dict[str, str]:
+    """name_key -> the spelling of that name used for the whole VOD.
+
+    Counts every per-frame read of every set (both sides), so one player keeps
+    one spelling across files ("Junker_Boy" in one set and "Junker Boy" in
+    another, where OCR dropped the underscore).  The spelling of a key is its
+    most common raw read (`best_spelling`); a rare variant key is mapped to
+    the common key it misreads (NAME_VARIANT_SAME; both keys at least
+    NAME_VARIANT_MIN_LEN long).  A key is only mapped to a key that keeps its
+    own spelling, so chains (rare -> less rare -> common) end at the common one.
+    """
+    reads = [r for ds in sets for seg in ds.segments for r in seg.p1_votes + seg.p2_votes if name_key(r)]
+    reads += [n for ds in sets for n in (ds.p1_name, ds.p2_name) if name_key(n)]
+    by_key: dict[str, list[str]] = {}
+    for r in reads:
+        by_key.setdefault(name_key(r), []).append(r)
+    opponents = {frozenset((name_key(ds.p1_name), name_key(ds.p2_name))) for ds in sets}
+    spelling = {k: best_spelling(v) for k, v in by_key.items()}
+    target: dict[str, str] = {}
+    for k in sorted(by_key, key=lambda k: len(by_key[k])):
+        if len(k) < NAME_VARIANT_MIN_LEN:
+            continue
+        common = [c for c in by_key
+                  if len(c) >= NAME_VARIANT_MIN_LEN
+                  and len(by_key[c]) >= 2 * len(by_key[k]) and frozenset((k, c)) not in opponents
+                  and difflib.SequenceMatcher(None, k, c).ratio() >= NAME_VARIANT_SAME]
+        if common:
+            target[k] = max(common, key=lambda c: len(by_key[c]))
+    for k in target:
+        c, seen = target[k], {k}
+        while c in target and c not in seen:
+            seen.add(c)
+            c = target[c]
+        spelling[k] = spelling[c]
+    return spelling
+
+
 def group_sets(groups: list[list[Segment]]) -> list[DetectedSet]:
     sets = []
     for k, g in enumerate(groups):
         ds = DetectedSet(segments=g, index=k + 1)
         ds.p1_name, ds.p2_name = set_names(g)
         sets.append(ds)
+    spelling = vod_name_spellings(sets)
+    for ds in sets:
+        ds.p1_name = spelling.get(name_key(ds.p1_name), ds.p1_name)
+        ds.p2_name = spelling.get(name_key(ds.p2_name), ds.p2_name)
     return sets
 
 

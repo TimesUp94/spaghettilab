@@ -11,8 +11,8 @@ const DEFAULT_ROIS: VodRoiConfig = {
   p1_tension: { y1: 1000, y2: 1040, x1: 260, x2: 750 },
   p2_tension: { y1: 1000, y2: 1040, x1: 1170, x2: 1660 },
   timer: { y1: 110, y2: 180, x1: 920, x2: 1000 },
-  p1_name: { tl: [145, 168], tr: [400, 147], br: [400, 172], bl: [145, 193] },
-  p2_name: { tl: [1560, 150], tr: [1748, 165], br: [1748, 190], bl: [1560, 175] },
+  p1_name: { tl: [145, 168], tr: [400, 147], br: [400, 174], bl: [145, 195] },
+  p2_name: { tl: [1550, 153], tr: [1795, 177], br: [1795, 200], bl: [1550, 178] },
 };
 
 const ROI_COLORS: Record<string, string> = {
