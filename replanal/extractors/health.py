@@ -39,6 +39,10 @@ from replanal.extractors.base import BaseExtractor
 from replanal.models import FrameContext, FrameData, HealthReading, Side
 
 
+# Minimum brightness of lit fill in the "cool" colour mode.
+_COOL_LIT_V = 150
+
+
 @dataclass
 class BarMeasurement:
     """Result of measuring one bar in one frame (all widths in pixels)."""
@@ -84,6 +88,12 @@ class HealthBarExtractor(BaseExtractor):
     _ABOVE = (-12, -5)
     _BELOW = (5, 11)
 
+    # Fill-coloured rows outside the bar make a column "not a bar" only when
+    # their mean colour is this close to the band's (hue in OpenCV units).
+    _SAME_HUE = 6.0
+    _SAME_SAT = 30.0
+    _SAME_VAL = 40.0
+
     # A column belongs to a class when more than this fraction of its rows do.
     _COL_FRAC = 0.5
 
@@ -126,7 +136,10 @@ class HealthBarExtractor(BaseExtractor):
         elif mode == "yellow_green":
             fill = (h >= 25) & (h <= 70) & (s > 40) & (v > 100)
         elif mode == "cool":
-            fill = (h >= 90) & (h <= 145) & (s > 40) & (v > 80)
+            # The empty part of the bar is semi-transparent: a blue stage
+            # seen through it reads H ~95, S 50-90, V ~80 (new-VOD set 01 at
+            # 411 s read as 7% fill).  Lit fill is much brighter.
+            fill = (h >= 90) & (h <= 145) & (s > 40) & (v > _COOL_LIT_V)
         else:  # pragma: no cover
             raise ValueError(mode)
         return fill, pending, white
@@ -160,6 +173,12 @@ class HealthBarExtractor(BaseExtractor):
         if modes is None:
             modes = ("warm", "yellow_green", "cool") if side == Side.P2 else ("warm", "yellow_green")
 
+        # A column is "not a bar" only where the fill colour carries on past
+        # the bar's edge unchanged.  Stage scenery of a similar (but not the
+        # same) warm colour right above or below the bar is common (pink and
+        # cream backgrounds) and must not hide real fill columns.
+        same_colour = [self._same_colour(region, a) for a in outside]
+
         best: BarMeasurement | None = None
         best_key = None
         for mode in modes:
@@ -168,13 +187,21 @@ class HealthBarExtractor(BaseExtractor):
             R = pending.mean(axis=0) > self._COL_FRAC
             W = (white.mean(axis=0) > self._COL_FRAC) & ~F & ~R
             if outside:
-                not_bar = np.zeros_like(F)
-                for a in outside:
+                not_bar = np.zeros_like(F)    # for fill columns
+                any_out = np.zeros_like(F)    # for pending-red columns
+                for a, same in zip(outside, same_colour):
                     a_fill, _, _ = self._classify(a, mode)
-                    not_bar |= a_fill.mean(axis=0) > self._COL_FRAC
-                W = W | ((F | R) & not_bar)
+                    a_fill = a_fill.mean(axis=0) > self._COL_FRAC
+                    any_out |= a_fill
+                    # Only the bar's own warm colours get the relaxed test:
+                    # blue / yellow cinematic swirls vary in shade and would
+                    # pass it.
+                    not_bar |= (a_fill & same) if mode == "warm" else a_fill
+                # Pending red never reaches past the bar: warm colour around
+                # a red column is a sprite (or a cinematic), not the bar.
+                W = W | (F & not_bar) | (R & any_out)
                 F = F & ~not_bar
-                R = R & ~not_bar
+                R = R & ~any_out
             m, fit_score = self._fit_columns(F, R, W, total, mode)
             # Prefer the colour mode with the most fill evidence, then the best fit.
             key = (fit_score, m.consistency)
@@ -182,6 +209,21 @@ class HealthBarExtractor(BaseExtractor):
                 best, best_key = m, key
         assert best is not None
         return best
+
+    @staticmethod
+    def _col_colour(hsv: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Per-column mean colour: (hue angle in radians, saturation, value)."""
+        ang = hsv[..., 0].astype(np.float32) * (np.pi / 90.0)
+        hue = np.arctan2(np.sin(ang).mean(axis=0), np.cos(ang).mean(axis=0))
+        return hue, hsv[..., 1].mean(axis=0), hsv[..., 2].mean(axis=0)
+
+    @classmethod
+    def _same_colour(cls, region: np.ndarray, outside: np.ndarray) -> np.ndarray:
+        """Columns whose rows outside the bar have the bar band's own colour."""
+        h1, s1, v1 = cls._col_colour(region)
+        h2, s2, v2 = cls._col_colour(outside)
+        dh = np.abs(np.angle(np.exp(1j * (h1 - h2)))) * (90.0 / np.pi)
+        return (dh <= cls._SAME_HUE) & (np.abs(s1 - s2) <= cls._SAME_SAT) & (np.abs(v1 - v2) <= cls._SAME_VAL)
 
     @staticmethod
     def _fit_columns(F: np.ndarray, R: np.ndarray, W: np.ndarray, total: int, mode: str) -> tuple[BarMeasurement, int]:

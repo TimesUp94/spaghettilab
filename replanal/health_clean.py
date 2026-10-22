@@ -63,7 +63,8 @@ LOW_SKIP = 90   # ignore the first 3 s of a segment (round-start screens) for lo
 MIN_ROUND = 300
 # Gaps in confident readings longer than this split the coverage (no fill).
 MAX_FILL_GAP = 120
-# A gap this long with no readings at all also starts a new segment.
+# A gap this long with no readings at all also starts a new segment, unless
+# the round clock carries on across it (see _clock_continues).
 SEGMENT_GAP = 150
 # After one side is KO'd, the other side's readings are only used for this
 # many more frames (allows a double KO); after that its HP is held.
@@ -163,6 +164,9 @@ COMBO_RUN = 3
 OPP_REF_MIN = 3
 OPP_DROP = 0.5
 OPP_TOL = 0.02
+# An empty reading backs a KO with its red segment only when the red covers
+# at least RED_COVER of the level read just before (see _clean_side).
+RED_COVER = 0.5
 # Pending red "growing": the run's highest pending reading rises by GROW_MIN.
 GROW_MIN = 0.01
 # Round intro: the timer already shows its start value (90 in GGST, or 99)
@@ -197,6 +201,29 @@ DKO_LEVEL_TOL = 0.01
 # readings look like a sliver next to an empty bar.  A sliver reading only
 # needs MIN_CONF (a 1-px bar is read with low confidence).
 DKO_WIN = 210
+# A KO ends the round: the clock stops and the HUD goes for the round-end
+# slash.  A bar at or near 0 while the clock keeps counting down is a live
+# sliver (the game keeps the last HP point visible as a 1-px sliver, which a
+# 720p source cannot show at all).  Such a side is alive until the clock
+# stops; its cleaned HP is kept at ALIVE_MIN or above until then (and to the
+# end of the round if it survives), so "exactly 0" always means KO'd.
+ALIVE_MIN = 0.008
+# End-of-round evidence of who lost (see _end_loser), from the frames after
+# the round-end slash in which the frozen round timer is read again (the HUD
+# is back): a bar read empty (at most KO_FLOOR) next to one read at least
+# HUD_SHOWN wider (a 720p sliver reads 2-3 px, an empty bar 0 px; at 1080p an
+# empty bar can read a few px of junk, a sliver ~6 px) is the KO'd side.
+HUD_SHOWN = 0.0025
+# ... failing that, the side shown with the red pending segment (being hit)
+# in the last END_HIT frames of play while the other side shows none, or the
+# side whose combo counter (the attacker) is up in those last END_HIT frames
+# of play, decides.  The counter lingers about a second after a combo ends,
+# so an earlier counter says nothing about who landed the last hit (a
+# one-hit reversal shows none).
+END_HIT = 15
+# A gap of this many frames without timer readings after the clock stopped
+# is the HUD hidden by the round-end slash (or a KO cinematic).
+HUD_GAP = 15
 
 
 @dataclass
@@ -389,7 +416,8 @@ def find_segments(p1: np.ndarray, p2: np.ndarray, c1: np.ndarray, c2: np.ndarray
     low1 = low2 = np.inf
     for i in range(n):
         if any_obs[i]:
-            if seg_start is None or i - last_obs > SEGMENT_GAP:
+            if seg_start is None or (i - last_obs > SEGMENT_GAP
+                                     and not _clock_continues(timer_val, last_obs, i)):
                 seg_start = i
                 starts.append(i)
                 damaged = False
@@ -448,6 +476,25 @@ def find_segments(p1: np.ndarray, p2: np.ndarray, c1: np.ndarray, c2: np.ndarray
                 damaged = False
                 low1 = low2 = np.inf
     return sorted(set(starts))
+
+
+def _clock_continues(timer_val: np.ndarray | None, a: int, b: int) -> bool:
+    """Does the round clock carry on across a gap in the readings (frames a..b)?
+
+    A long super cinematic hides the whole HUD mid-round for 5 s or more.
+    The same round goes on when the clock after the gap shows an in-round
+    value no higher than before it (a new round starts at the intro's start
+    values).  Credible readings (TIMER_RUN equal within TIMER_WIN) only.
+    """
+    if timer_val is None:
+        return False
+    before = _credible_timer(timer_val[max(0, a - 4 * TIMER_WIN):a + 1])
+    after = _credible_timer(timer_val[b:b + 4 * TIMER_WIN])
+    if len(before) == 0 or len(after) == 0:
+        return False
+    tb = timer_val[max(0, a - 4 * TIMER_WIN) + before[-1]]
+    ta = timer_val[b + after[0]]
+    return bool(ta < TIMER_START_MIN and ta <= tb)
 
 
 def _intro_reset(a: int, l1: float, l2: float, low1: float, low2: float, seg_start: int,
@@ -529,9 +576,132 @@ def _clock_runs_on(timer_val: np.ndarray | None, lo: int, hi: int, i: int) -> bo
     return bool(before) and bool(after) and min(after) < before[-1]
 
 
+def _credible_timer(tv: np.ndarray) -> np.ndarray:
+    """Indices of credible readings in a timer span (TIMER_RUN equal values within TIMER_WIN)."""
+    seen = np.flatnonzero(~np.isnan(tv))
+    return np.array([k for k in seen if np.sum(tv[k:k + TIMER_WIN] == tv[k]) >= TIMER_RUN], dtype=int)
+
+
+def _supported_timer(tv: np.ndarray) -> np.ndarray:
+    """Indices of timer readings with TIMER_RUN equal values (itself included)
+    within TIMER_WIN frames on either side.
+
+    Unlike _credible_timer this keeps the last readings of a run (before the
+    HUD goes), and drops a lone misread (a covered tens digit reads "7" for
+    97 on one frame), which would otherwise split a hidden-HUD gap.
+    """
+    seen = np.flatnonzero(~np.isnan(tv))
+    return np.array([k for k in seen
+                     if np.sum(tv[max(0, k - TIMER_WIN + 1):k + TIMER_WIN] == tv[k]) >= TIMER_RUN], dtype=int)
+
+
+def _clock_freeze(timer_val: np.ndarray | None, lo: int, hi: int) -> int | None:
+    """Span-relative first frame showing the clock's final value, or None.
+
+    The clock stops at a KO (or at 0 on a time-out), so a KO is never before
+    this frame: until it the clock was still counting down.
+    """
+    if timer_val is None:
+        return None
+    tv = timer_val[lo:hi]
+    cred = _credible_timer(tv)
+    if len(cred) == 0:
+        return None
+    final = tv[cred[-1]]
+    i = len(cred) - 1
+    while i > 0 and tv[cred[i - 1]] == final:
+        i -= 1
+    return int(cred[i])
+
+
+def _hud_back(timer_val: np.ndarray | None, lo: int, hi: int, fz: int | None) -> tuple[int | None, np.ndarray]:
+    """End of play and the HUD frames shown again after the round-end slash.
+
+    Returns (span-relative last timer reading before the last gap of at
+    least HUD_GAP frames since the clock's last tick (readings supported by
+    their neighbours only, see _supported_timer), span-relative frames
+    after that gap that read the same frozen clock).  The slash and KO cinematics
+    hide the whole HUD; when it comes back with the clock still at its final
+    value, the round is over and the bars show its result.
+    """
+    empty = np.zeros(0, dtype=int)
+    if timer_val is None or fz is None:
+        return None, empty
+    tv = timer_val[lo:hi]
+    final = tv[fz]
+    seen = _supported_timer(tv)
+    # From the last reading before the final value: the clock can tick for
+    # the last time while the HUD is hidden (a KO under a super cinematic).
+    before = seen[seen < fz]
+    seen = seen[seen >= (before[-1] if len(before) else fz)]
+    gaps = np.flatnonzero(np.diff(seen) >= HUD_GAP)
+    if len(gaps) == 0:
+        return int(seen[-1]) if len(seen) else None, empty
+    # The last gap: the clock can stay on one value through a long combo and
+    # a super cinematic (the HUD hidden mid-play) before the KO.
+    g = gaps[-1]
+    after = seen[g + 1:]
+    return int(seen[g]), after[tv[after] == final]
+
+
+def _end_loser(p1: np.ndarray, p2: np.ndarray, c1: np.ndarray, c2: np.ndarray,
+               q1: np.ndarray | None, q2: np.ndarray | None,
+               combo1: np.ndarray | None, combo2: np.ndarray | None,
+               timer_val: np.ndarray | None, lo: int, hi: int, hud_only: bool = False) -> int | None:
+    """The side KO'd at the end of a round in which both bars were low, or None.
+
+    Decided in game terms, in this order:
+
+    1. the HUD shown again after the round-end slash (same frozen clock):
+       an empty bar next to a sliver (see KO_FLOOR / HUD_SHOWN);
+    2. the red pending segment (a combo landing) on exactly one side in the
+       last END_HIT frames of play (not with ``hud_only``);
+    3. the combo counter (the attacker, who essentially never loses HP during
+       its own combo) up on exactly one side in the last END_HIT frames of
+       play: the other side lost.
+    """
+    fz = _clock_freeze(timer_val, lo, hi)
+    play_end, back = _hud_back(timer_val, lo, hi, fz)
+    if len(back):
+        v1, v2 = p1[lo:hi][back], p2[lo:hi][back]
+        k1, k2 = c1[lo:hi][back], c2[lo:hi][back]
+        w1, w2 = np.nan_to_num(v1, nan=1.0), np.nan_to_num(v2, nan=1.0)
+        # Empty: no more than the junk floor over an empty bar (KO_FLOOR);
+        # the other bar must read clearly more (HUD_SHOWN above it).
+        # One of the two readings must be confident (a 1-px bar, or an
+        # empty one, is read with middling confidence).
+        e1 = (w1 <= KO_FLOOR) & (k1 >= MIN_CONF)
+        e2 = (w2 <= KO_FLOOR) & (k2 >= MIN_CONF)
+        s1 = ~np.isnan(v1) & (k1 >= MIN_CONF) & (w1 >= w2 + HUD_SHOWN)
+        s2 = ~np.isnan(v2) & (k2 >= MIN_CONF) & (w2 >= w1 + HUD_SHOWN)
+        sure = np.maximum(k1, k2) >= END_CONF
+        e1 &= sure
+        e2 &= sure
+        # A bar read empty while the other side shows red and it shows none
+        # is the attacker's bar covered by its own combo's effects.
+        r1, r2 = _shown(q1, lo, hi)[back], _shown(q2, lo, hi)[back]
+        e1 &= ~(r2 & ~r1)
+        e2 &= ~(r1 & ~r2)
+        n1, n2 = int((e1 & s2).sum()), int((e2 & s1).sum())
+        if n1 > 3 * n2:
+            return 1
+        if n2 > 3 * n1:
+            return 2
+    if play_end is None or hud_only:
+        return None
+    a = max(0, play_end + 1 - END_HIT)
+    red = [_shown(q, lo, hi)[a:play_end + 1].sum() if q is not None else 0 for q in (q1, q2)]
+    if (red[0] >= TIMER_RUN) != (red[1] >= TIMER_RUN):
+        return 1 if red[0] >= TIMER_RUN else 2
+    att = [_combo_shown(cb, lo, hi)[a:play_end + 1].any() for cb in (combo1, combo2)]
+    if att[0] != att[1]:
+        return 2 if att[0] else 1
+    return None
+
+
 def _raw_ko(p: np.ndarray, c: np.ndarray, q: np.ndarray | None, lo: int, hi: int,
             fit: np.ndarray, p_opp: np.ndarray, fit_opp: np.ndarray,
-            timer_val: np.ndarray | None = None) -> int | None:
+            timer_val: np.ndarray | None = None, q_opp: np.ndarray | None = None) -> int | None:
     """Span-relative frame of a KO seen in the raw readings, before the fit gets there.
 
     A confident empty-bar reading on a side whose fit is already low, backed by
@@ -553,7 +723,15 @@ def _raw_ko(p: np.ndarray, c: np.ndarray, q: np.ndarray | None, lo: int, hi: int
     cand = (~np.isnan(pv) & (pv <= EMPTY_PCT) & ((cv >= END_CONF) | ((cv >= MIN_CONF) & covers))
             & ~np.isnan(fit) & (fit <= LOW_HP))
     ok = ~np.isnan(pv) & (cv >= MIN_CONF)
+    # Empty readings while the other side shows its red pending segment and
+    # this side shows none are this side attacking: its bar is covered by
+    # the combo's effects (the attacker essentially never loses HP).
+    attacking = _shown(q_opp, lo, hi) & ~_shown(q, lo, hi)
+    frozen = _frozen_clock_ko(pv, cv, p_opp[lo:hi], fit, fit_opp,
+                              None if timer_val is None else timer_val[lo:hi], attacking)
     for i in np.flatnonzero(cand & red):
+        if frozen is not None and i >= frozen:
+            break  # the frozen-clock KO is earlier
         level = prev[i]
         # The bar must stay (near) empty afterwards: a low bar hidden for a
         # frame mid-combo reads empty too, and then comes back.  Readings
@@ -576,12 +754,12 @@ def _raw_ko(p: np.ndarray, c: np.ndarray, q: np.ndarray | None, lo: int, hi: int
         if _clock_runs_on(timer_val, lo, hi, int(i)):
             continue
         return int(i)
-    return _frozen_clock_ko(pv, cv, p_opp[lo:hi], fit, fit_opp,
-                            None if timer_val is None else timer_val[lo:hi])
+    return frozen
 
 
 def _frozen_clock_ko(pv: np.ndarray, cv: np.ndarray, po: np.ndarray, fit: np.ndarray,
-                     fit_opp: np.ndarray, tv: np.ndarray | None) -> int | None:
+                     fit_opp: np.ndarray, tv: np.ndarray | None,
+                     attacking: np.ndarray | None = None) -> int | None:
     """Span-relative KO frame from a frozen clock over an empty bar (see CLOCK_STOP), or None.
 
     The KO is placed just after the side's last confident reading with fill
@@ -594,6 +772,8 @@ def _frozen_clock_ko(pv: np.ndarray, cv: np.ndarray, po: np.ndarray, fit: np.nda
     seen = ~np.isnan(tv)
     opp_shown = ~np.isnan(po) & (np.nan_to_num(po) > HUD_EMPTY)
     hit = seen & ~np.isnan(pv) & (np.nan_to_num(pv) <= HUD_EMPTY) & (cv >= END_CONF) & opp_shown
+    if attacking is not None:
+        hit &= ~attacking[:n]
     ok = ~np.isnan(pv) & (cv >= MIN_CONF)
     i = 0
     while i < n:
@@ -819,6 +999,18 @@ def _clean_side(p: np.ndarray, c: np.ndarray, q: np.ndarray | None, lo: int, hi:
     else:
         red_here = np.zeros_like(empty)
     red_shown = empty & red_here
+    if q is not None and red_shown.any():
+        # A lethal combo's red segment covers the bar where the fill was:
+        # red much narrower than the level just before is a red sprite or
+        # effect over an emptied-looking bar, not the KO.
+        qv = np.nan_to_num(q[lo:hi])
+        filled = np.flatnonzero(ok & ~empty & (cv >= END_CONF))
+        for i in np.flatnonzero(red_shown):
+            k = np.searchsorted(filled, i)
+            if k:
+                level = float(np.median(pv[filled[max(0, k - END_RUN):k]]))
+                if qv[i] < RED_COVER * level:
+                    red_shown[i] = False
     use = ok & (~empty | red_shown)
     blocked = np.zeros(len(pv), dtype=bool)
     gated = np.zeros(len(pv), dtype=bool)
@@ -997,6 +1189,12 @@ def clean_series(
         end = _play_end(p1, p2, c1, c2, lo, hi)
         if t_end is not None and (end is None or t_end < end):
             end = t_end
+        # Play goes on at least until the clock shows its final value: the
+        # last run of both bars read with fill can end much earlier when one
+        # side is down to a sliver the source cannot show.
+        fz = _clock_freeze(timer_val, lo, hi)
+        if fz is not None and end is not None and end < fz:
+            end = fz
         f1 = _clean_side(p1, c1, q1, lo, hi, end, q2, p_opp=p2, combo=combo1)
         f2 = _clean_side(p2, c2, q2, lo, hi, end, q1, p_opp=p1, combo=combo2)
         # Frames after the cut that a fit of the whole segment covers (read,
@@ -1011,13 +1209,31 @@ def clean_series(
         # KO lock: once one side is KO'd the round is over.  The survivor's
         # later readings (KO cinematic, slow-mo, transition screens) can only
         # be artifacts, so its HP is held from shortly after the KO.
-        k1, k2 = _first_ko(f1), _first_ko(f2)
-        r1 = _raw_ko(p1, c1, q1, lo, hi, f1, p2, f2, timer_val)
-        r2 = _raw_ko(p2, c2, q2, lo, hi, f2, p1, f1, timer_val)
-        if r1 is not None and (k1 is None or r1 < k1):
-            k1 = r1
-        if r2 is not None and (k2 is None or r2 < k2):
-            k2 = r2
+        # KO candidates per side: the fit reaching 0 and the raw KO.  A KO
+        # ends the round (the clock stops, the HUD goes for the slash): a
+        # side read at KO level while the clock still counts down afterwards
+        # is a live sliver, and that candidate is dropped.  A side with only
+        # such candidates was KO'd, if at all, when play ended.
+        alive = {1: None, 2: None}
+        play_end, _ = _hud_back(timer_val, lo, hi, fz)
+        k_end = None
+        if fz is not None:
+            k_end = fz if play_end is None else min(hi - lo - 1, play_end + 1)
+        ks = []
+        for side, f, r in ((1, f1, _raw_ko(p1, c1, q1, lo, hi, f1, p2, f2, timer_val, q2)),
+                           (2, f2, _raw_ko(p2, c2, q2, lo, hi, f2, p1, f1, timer_val, q1))):
+            cands = [k for k in (_first_ko(f), r) if k is not None]
+            valid = [k for k in cands if fz is None or k >= fz or not _clock_runs_on(timer_val, lo, hi, k)]
+            if len(valid) < len(cands):
+                alive[side] = min(cands)
+            if valid:
+                ks.append(min(valid))
+            elif cands:
+                last = np.flatnonzero(~np.isnan(f))
+                ks.append(min(k_end, int(last[-1])) if len(last) else k_end)
+            else:
+                ks.append(None)
+        k1, k2 = ks
         if k1 is None and k2 is None and end is not None:
             # KO fallback: the HUD is often up for only a few frames between
             # the KO and the slash that hides it, too few for the down-weighted
@@ -1033,18 +1249,43 @@ def clean_series(
                 else:
                     f2, k2 = g2, j2
         if k1 is None and k2 is None and t_end is not None:
-            hidden = _hidden_ko(f1, f2, timer_val, lo, t_end, seg_hi, n, combo1, combo2)
+            ev = (_end_loser(p1, p2, c1, c2, q1, q2, combo1, combo2, timer_val, lo, seg_hi, hud_only=True),
+                  _end_loser(p1, p2, c1, c2, q1, q2, combo1, combo2, timer_val, lo, seg_hi))
+            hidden = _hidden_ko(f1, f2, timer_val, lo, t_end, seg_hi, n, combo1, combo2, ev)
             if hidden is not None:
-                # From just after the last timer reading, or at least on the
-                # side's last cleaned frame (its final HP).
+                # From just after play ended (the last timer reading before
+                # the HUD went for the slash; the HUD can come back with the
+                # clock frozen), or at least on the side's last cleaned frame
+                # (its final HP).
                 f_lose = f1 if hidden == 1 else f2
-                k_h = min(t_end + 1, int(np.flatnonzero(~np.isnan(f_lose))[-1]))
+                k_h = t_end + 1 if play_end is None else min(t_end, play_end) + 1
+                k_h = min(k_h, int(np.flatnonzero(~np.isnan(f_lose))[-1]))
                 f_lose[k_h:][~np.isnan(f_lose[k_h:])] = 0.0
+                _ko_shown(f_lose, _hud_back(timer_val, lo, hi, fz)[1], k_h)
+                _alive_floor(f1, f2, hidden, k_h)
         kos = [(k, side) for k, side in ((k1, 1), (k2, 2)) if k is not None]
         if kos:
             k_ko, loser = min(kos)
+            # A KO first seen on the HUD shown again after the round-end
+            # slash (the clock frozen) happened while it was hidden: play
+            # ended with the last timer reading before the slash.
+            _, back = _hud_back(timer_val, lo, hi, fz)
+            if len(back) and play_end is not None and k_ko >= back[0]:
+                k_ko = play_end + 1
+            k_other = k2 if loser == 1 else k1
             # The HUD after the KO cinematic may come back after the cut.
             dko_surv = _near_double_ko_survivor(p1, p2, c1, c2, lo, seg_hi, k_ko, loser, f1, f2)
+            # Both sides at or near 0 when the round ended, or a KO that was
+            # only placed at the clock's stop (the side was a live sliver
+            # until then): who lost is decided by what the game shows.
+            f_surv = f2 if loser == 1 else f1
+            # Its fitted level around the KO (or its last one before it).
+            v = f_surv[:k_ko + DOUBLE_KO_FRAMES + 1]
+            v = v[~np.isnan(v)][-(OPP_REF + DOUBLE_KO_FRAMES):]
+            if alive[loser] is not None or k_other is not None or (len(v) and v.min() <= NEAR_DKO):
+                ev = _end_loser(p1, p2, c1, c2, q1, q2, combo1, combo2, timer_val, lo, seg_hi)
+                if ev is not None:
+                    dko_surv = 3 - ev
             if dko_surv is not None and dko_surv == loser:
                 # The HUD shows who survived: the survivor keeps its level
                 # from before the KO (its empty readings were a 1-px sliver
@@ -1056,12 +1297,15 @@ def clean_series(
                     f2 = _hold_after(p2, c2, q2, lo, hi, k_ko, f2, end, q1, None, p1, combo2)
                 f_lose = f1 if loser == 1 else f2
                 f_lose[k_ko:][~np.isnan(f_lose[k_ko:])] = 0.0
+                _ko_shown(f_lose, back, k_ko)
+                _alive_floor(f1, f2, loser, k_ko)
                 _store(o1, f1, shown1, lo, hi)
                 _store(o2, f2, shown2, lo, hi)
                 continue
             # The loser is at 0 from its KO (a raw KO can precede the fit).
             f_lose = f1 if loser == 1 else f2
             f_lose[k_ko:][~np.isnan(f_lose[k_ko:])] = 0.0
+            _ko_shown(f_lose, back, k_ko)
             # A double KO needs the survivor already low when the KO lands;
             # from high HP its later readings are KO-effect junk.
             surv = f2 if loser == 1 else f1
@@ -1076,15 +1320,22 @@ def clean_series(
                 ps1, ps2 = p1, p2
                 if dko_surv is not None:
                     # Shown surviving after the KO cinematic: its empty
-                    # readings after the KO are junk, not a double KO.
+                    # readings around the KO are junk (its own super's
+                    # sprites over its bar), not a double KO.
                     ps = (p2 if loser == 1 else p1).copy()
-                    tail = ps[lo + k_ko:hi]
+                    tail = ps[lo + max(0, k_ko - DOUBLE_KO_FRAMES):hi]
                     tail[tail <= EMPTY_PCT] = np.nan
                     ps1, ps2 = (p1, ps) if loser == 1 else (ps, p2)
                 if loser == 1:
                     f2 = _hold_after(ps2, c2, q2, lo, hi, cut, f2, end, q1, strict, p1, combo2)
                 else:
                     f1 = _hold_after(ps1, c1, q1, lo, hi, cut, f1, end, q2, strict, p2, combo1)
+            # A survivor already low at the KO that empties within
+            # DOUBLE_KO_FRAMES was KO'd too (double KO): it is only floored
+            # until then.
+            surv = f2 if loser == 1 else f1
+            k_surv = _first_ko(surv[k_ko:k_ko + DOUBLE_KO_FRAMES + 1]) if low else None
+            _alive_floor(f1, f2, loser, k_ko, None if k_surv is None else k_ko + k_surv)
         _store(o1, f1, shown1, lo, hi)
         _store(o2, f2, shown2, lo, hi)
     return CleanResult(p1=o1, p2=o2, segment=seg, resets=starts)
@@ -1092,12 +1343,21 @@ def clean_series(
 
 def _hidden_ko(f1: np.ndarray, f2: np.ndarray, timer_val: np.ndarray, lo: int, t_end: int,
                seg_hi: int, n: int, combo1: np.ndarray | None = None,
-               combo2: np.ndarray | None = None) -> int | None:
-    """The side KO'd out of sight in a round that ended with the clock running (see KO_LEAD), or None."""
-    if seg_hi >= n or timer_val[lo + t_end] < HIDDEN_KO_MIN_CLOCK:
+               combo2: np.ndarray | None = None,
+               evidence: tuple[int | None, int | None] = (None, None)) -> int | None:
+    """The side KO'd out of sight in a round that ended with the clock running (see KO_LEAD), or None.
+
+    ``evidence``: (_end_loser with the HUD shown again after the slash only,
+    _end_loser with all its rules).  With both sides low and close the
+    evidence decides; the last round of a video (no next round's intro to
+    prove the round ended) needs the HUD shown after the slash to agree.
+    """
+    if timer_val[lo + t_end] < HIDDEN_KO_MIN_CLOCK:
         return None
     intro = _intro_starts(timer_val)
-    if not ((intro >= seg_hi - TIMER_WIN) & (intro <= seg_hi + INTRO_BACK)).any():
+    next_round = seg_hi < n and bool(((intro >= seg_hi - TIMER_WIN) & (intro <= seg_hi + INTRO_BACK)).any())
+    ev_hud, ev_any = evidence
+    if not next_round and ev_hud is None:
         return None
     last = []
     for f in (f1, f2):
@@ -1108,12 +1368,44 @@ def _hidden_ko(f1: np.ndarray, f2: np.ndarray, timer_val: np.ndarray, lo: int, t
         last.append(float(v[-1]))
     lose = 1 if last[0] < last[1] else 2
     low, high = min(last), max(last)
-    if low > LOW_HP or high - low < KO_LEAD:
+    if low > LOW_HP:
+        return None
+    if high - low < KO_LEAD:
+        # Both low: the game shows who lost (see _end_loser).
+        return ev_any if next_round else ev_hud
+    if not next_round and ev_hud != lose:
         return None
     a = max(0, t_end + 1 - HIDDEN_KO_COMBO)
     if _combo_shown(combo1 if lose == 1 else combo2, lo, lo + t_end + 1)[a:].any():
         return None
     return lose
+
+
+def _ko_shown(f_lose: np.ndarray, back: np.ndarray, k_ko: int) -> None:
+    """The KO'd side is 0 on the HUD frames shown again after the round-end
+    slash (``back``, see _hud_back), in place.  Its fit can leave them empty
+    (an empty bar read with middling confidence after a cinematic), and the
+    round detector would then end the round at the last value before the KO."""
+    f_lose[back[back >= k_ko]] = 0.0
+
+
+def _alive_floor(f1: np.ndarray, f2: np.ndarray, loser: int, k_ko: int,
+                 k_surv: int | None = None) -> None:
+    """Keep a side that is alive at ALIVE_MIN or above (in place).
+
+    The survivor is alive for the whole round, the loser until its KO frame:
+    a bar fitted to (nearly) 0 there was a sliver the source could barely
+    show, and "exactly 0" must mean KO'd (the round detector relies on it).
+    ``k_surv``: the survivor's own KO frame in a double KO (it is only kept
+    alive until then).
+    """
+    for side, f in ((1, f1), (2, f2)):
+        if side == loser:
+            span = f[:k_ko]
+        else:
+            span = f if k_surv is None else f[:k_surv]
+        low = ~np.isnan(span) & (span < ALIVE_MIN)
+        span[low] = ALIVE_MIN
 
 
 def _store(out: np.ndarray, fit: np.ndarray, shown: np.ndarray | None, lo: int, hi: int) -> None:

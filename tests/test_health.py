@@ -128,6 +128,23 @@ class TestBarMeasurement:
         d = _extract(img)
         assert d.p1_health is None and d.p2_health is None
 
+    def test_warm_scenery_above_the_bar_does_not_hide_fill(self):
+        # New VOD set 01 at 140 s: a cream/pink stage right above P2's pink
+        # bar marked those columns "not a bar" and cut the reading at the
+        # start of the scenery (0.37 instead of 0.41).
+        img = _synthetic_frame(0.80, 0.41)
+        img[100:110, 1180:1400] = (170, 200, 235)   # pale warm scenery, not the bar's colour
+        d = _extract(img)
+        assert abs(d.p2_health.health_pct - 0.41) < 0.01
+
+    def test_dim_blue_stage_through_an_empty_bar_is_not_fill(self):
+        # New VOD set 01 at 411 s: P2 is KO'd; a blue stage seen through the
+        # semi-transparent empty bar (H ~95, S ~70, V ~80) read as 7 % fill.
+        img = _synthetic_frame(0.25, 0.0)
+        img[116:139, 1052:1100] = (90, 72, 45)
+        d = _extract(img)
+        assert d.p2_health is not None and d.p2_health.health_pct < 0.005
+
     def test_fullscreen_orange_is_not_a_bar(self):
         # Super cinematics fill the HUD area with one colour (letterboxed top).
         img = np.zeros((1080, 1920, 3), np.uint8)
@@ -196,7 +213,7 @@ def test_survivor_hp_not_lowered_after_ko():
     p1 = _round([(100, 0.8), (40, 0.1)])
     p2 = _round([(80, 0.5), (60, 0.0)])
     q2 = np.zeros(140)
-    q2[80:90] = 0.2
+    q2[80:90] = 0.5    # the lethal combo's red covers the bar where the fill was
     c = np.ones(140)
     c1 = c.copy()
     r = clean_series(p1, p2, c1, c, None, q2)
@@ -751,3 +768,176 @@ def test_survivor_shown_again_after_the_ko_keeps_its_level():
     r = clean_series(p1, p2, c1, c2, q1, np.zeros(n), timer)
     assert r.p1[319] == 0.0
     assert abs(r.p2[319] - 0.071) < 1e-9
+
+
+# ── A KO ends the round (clock stops, HUD goes for the slash) ────────────
+
+def _clock(n: int, start: int, stop: int, every: int = 30) -> np.ndarray:
+    """Timer counting down one per ``every`` samples until frame ``stop``, then frozen."""
+    t = np.array([start - min(k, stop) // every for k in range(n)], dtype=float)
+    return t
+
+
+def test_sliver_while_the_clock_runs_is_not_a_ko():
+    # New VOD set 04 R3 / set 10 R0: P1 is down to the last HP point (a 1-px
+    # sliver read 0.003) from frame 100, but the clock keeps counting down and
+    # P2 keeps taking damage.  P2 is KO'd at the end by P1's super (HUD hidden,
+    # then shown again with the clock stopped: P2 empty, P1's sliver).
+    n = 560
+    timer = _clock(n, 70, 420)
+    p1 = np.full(n, 0.30)
+    p1[100:] = 0.003
+    p2 = np.full(n, 0.60)
+    q2 = np.zeros(n)
+    p2[200:], q2[200:230] = 0.40, 0.20
+    p2[350:], q2[350:380] = 0.20, 0.20
+    p2[410:], q2[410:430] = 0.01, 0.19
+    c1, c2 = np.full(n, 0.8), np.full(n, 0.9)
+    combo1 = np.zeros(n, dtype=bool)
+    combo1[400:430] = True
+    hidden = slice(430, 480)
+    for a in (p1, p2, timer):
+        a[hidden] = np.nan
+    p2[480:] = 0.0
+    p1[480:] = 0.004
+    r = clean_series(p1, p2, c1, c2, np.zeros(n), q2, timer, combo1, None)
+    assert r.p2[-1] == 0.0
+    assert r.p1[-1] > 0.0 and np.nanmin(r.p1) > 0.0      # alive the whole round
+    assert abs(r.p2[300] - 0.40) < 0.01                  # damage after the "KO" is kept
+    assert abs(r.p2[400] - 0.20) < 0.01
+
+
+def test_winner_is_frozen_at_the_ko_through_the_slash_wipe():
+    # New VOD set 06 R8 / set 09 R4: P1 is KO'd while the HUD is hidden; when
+    # the HUD comes back (clock stopped) the round-end wipe covers part of
+    # P2's bar, which reads 0.75 instead of 0.95.
+    n = 420
+    timer = _clock(n, 70, 290)
+    p1 = np.full(n, 0.30)
+    q1 = np.zeros(n)
+    p1[250:], q1[250:300] = 0.05, 0.25
+    p2 = np.full(n, 0.95)
+    c = np.full(n, 0.9)
+    hidden = slice(300, 360)
+    for a in (p1, p2, timer):
+        a[hidden] = np.nan
+    p1[360:] = 0.0
+    p2[360:] = 0.75
+    r = clean_series(p1, p2, c, c, q1, np.zeros(n), timer)
+    assert r.p1[-1] == 0.0
+    assert abs(r.p2[-1] - 0.95) < 1e-9
+
+
+def test_red_sprite_over_the_winner_bar_is_not_its_ko():
+    # yt_KWXz7dmt2Pk R2: the attacker's red sprite covers its own bar right
+    # before it KOs P2: P1 reads empty with "pending red" 0.14 next to a 0.49
+    # bar.  A lethal combo's red covers the bar where the fill was.
+    n = 300
+    timer = _clock(n, 80, 200)
+    p1 = np.full(n, 0.49)
+    q1 = np.zeros(n)
+    p1[190:200], q1[190:200] = 0.0, 0.14
+    p2 = np.full(n, 0.04)
+    q2 = np.zeros(n)
+    p2[200:], q2[200:215] = 0.0, 0.04
+    c = np.full(n, 0.85)
+    for a in (p1, p2, timer):
+        a[215:250] = np.nan
+    r = clean_series(p1, p2, c, c, q1, q2, timer)
+    assert r.p2[-1] == 0.0
+    assert abs(r.p1[-1] - 0.49) < 1e-9
+
+
+def test_hidden_ko_with_both_sides_low_goes_to_the_side_being_hit():
+    # New VOD set 07 R1: both bars low and close (0.035 / 0.047) when the HUD
+    # goes; P2 shows the red of P1's combo (P1's counter is up).  The next
+    # round starts without the HUD coming back.
+    n = 700
+    timer = _clock(n, 60, 330)
+    p1 = np.full(n, 0.035)
+    p1[:100] = 0.4
+    p2 = np.full(n, 0.047)
+    p2[:200] = 0.5
+    q2 = np.zeros(n)
+    q2[200:330] = 0.45
+    combo1 = np.zeros(n, dtype=bool)
+    combo1[260:325] = True
+    c = np.full(n, 0.9)
+    for a in (p1, p2, timer):
+        a[330:450] = np.nan
+    # Next round: intro timer and full bars.
+    timer[450:] = 99
+    p1[450:], p2[450:], q2[450:] = 1.0, 1.0, 0.0
+    r = clean_series(p1, p2, c, c, np.zeros(n), q2, timer, combo1, None)
+    assert r.resets[-1] >= 440
+    assert r.p2[320] == 0.0 or r.p2[329] == 0.0
+    assert r.p1[329] > 0.0
+
+
+def test_double_ko_both_sides_reach_zero():
+    # Both sides low (0.15 / 0.12) and emptied by simultaneous hits with the
+    # red shown; the clock stops.  A double KO: both end at exactly 0 (the
+    # alive floor only applies to a side that survived).
+    n = 400
+    timer = _clock(n, 60, 300)
+    p1, p2 = np.full(n, 0.15), np.full(n, 0.12)
+    q1, q2 = np.zeros(n), np.zeros(n)
+    p1[300:], q1[300:330] = 0.0, 0.15
+    p2[300:], q2[300:330] = 0.0, 0.12
+    c = np.full(n, 0.9)
+    r = clean_series(p1, p2, c, c, q1, q2, timer)
+    assert r.p1[-1] == 0.0 and r.p2[-1] == 0.0
+    assert r.p1[299] > 0.0 and r.p2[299] > 0.0
+
+
+def test_clock_carrying_on_across_a_long_hud_gap_keeps_one_round():
+    # Tappa #4 14_Grands R6: a super hides the whole HUD for 5.6 s (more than
+    # SEGMENT_GAP) with the clock at 84 on both sides: still one segment.
+    from replanal.health_clean import SEGMENT_GAP, _clock_continues
+    n = 900
+    timer = _clock(n, 90, 900)
+    gap = slice(300, 300 + SEGMENT_GAP + 20)
+    timer[gap] = np.nan
+    assert _clock_continues(timer, gap.start - 1, gap.stop)
+    p1, p2 = np.full(n, 0.8), np.full(n, 0.6)
+    p1[gap] = p2[gap] = np.nan
+    c = np.full(n, 0.9)
+    r = clean_series(p1, p2, c, c, None, None, timer)
+    assert len(r.resets) == 1
+    # A new round's intro value after the gap is no continuation.
+    t2 = timer.copy()
+    t2[gap.stop:] = 99
+    assert not _clock_continues(t2, gap.start - 1, gap.stop)
+
+
+def test_end_loser_needs_the_attacker_counter_at_the_end_of_play():
+    # Both low when the HUD goes for good (no HUD shown after the slash, no
+    # red on either side).  P1's counter from a combo that ended 2 s before
+    # the end of play says nothing about the last hit (P2's one-hit reversal
+    # shows no counter); a counter up in the last frames of play does.
+    from replanal.health_clean import _end_loser
+    n = 400
+    timer = _clock(n, 40, 300)
+    timer[300:] = np.nan
+    p1, p2 = np.full(n, 0.05), np.full(n, 0.04)
+    c = np.full(n, 0.9)
+    q = np.zeros(n)
+    combo1 = np.zeros(n, dtype=bool)
+    combo1[200:250] = True
+    assert _end_loser(p1, p2, c, c, q, q, combo1, None, timer, 0, n) is None
+    combo1[285:300] = True
+    assert _end_loser(p1, p2, c, c, q, q, combo1, None, timer, 0, n) == 2
+
+
+def test_kod_side_is_empty_on_the_hud_shown_after_the_slash():
+    # New VOD set 08 R10 (590-690 s of the raw readings): both on slivers,
+    # P2 KO'd by P1's last hit, the HUD comes back at 674.3 s with the clock
+    # frozen at 42 and P2's bar empty (read with confidence 0.64-0.89).  The
+    # fit left P2 empty (None) there, so the round ended at P2's 0.021.
+    from pathlib import Path
+    d = np.load(Path(__file__).parent / "data" / "health" / "nv08_r10_end.npz")
+    r = clean_series(d["p1"], d["p2"], d["c1"], d["c2"], d["q1"], d["q2"], d["timer"], d["combo1"], d["combo2"])
+    back = (d["t"] > 674.2) & (d["t"] < 676.7) & ~np.isnan(d["timer"])
+    assert back.sum() > 50
+    assert (r.p2[back] == 0.0).all()
+    assert (r.p1[back] > 0.02).all()
