@@ -79,13 +79,14 @@ export function HealthTimeline({
     let lastP2: number | null = null;
     for (let i = 0; i < data.length; i += step) {
       const f = data[i];
+      // HP is the filled fraction of the bar (a full bar reads 1.0).
       const p1 =
         f.p1_health_pct !== null
-          ? Math.min(f.p1_health_pct / 0.875, 1.0)
+          ? Math.min(Math.max(f.p1_health_pct, 0), 1)
           : null;
       const p2 =
         f.p2_health_pct !== null
-          ? Math.min(f.p2_health_pct / 0.875, 1.0)
+          ? Math.min(Math.max(f.p2_health_pct, 0), 1)
           : null;
       // Forward-fill: hold last valid health value through gaps
       if (p1 !== null) lastP1 = p1;
@@ -101,25 +102,28 @@ export function HealthTimeline({
     return points;
   }, [frameData, selectedMatch]);
 
-  // Detect tension spend events: significant drops between consecutive points
+  // Detect tension spend events: significant drops from the last reading.
+  // Tension is unknown (null) while the HUD is hidden, which includes every
+  // super cinematic, where tension is spent: the drop shows across the gap,
+  // so compare with the last non-null reading up to MAX_GAP_S back.
   const tensionSpends = useMemo(() => {
     if (chartData.length < 2) return [];
     const spends: TensionSpend[] = [];
     const MIN_DROP = 0.12; // ignore tiny jitter
-    for (let i = 1; i < chartData.length; i++) {
-      const prev = chartData[i - 1];
-      const cur = chartData[i];
-      if (prev.t1 !== null && cur.t1 !== null) {
-        const drop = prev.t1 - cur.t1;
-        if (drop >= MIN_DROP) {
-          spends.push({ time_s: cur.time_s, side: "p1", drop });
+    const MAX_GAP_S = 8; // longer gaps: round transitions, menus
+    const last: Record<"p1" | "p2", { v: number; t: number } | null> = { p1: null, p2: null };
+    for (const cur of chartData) {
+      for (const side of ["p1", "p2"] as const) {
+        const v = side === "p1" ? cur.t1 : cur.t2;
+        if (v === null) continue;
+        const prev = last[side];
+        if (prev !== null && cur.time_s - prev.t <= MAX_GAP_S) {
+          const drop = prev.v - v;
+          if (drop >= MIN_DROP) {
+            spends.push({ time_s: cur.time_s, side, drop });
+          }
         }
-      }
-      if (prev.t2 !== null && cur.t2 !== null) {
-        const drop = prev.t2 - cur.t2;
-        if (drop >= MIN_DROP) {
-          spends.push({ time_s: cur.time_s, side: "p2", drop });
-        }
+        last[side] = { v, t: cur.time_s };
       }
     }
     return spends;

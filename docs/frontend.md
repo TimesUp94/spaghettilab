@@ -202,6 +202,9 @@ interface TensionSpend {
   drop: number;  // drops >= 12% are marked
 }
 ```
+A drop is measured from the side's last non-null tension reading up to 8 s back: tension is
+`null` while the HUD is hidden, which includes every super cinematic, where tension is spent
+(29 % of the drops on Tappa #4 are only visible across such a gap).
 
 **Visual features:**
 - Round boundaries as `ReferenceLine` components
