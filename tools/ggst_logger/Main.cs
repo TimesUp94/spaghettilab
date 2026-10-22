@@ -3,7 +3,7 @@
 // come from WistfulHopes/GGSTReplayTakeover (MIT); the offsets were re-found for
 // the 2026-09 Strive build (object manager +0xC38, analysers +0x3868 (P1) and +0x39E2 (P2), each the first of three,
 // game frame +0x3E7C). Player objects (pointers at +0x928/+0x930): action name
-// +0x38A8, facing +0x3AC (0 = right), x/y +0x3B0/+0x3B4, HP +0x1254.
+// +0x38A8, facing +0x3AC (0 = right), x/y +0x3B0/+0x3B4, HP +0x1254, sprite name +0x12F8.
 using System.Globalization;
 using Stopwatch = System.Diagnostics.Stopwatch;
 using System.Runtime.CompilerServices;
@@ -80,7 +80,7 @@ public static class Main
         var path = Path.Combine(LogDir, $"inputs_{DateTime.Now:yyyyMMdd_HHmmss}.csv");
         _out = new StreamWriter(path) { AutoFlush = true };
         _out.WriteLine("qpc,qpc_freq,call,dt,round,game_frame,p1_rec,p2_rec,"
-                       + "p1_act,p1_face,p1_x,p1_y,p1_hp,p2_act,p2_face,p2_x,p2_y,p2_hp");
+                       + "p1_act,p1_face,p1_x,p1_y,p1_hp,p2_act,p2_face,p2_x,p2_y,p2_hp,p1_sprite,p2_sprite");
         _trace = new StreamWriter(Path.Combine(LogDir, $"calls_{DateTime.Now:yyyyMMdd_HHmmss}.csv")) { AutoFlush = true };
         _trace.WriteLine("game_frame,call,analyzer_off,rec_flag,ret");
         _traceRows = 0;
@@ -96,6 +96,15 @@ public static class Main
         if (nul >= 0) act = act[..nul];
         return string.Create(CultureInfo.InvariantCulture,
             $"{act},{*(int*)(p + 0x3AC)},{*(int*)(p + 0x3B0)},{*(int*)(p + 0x3B4)},{*(int*)(p + 0x1254)}");
+    }
+
+    // Current sprite, e.g. "sol000_11": the first three letters are the character code.
+    private static unsafe string Sprite(byte* p)
+    {
+        if (p == null || !Readable((IntPtr)(p + 0x12F8), 32)) return "";
+        var spr = Marshal.PtrToStringAnsi((IntPtr)(p + 0x12F8), 32) ?? "";
+        var nul = spr.IndexOf('\0');
+        return nul >= 0 ? spr[..nul] : spr;
     }
 
     private static void Close()
@@ -200,7 +209,7 @@ public static class Main
             if (frame == _lastFrame && round == _lastRound) return;
             _lastFrame = frame;
             _lastRound = round;
-            _out!.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{Stopwatch.GetTimestamp()},{Stopwatch.Frequency},{_calls},{dt:F5},{round},{frame},{_p1},{_p2},{Player(om->PlayerP1)},{Player(om->PlayerP2)}"));
+            _out!.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{Stopwatch.GetTimestamp()},{Stopwatch.Frequency},{_calls},{dt:F5},{round},{frame},{_p1},{_p2},{Player(om->PlayerP1)},{Player(om->PlayerP2)},{Sprite(om->PlayerP1)},{Sprite(om->PlayerP2)}"));
             _rows++;
         }
         catch (Exception e)

@@ -65,26 +65,11 @@ DAMAGE_PREFIXES = (
 )
 THROW_TECH = "CmnActHajikare"   # both players after a teched throw
 
-# Internal 3-letter character codes used as action prefixes.
-CHAR_CODES = {
-    "SOL": "Sol", "KYK": "Ky", "MAY": "May", "AXL": "Axl", "CHP": "Chipp", "POT": "Potemkin",
-    "FAU": "Faust", "MLL": "Millia", "ZAT": "Zato-1", "RAM": "Ramlethal", "LEO": "Leo",
-    "NAG": "Nagoriyuki", "GIO": "Giovanna", "ANJ": "Anji", "INO": "I-No", "GLD": "Goldlewis",
-    "JKO": "Jack-O", "COS": "Happy Chaos", "BKN": "Baiken", "TST": "Testament",
-    "BGT": "Bridget", "SIN": "Sin", "BED": "Bedman?", "ASK": "Asuka", "JHN": "Johnny",
-    "ELP": "Elphelt", "ABA": "A.B.A", "SLY": "Slayer", "DZY": "Dizzy", "VEN": "Venom",
-    "UNI": "Unika", "LUC": "Lucy",
-}
-# Characters whose actions carry no prefix: identified by signature action names
-# (confirmed on video: Asuka R# = Special_MP / Magic / PhysicalLaw).
-CHAR_SIGNATURES = {
-    "Asuka": {"Special_MP", "Magic", "Magic_air", "PhysicalLaw"},
-    "Leo": {"EisenSturmC", "EisenSturmD", "ErstWind", "ZweitWind", "GraviertWurdeC"},
-}
-COMMON_PREFIXES = ("CmnAct", "NmlAtk", "WSB_", "WinAction", "ThrowExe", "AirThrowExe",
-                   "CounterBlitz")
-
-BTN = {"A": "P", "B": "K", "C": "S", "D": "H", "E": "D"}
+# Character identification and move naming live in moves.py (CHAR_CODES, CHAR_SIGNATURES,
+# per-character move tables, categories).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from moves import (CHAR_CODES, CHAR_SIGNATURES, COMMON_PREFIXES, BTN, classify,  # noqa: E402,F401
+                   infer_character, move_info, notation, resolve_character)
 
 
 def is_damage(act: str) -> bool:
@@ -97,44 +82,6 @@ def is_guard(act: str) -> bool:
 
 def is_common(act: str) -> bool:
     return act.startswith("CmnAct") or act.startswith("WSB_") or act.startswith("WinAction")
-
-
-def notation(act: str) -> str:
-    """Internal action name -> numpad notation (NmlAtk5CFar -> f.S, NmlAtkAir5B -> j.K)."""
-    if act in ("NmlAtkThrow", "ThrowExe"):
-        return "Throw"
-    if act in ("NmlAtkAirThrow", "AirThrowExe"):
-        return "j.Throw"
-    m = re.fullmatch(r"NmlAtk(Air)?(\d)([A-E])(Near|Far)?(_.*)?", act)
-    if m:
-        air, d, b, nf, suf = m.groups()
-        btn = BTN[b]
-        if nf == "Near":
-            s = "c.S"
-        elif nf == "Far":
-            s = "f.S"
-        else:
-            s = (("j." + ("" if d == "5" else d)) if air else d) + btn
-        return s + (f"({suf[1:]})" if suf else "")
-    if act == "CmnActBurst":
-        return "Burst"
-    return act
-
-
-def infer_character(acts: np.ndarray) -> str:
-    names = collections.Counter(acts)
-    codes = collections.Counter()
-    for a, n in names.items():
-        m = re.match(r"([A-Z]{3})_", a)
-        if m and m.group(1) in CHAR_CODES:
-            codes[m.group(1)] += n
-    if codes:
-        return CHAR_CODES[codes.most_common(1)[0][0]]
-    own = {a for a in names if not a.startswith(COMMON_PREFIXES)}
-    best = max(CHAR_SIGNATURES.items(), key=lambda kv: len(kv[1] & own))
-    if best[1] & own:
-        return best[0]
-    return "unknown:" + "/".join(sorted(own)[:4])
 
 
 # --------------------------------------------------------------------------------------
@@ -163,7 +110,10 @@ def load_log(path: str) -> dict:
     cols = list(zip(*rows))
     d = {}
     for k, col in zip(head, cols):
-        d[k] = np.array(col) if k.endswith("_act") else np.array(col, dtype=np.float64)
+        if k.endswith(("_act", "_char")):        # p*_char: logger character field (name or id)
+            d[k] = np.array(col)
+        else:
+            d[k] = np.array(col, dtype=np.float64)
     d["t"] = (d["qpc"] - d["qpc"][0]) / d["qpc_freq"][0]
     d["n"] = len(rows)
     return d
@@ -639,7 +589,7 @@ def process_replay(entry: dict, args) -> dict:
     log = load_log(entry["csv"])
     cv = load_cv(stem)
     hpmax = {s: float(log[f"p{s}_hp"].max()) for s in (1, 2)}
-    chars = {s: infer_character(log[f"p{s}_act"]) for s in (1, 2)}
+    chars = {s: resolve_character(log[f"p{s}_act"], log.get(f"p{s}_char"))[0] for s in (1, 2)}
     al = align(log, cv, hpmax)
     rows, stats = extract_openers(log, hpmax, args.quiet)
     for r in rows:
@@ -667,6 +617,35 @@ def process_replay(entry: dict, args) -> dict:
     return res
 
 
+def relabel(entry: dict, res: dict) -> None:
+    """Characters (logger char column, else action-name inference) and clean move / category
+    (moves.classify) for a processed replay, cached or fresh: naming changes need no --force."""
+    log = load_log(entry["csv"])
+    chars, src = {}, {}
+    for s in (1, 2):
+        chars[s], src[s] = resolve_character(log[f"p{s}_act"], log.get(f"p{s}_char"))
+    summ = res["summary"]
+    summ["p1_char"], summ["p2_char"] = chars[1], chars[2]
+    summ["char_source"] = {"p1": src[1], "p2": src[2]}
+    for r in res["rows"]:
+        side = int(r["attacker"][1])
+        # last real attack (not a common / non-attack state such as Asuka's Draw, Leo's backturn
+        # walk): the source of a projectile hit while the attacker does something else
+        acts = log[f"p{side}_act"]
+        r["last_real_attack_act"], r["last_real_attack_age"] = "", None
+        for k in range(r["log_row"], max(0, r["log_row"] - 240), -1):
+            mi = move_info(chars[side], acts[k])
+            if mi and "nonattack" not in mi[3] and mi[2] not in ("other",) or (mi is None and not is_common(acts[k])):
+                r["last_real_attack_act"], r["last_real_attack_age"] = acts[k], int(r["log_row"] - run_start(acts, k))
+                break
+        r["attacker_char"] = chars[int(r["attacker"][1])]
+        r["defender_char"] = chars[int(r["defender"][1])]
+        r["char"] = r["attacker_char"]
+        r["char_source"] = src[int(r["attacker"][1])]
+        r["move_guess"] = notation(r["last_attack_act"], r["char"]) if r["projectile_likely"] and r["last_attack_act"]             else notation(r["move_act"], r["char"])
+        r.update(classify(r))
+
+
 def set_own_priority(cls: int) -> None:
     try:
         k = ctypes.windll.kernel32
@@ -682,6 +661,8 @@ def main():
     ap.add_argument("--force", action="store_true", help="redo alignment/openers/strips (keeps CV runs)")
     ap.add_argument("--force-cv", action="store_true", help="rerun the CV pipeline too")
     ap.add_argument("--no-strips", action="store_true")
+    ap.add_argument("--no-cv", action="store_true",
+                    help="never start the CV pipeline (replays without CV output are skipped)")
     ap.add_argument("--only", nargs="*", help="replay stems to process")
     ap.add_argument("--quiet", type=int, default=1,
                     help="opener: defender in no damage state in the preceding N frames (default 1)")
@@ -694,7 +675,7 @@ def main():
     if args.only:
         entries = [e for e in entries if Path(e["video"]).stem in args.only]
     print(f"{len(entries)} complete manifest entries")
-    todo = [e for e in entries if args.force_cv or not cv_done(Path(e["video"]).stem)]
+    todo = [] if args.no_cv else [e for e in entries if args.force_cv or not cv_done(Path(e["video"]).stem)]
     if todo:
         print(f"running CV pipeline on {len(todo)} video(s), {args.jobs} at a time")
         with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
@@ -709,6 +690,7 @@ def main():
             continue
         fresh = args.force or not (run_dir(stem) / "openers.json").exists()
         res = process_replay(e, args)
+        relabel(e, res)
         results.append((e, res, fresh))
 
     # counter-hit guess needs all replays (hitstop per move)
@@ -777,6 +759,11 @@ def write_outputs(results, rows) -> None:
                 precision_in_combo=_r(sum(s["cv"]["precision_in_combo"] * s["cv"]["cv_events"] for s in summ if s["cv"]["precision_in_combo"] is not None) / tot_ev) if tot_ev else None),
         moves_by_char={ch: collections.Counter(r["move"] for r in rows if r["attacker_char"] == ch).most_common(15)
                        for ch in sorted({r["attacker_char"] for r in rows})},
+        openers_by_char=dict(collections.Counter(r["attacker_char"] for r in rows).most_common()),
+        openers_by_category=dict(collections.Counter(r["category"] for r in rows).most_common()),
+        char_category={ch: dict(collections.Counter(r["category"] for r in rows if r["attacker_char"] == ch))
+                       for ch in sorted({r["attacker_char"] for r in rows})},
+        unmapped_moves=sorted({f'{r["attacker_char"]}:{r["move_src_act"]}' for r in rows if not r["mapped"]}),
         flags=dict(projectile_likely=sum(r["projectile_likely"] for r in rows), throws=sum(r["is_throw"] for r in rows),
                    supers=sum(r["is_super"] for r in rows), rc_recent=sum(r["rc_recent"] for r in rows),
                    counter_hit=sum(bool(r.get("counter_hit")) for r in rows),

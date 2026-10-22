@@ -39,3 +39,9 @@ python tools/ggst_logger/dataset/build.py --idle
 ```
 
 `GGST_DATA` sets the data root; the default is `G:\Projects\replanal-data`.
+
+## More
+
+- **`drive/search_batch.py`:** records other players' replays from Replay → Search, character by character and rank tier by rank tier (Iron … Vanquisher). It records `--per-rank` replays each and saves the character and rank range in the manifest.
+- **`dataset/moves.py`:** names characters from their action prefixes or signature actions, and maps action names to notation, move name and category. The logger's `p*_sprite` column (e.g. `sol000_11`) starts with the character code.
+- **`model/`:** first visual models trained on attacker crops around each opener: category, button and stance, and the exact move for the best-covered characters. Each script states how to run it.

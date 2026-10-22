@@ -1,0 +1,2911 @@
+{
+ "characters": {
+  "codes": {
+   "SOL": "Sol",
+   "KYK": "Ky",
+   "MAY": "May",
+   "AXL": "Axl",
+   "CHP": "Chipp",
+   "POT": "Potemkin",
+   "FAU": "Faust",
+   "MLL": "Millia",
+   "ZAT": "Zato-1",
+   "RAM": "Ramlethal",
+   "LEO": "Leo",
+   "NAG": "Nagoriyuki",
+   "GIO": "Giovanna",
+   "ANJ": "Anji",
+   "INO": "I-No",
+   "GLD": "Goldlewis",
+   "JKO": "Jack-O",
+   "COS": "Happy Chaos",
+   "BKN": "Baiken",
+   "TST": "Testament",
+   "BGT": "Bridget",
+   "SIN": "Sin",
+   "BED": "Bedman?",
+   "ASK": "Asuka",
+   "JHN": "Johnny",
+   "ELP": "Elphelt",
+   "ABA": "A.B.A",
+   "SLY": "Slayer",
+   "sly": "Slayer",
+   "DZY": "Dizzy",
+   "VEN": "Venom",
+   "UNI": "Unika",
+   "LUC": "Lucy"
+  },
+  "signatures": {
+   "Asuka": [
+    "Change_deck",
+    "Change_deck_air",
+    "Draw_or_Discard",
+    "Draw_or_Discard_air",
+    "Magic",
+    "Magic_air",
+    "PhysicalLaw",
+    "Special_MP",
+    "fuwafuwa"
+   ],
+   "Leo": [
+    "EisenSturmC",
+    "EisenSturmD",
+    "ErstWind",
+    "GlaenzenDunkel",
+    "GraviertWurdeC",
+    "GraviertWurdeD",
+    "LeidenschaftDirigent",
+    "Semuke",
+    "StahlWirbel",
+    "Turbulenz",
+    "ZweitWind"
+   ],
+   "Sol": [
+    "BanditBringer_Air",
+    "BanditBringer_Land",
+    "BanditRevolver_Land",
+    "BukkiraExe",
+    "BukkirabouNiNageru",
+    "Fefnir",
+    "GunFlame",
+    "GunFlameFeint",
+    "NewSidewinder",
+    "VolcanicViperAirS",
+    "VolcanicViperLandHS",
+    "VolcanicViperLandS",
+    "Vortex"
+   ],
+   "Ky": [
+    "AirStunEdge1",
+    "AirVaporThrustD",
+    "Diaekura",
+    "DragonInstall",
+    "FadulArc",
+    "Lightning",
+    "SacredEdge",
+    "StunDipper",
+    "StunEdge1",
+    "StunEdge2",
+    "VaporThrustC",
+    "VaporThrustD"
+   ],
+   "Chipp": [
+    "AirAlphaBlade_Cancel",
+    "AirAlphaBlade_yoko",
+    "AlphaBlade",
+    "AlphaBlade_Cancel",
+    "AlphaBlade_yoko",
+    "BankiMessai",
+    "Banzai",
+    "GammaBlade",
+    "ItoAtk",
+    "Shuriken",
+    "Sukiyaki",
+    "Sushi",
+    "ThreadRun_Jump"
+   ],
+   "Ramlethal": [
+    "AgresaOrdono",
+    "BajonetoC",
+    "BajonetoD",
+    "Dauro",
+    "Erarurumo1",
+    "Erarurumo2",
+    "Erarurumo3",
+    "Falstelo",
+    "Morutobato",
+    "Ondo",
+    "Sabrobato",
+    "ShirudoLand"
+   ],
+   "Potemkin": [
+    "FDB",
+    "HammerFall",
+    "HammerFallBrake",
+    "HeatKnucle",
+    "HeatTackle",
+    "HeavenlyPBuster",
+    "MegaFistBack",
+    "MegaFistFront",
+    "PotemkinBuster",
+    "PotemkinBusterExe",
+    "SlideHead"
+   ],
+   "Nagoriyuki": [
+    "Bloodsucking_Universe",
+    "Bloodsucking_UniverseExe",
+    "Hukyou",
+    "Hukyou_B",
+    "Kamuriyuki",
+    "Shizuriyuki",
+    "Wasureyuki",
+    "Zarameyuki",
+    "berserk",
+    "berserkEnd"
+   ],
+   "Axl": [
+    "AxlBomber",
+    "ByakueRenshou",
+    "Katatumuri",
+    "Katatumuri_Air",
+    "Kyokusageki",
+    "Mogaribue",
+    "Niwatazumi",
+    "OneVision",
+    "Rensen_Bomb",
+    "Rensen_Bomb_Just",
+    "Rensengeki",
+    "Sensageki",
+    "WinterMantis"
+   ],
+   "Baiken": [
+    "Atemi",
+    "HimoKabari",
+    "Kabari",
+    "KabariHasei",
+    "KenjyuLand",
+    "TatamiLand",
+    "TsuraneSanzuWatashi",
+    "YouZanSen"
+   ],
+   "Faust": [
+    "Ai",
+    "Kuebiko",
+    "MettaGari",
+    "NaNaNaNanigaDerukana",
+    "NanigaDerukana",
+    "Nekkakonnrenn",
+    "Nekkakonnrenn_Air",
+    "NiceShot_NoHasei",
+    "Tsukimasu",
+    "exciting"
+   ],
+   "Anji": [
+    "Fujin",
+    "Issokutobi",
+    "KachoFugetsu",
+    "Kou",
+    "Midare",
+    "Nagiha",
+    "Rin",
+    "Sai",
+    "Shin",
+    "Shitsu",
+    "Suigetsu"
+   ],
+   "Millia": [
+    "Artemis",
+    "BadMoon",
+    "IronSavior",
+    "Kapel",
+    "KousokuRakka",
+    "LustShaker",
+    "Mirazh",
+    "SeptemVoices",
+    "TandemTopC",
+    "TandemTopD",
+    "Winger"
+   ],
+   "I-No": [
+    "AirHover_4",
+    "AirHover_6",
+    "Chemical",
+    "Chemical_Air",
+    "Genkai_Land",
+    "KouutsuOnkai",
+    "KouutsuOnkai_Air",
+    "Kyouai",
+    "KyougenB",
+    "KyougenC",
+    "KyougenD",
+    "TaibokuC",
+    "TaibokuD"
+   ],
+   "Giovanna": [
+    "Shervi",
+    "Special1",
+    "Special2_air",
+    "Special2_land",
+    "Special3",
+    "Special4"
+   ],
+   "Goldlewis": [
+    "AirSwing_pattern1",
+    "Drone",
+    "Minigun",
+    "Swing_pattern1",
+    "Swing_pattern3"
+   ]
+  },
+  "roster_ids_unverified": [
+   "Sol",
+   "Ky",
+   "May",
+   "Axl",
+   "Chipp",
+   "Potemkin",
+   "Faust",
+   "Millia",
+   "Zato-1",
+   "Ramlethal",
+   "Leo",
+   "Nagoriyuki",
+   "Giovanna",
+   "Anji",
+   "I-No",
+   "Goldlewis",
+   "Jack-O",
+   "Happy Chaos",
+   "Baiken",
+   "Testament",
+   "Bridget",
+   "Sin",
+   "Bedman?",
+   "Asuka",
+   "Johnny",
+   "Elphelt",
+   "A.B.A",
+   "Slayer",
+   "Dizzy",
+   "Venom",
+   "Unika",
+   "Lucy"
+  ]
+ },
+ "common": {
+  "CmnActBurst": [
+   "Burst",
+   "Psych Burst",
+   "burst"
+  ],
+  "CmnActRomanCancel": [
+   "RC",
+   "Roman Cancel",
+   "other"
+  ],
+  "NmlAtkThrow": [
+   "Throw",
+   "Ground Throw",
+   "throw"
+  ],
+  "ThrowExe": [
+   "Throw",
+   "Ground Throw",
+   "throw"
+  ],
+  "NmlAtkAirThrow": [
+   "j.Throw",
+   "Air Throw",
+   "throw"
+  ],
+  "AirThrowExe": [
+   "j.Throw",
+   "Air Throw",
+   "throw"
+  ],
+  "DustFinish": [
+   "j.X (homing jump)",
+   "Finish Blow",
+   "other"
+  ],
+  "HomingJump": [
+   "",
+   "homing jump",
+   "other"
+  ],
+  "HomingJumpLoop": [
+   "",
+   "homing jump",
+   "other"
+  ],
+  "CounterBlitz": [
+   "5D/4D",
+   "Deflect Shield",
+   "other"
+  ]
+ },
+ "moves": {
+  "Asuka": {
+   "Magic": {
+    "notation": "spell",
+    "name": "spell (236X)",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "Magic_air": {
+    "notation": "j.spell",
+    "name": "spell (j.236X)",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "Draw_or_Discard": {
+    "notation": "214X",
+    "name": "Draw/Discard",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "Draw_or_Discard_air": {
+    "notation": "j.214X",
+    "name": "Draw/Discard",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "Special_MP": {
+    "notation": "22S",
+    "name": "Recover Mana",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "Change_deck": {
+    "notation": "22H~X",
+    "name": "Change Test Case",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "Change_deck_air": {
+    "notation": "j.22H~X",
+    "name": "Change Test Case",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "PhysicalLaw": {
+    "notation": "22P/K",
+    "name": "Chant (Synthesize)?",
+    "category": "other",
+    "flags": [
+     "inferred",
+     "nonattack"
+    ]
+   },
+   "fuwafuwa": {
+    "notation": "",
+    "name": "float",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "ASK_Ultimate1": {
+    "notation": "632146P/K",
+    "name": "Submicron Particle Sphere",
+    "category": "super",
+    "flags": []
+   },
+   "ASK_Ultimate2": {
+    "notation": "632146S",
+    "name": "Bookmark (Full Order)",
+    "category": "super",
+    "flags": []
+   }
+  },
+  "Elphelt": {
+   "ELP_Special1_S_Air": {
+    "notation": "j.236S",
+    "name": "Air Miss Charlotte",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "ELP_Special1_HS_Air": {
+    "notation": "j.236H",
+    "name": "Air Miss Charlotte",
+    "category": "special",
+    "flags": [
+     "proj",
+     "verified"
+    ]
+   },
+   "ELP_Special1_S_Land": {
+    "notation": "236S",
+    "name": "Miss Charlotte",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "ELP_Special1_HS_Land": {
+    "notation": "236H",
+    "name": "Miss Charlotte",
+    "category": "special",
+    "flags": [
+     "proj",
+     "verified"
+    ]
+   },
+   "ELP_Special2": {
+    "notation": "214K|214H",
+    "name": "Out of Repair / Bomb-Bomb Chocolat (unresolved)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "ELP_Special4": {
+    "notation": "214K|214H",
+    "name": "Out of Repair / Bomb-Bomb Chocolat (unresolved)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "ELP_Special3_Start": {
+    "notation": "214S",
+    "name": "Here I Go!",
+    "category": "special",
+    "flags": [
+     "verified"
+    ]
+   },
+   "ELP_Special3_Chudan": {
+    "notation": "214S~P",
+    "name": "Up High!",
+    "category": "special",
+    "flags": [
+     "verified"
+    ]
+   },
+   "ELP_Special3_Chudan_2nd": {
+    "notation": "214S~X~P",
+    "name": "Up High! (Finisher)",
+    "category": "special",
+    "flags": [
+     "verified"
+    ]
+   },
+   "ELP_Special3_Gedan": {
+    "notation": "214S~K",
+    "name": "Down Low!",
+    "category": "special",
+    "flags": [
+     "verified"
+    ]
+   },
+   "ELP_Special3_Gedan_2nd": {
+    "notation": "214S~X~K",
+    "name": "Down Low! (Finisher)",
+    "category": "special",
+    "flags": []
+   },
+   "ELP_Special3_Finish": {
+    "notation": "214S~H",
+    "name": "Nailed It!",
+    "category": "special",
+    "flags": []
+   },
+   "ELP_SpecialCancel_FDash": {
+    "notation": "",
+    "name": "special cancel dash",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "ELP_Ultimate1": {
+    "notation": "632146H",
+    "name": "Juganto Da Parfeo",
+    "category": "super",
+    "flags": []
+   },
+   "ELP_Ultimate2": {
+    "notation": "236236K",
+    "name": "Bomb-Bombnniere",
+    "category": "super",
+    "flags": [
+     "inferred"
+    ]
+   }
+  },
+  "Lucy": {
+   "LUC_SP_01": {
+    "notation": "236S",
+    "name": "Unity",
+    "category": "special",
+    "flags": [
+     "proj",
+     "verified"
+    ]
+   },
+   "LUC_SP_02": {
+    "notation": "214K",
+    "name": "Sprint Attack",
+    "category": "special",
+    "flags": [
+     "verified"
+    ]
+   },
+   "LUC_SP_03": {
+    "notation": "214K~S",
+    "name": "Sprint Attack - Sweep",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "LUC_SP_04": {
+    "notation": "214K~H",
+    "name": "Sprint Attack - Cross Up",
+    "category": "special",
+    "flags": [
+     "verified"
+    ]
+   },
+   "LUC_SP_05": {
+    "notation": "623H",
+    "name": "Monowire - Breakout",
+    "category": "special",
+    "flags": [
+     "verified"
+    ]
+   },
+   "LUC_SP_06": {
+    "notation": "214H",
+    "name": "Monowire",
+    "category": "special",
+    "flags": [
+     "verified"
+    ]
+   },
+   "LUC_SP_06_Cancel": {
+    "notation": "214H~P/D",
+    "name": "Monowire Cancel",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "LUC_ULT_01": {
+    "notation": "632146H",
+    "name": "Live Wire",
+    "category": "super",
+    "flags": [
+     "verified"
+    ]
+   },
+   "LUC_ULT_02": {
+    "notation": "632146S",
+    "name": "Quickhack",
+    "category": "super",
+    "flags": [
+     "inferred"
+    ]
+   }
+  },
+  "Slayer": {
+   "sly_SP_01": {
+    "notation": "236P",
+    "name": "Mappa Hunch P",
+    "category": "special",
+    "flags": []
+   },
+   "sly_SP_02": {
+    "notation": "236K",
+    "name": "Mappa Hunch K",
+    "category": "special",
+    "flags": [
+     "verified"
+    ]
+   },
+   "sly_SP_03": {
+    "notation": "214P",
+    "name": "Dandy Step P",
+    "category": "special",
+    "flags": []
+   },
+   "sly_SP_04": {
+    "notation": "214K",
+    "name": "Dandy Step K",
+    "category": "special",
+    "flags": []
+   },
+   "sly_SP_05": {
+    "notation": "214P/K~P",
+    "name": "Pilebunker",
+    "category": "special",
+    "flags": []
+   },
+   "sly_SP_06": {
+    "notation": "214P/K~K",
+    "name": "Bump Ahead",
+    "category": "special",
+    "flags": []
+   },
+   "sly_SP_07": {
+    "notation": "214P/K~S",
+    "name": "It's Late",
+    "category": "special",
+    "flags": []
+   },
+   "sly_SP_08": {
+    "notation": "214P/K~H",
+    "name": "Master's Hammer",
+    "category": "special",
+    "flags": [
+     "verified"
+    ]
+   },
+   "sly_SP_09": {
+    "notation": "63214H",
+    "name": "Bloodsucking Universe",
+    "category": "special",
+    "flags": [
+     "grab"
+    ]
+   },
+   "sly_SP_09_exe": {
+    "notation": "63214H",
+    "name": "Bloodsucking Universe",
+    "category": "special",
+    "flags": [
+     "grab"
+    ]
+   },
+   "sly_SP_10": {
+    "notation": "44~6S",
+    "name": "Hand of Doom",
+    "category": "special",
+    "flags": []
+   },
+   "sly_ULT_01": {
+    "notation": "632146S",
+    "name": "Super Mappa Hunch",
+    "category": "super",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "sly_ULT_02": {
+    "notation": "236236H",
+    "name": "Last Horizon",
+    "category": "super",
+    "flags": []
+   }
+  },
+  "A.B.A": {
+   "ABA_SP1_Land": {
+    "notation": "214H",
+    "name": "Bonding and Dissolving",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "ABA_SP1_Land_exe": {
+    "notation": "214H",
+    "name": "Bonding and Dissolving",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "ABA_SP1_Land_Moroha": {
+    "notation": "JR 214H",
+    "name": "JR Bonding and Dissolving",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "ABA_SP1_Air": {
+    "notation": "j.214H",
+    "name": "Air Bonding and Dissolving",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "ABA_SP1_Air_exe": {
+    "notation": "j.214H",
+    "name": "Air Bonding and Dissolving",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "ABA_SP2": {
+    "notation": "63214P",
+    "name": "Changing and Swaying",
+    "category": "special",
+    "flags": [
+     "grab",
+     "inferred"
+    ]
+   },
+   "ABA_SP2_Moroha": {
+    "notation": "JR 63214P",
+    "name": "JR Changing and Swaying",
+    "category": "special",
+    "flags": [
+     "grab",
+     "inferred"
+    ]
+   },
+   "ABA_SP3": {
+    "notation": "214K",
+    "name": "Haul and Heed",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "ABA_SP3_Moroha": {
+    "notation": "JR 214K",
+    "name": "JR Haul and Heed",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "ABA_SP4": {
+    "notation": "236K",
+    "name": "Intertwine and Tilt",
+    "category": "special",
+    "flags": [
+     "verified"
+    ]
+   },
+   "ABA_SP4_Moroha": {
+    "notation": "JR 236K",
+    "name": "JR Intertwine and Tilt",
+    "category": "special",
+    "flags": [
+     "verified"
+    ]
+   },
+   "ABA_SP5": {
+    "notation": "236S",
+    "name": "Menace and Groan",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "ABA_SP5_Moroha": {
+    "notation": "JR 236S",
+    "name": "JR Menace and Groan",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "ABA_SP6": {
+    "notation": "236S~6S",
+    "name": "Restriction and Constraint",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "ABA_SP6_Moroha": {
+    "notation": "JR 236S~6S",
+    "name": "JR Restriction and Constraint",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "ABA_SP7": {
+    "notation": "214S",
+    "name": "Frenzy and Astonishment",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "ABA_SP8": {
+    "notation": "623H",
+    "name": "Judgment and Sentiment",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "ABA_Moroha_End": {
+    "notation": "",
+    "name": "Jealous Rage Deactivation",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "ABA_ULT1": {
+    "notation": "632146H",
+    "name": "The Law is Key, Key is King.",
+    "category": "super",
+    "flags": []
+   },
+   "ABA_ULT1_exe": {
+    "notation": "632146H",
+    "name": "The Law is Key, Key is King.",
+    "category": "super",
+    "flags": []
+   },
+   "ABA_ULT2": {
+    "notation": "632146K",
+    "name": "Keeper of the Key",
+    "category": "super",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "ABA_ULT2_Moroha": {
+    "notation": "JR 632146K",
+    "name": "JR Keeper of the Key",
+    "category": "super",
+    "flags": [
+     "inferred"
+    ]
+   }
+  },
+  "Leo": {
+   "GraviertWurdeC": {
+    "notation": "[4]6S",
+    "name": "S Graviert Wurde",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "GraviertWurdeD": {
+    "notation": "[4]6H",
+    "name": "H Graviert Wurde",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "EisenSturmC": {
+    "notation": "[2]8S",
+    "name": "S Eisensturm",
+    "category": "special",
+    "flags": []
+   },
+   "EisenSturmD": {
+    "notation": "[2]8H",
+    "name": "H Eisensturm",
+    "category": "special",
+    "flags": []
+   },
+   "ErstWind": {
+    "notation": "236S",
+    "name": "Kaltes Gestober Erst",
+    "category": "special",
+    "flags": []
+   },
+   "ZweitWind": {
+    "notation": "236H",
+    "name": "Kaltes Gestober Zweit",
+    "category": "special",
+    "flags": []
+   },
+   "Turbulenz": {
+    "notation": "214S",
+    "name": "Turbulenz",
+    "category": "special",
+    "flags": []
+   },
+   "GlaenzenDunkel": {
+    "notation": "bt.214K",
+    "name": "Glaenzendes Dunkel",
+    "category": "special",
+    "flags": []
+   },
+   "GlaenzenDunkelExe": {
+    "notation": "bt.214K",
+    "name": "Glaenzendes Dunkel",
+    "category": "special",
+    "flags": []
+   },
+   "SchildBrechen": {
+    "notation": "bt.214H?",
+    "name": "Blitzschlag?",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "GuardAttack": {
+    "notation": "bt.P",
+    "name": "Kahn-Schild (guard attack)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "StahlWirbel": {
+    "notation": "632146S",
+    "name": "Stahl Wirbel",
+    "category": "super",
+    "flags": []
+   },
+   "LeidenschaftDirigent": {
+    "notation": "632146H",
+    "name": "Leidenschaft des Dirigenten",
+    "category": "super",
+    "flags": []
+   },
+   "Semuke": {
+    "notation": "bt.",
+    "name": "backturn",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "SemukeFWalk": {
+    "notation": "bt.6",
+    "name": "backturn walk",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "SemukeBWalk": {
+    "notation": "bt.4",
+    "name": "backturn walk",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "SemukeFDashStep": {
+    "notation": "bt.66",
+    "name": "backturn dash",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "SemukeBDashStep": {
+    "notation": "bt.44",
+    "name": "backturn dash",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "SemukeJump": {
+    "notation": "bt.8",
+    "name": "backturn jump",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "SemukeReverse": {
+    "notation": "bt.22",
+    "name": "backturn reverse",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "SemukeJumpAttack": {
+    "notation": "bt.j.X?",
+    "name": "backturn jump attack (unresolved)",
+    "category": "command normal",
+    "flags": [
+     "inferred"
+    ]
+   }
+  },
+  "Goldlewis": {
+   "Swing_pattern1": {
+    "notation": "41236H",
+    "name": "Behemoth Typhoon (41236)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "Swing_pattern2": {
+    "notation": "63214H",
+    "name": "Behemoth Typhoon (63214)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "Swing_pattern3": {
+    "notation": "23698H",
+    "name": "Behemoth Typhoon (23698)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "Swing_pattern4": {
+    "notation": "21478H",
+    "name": "Behemoth Typhoon (21478)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "Swing_pattern5": {
+    "notation": "69874H",
+    "name": "Behemoth Typhoon (69874)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "Swing_pattern6": {
+    "notation": "47896H",
+    "name": "Behemoth Typhoon (47896)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "Swing_pattern7": {
+    "notation": "87412H",
+    "name": "Behemoth Typhoon (87412)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "Swing_pattern8": {
+    "notation": "89632H",
+    "name": "Behemoth Typhoon (89632)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "AirSwing_pattern1": {
+    "notation": "j.41236H",
+    "name": "Air Behemoth Typhoon (41236)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "AirSwing_pattern2": {
+    "notation": "j.63214H",
+    "name": "Air Behemoth Typhoon (63214)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "AirSwing_pattern3": {
+    "notation": "j.23698H",
+    "name": "Air Behemoth Typhoon (23698)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "AirSwing_pattern4": {
+    "notation": "j.21478H",
+    "name": "Air Behemoth Typhoon (21478)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "AirSwing_pattern5": {
+    "notation": "j.69874H",
+    "name": "Air Behemoth Typhoon (69874)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "AirSwing_pattern6": {
+    "notation": "j.47896H",
+    "name": "Air Behemoth Typhoon (47896)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "AirSwing_pattern7": {
+    "notation": "j.87412H",
+    "name": "Air Behemoth Typhoon (87412)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "AirSwing_pattern8": {
+    "notation": "j.89632H",
+    "name": "Air Behemoth Typhoon (89632)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "Drone": {
+    "notation": "214S",
+    "name": "Thunderbird",
+    "category": "special",
+    "flags": [
+     "inferred",
+     "proj"
+    ]
+   },
+   "Minigun": {
+    "notation": "236S",
+    "name": "Skyfish",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "GLD_Ultimate1": {
+    "notation": "632146P",
+    "name": "Down With The System",
+    "category": "super",
+    "flags": [
+     "grab"
+    ]
+   },
+   "GLD_Ultimate2": {
+    "notation": "236236K",
+    "name": "Burn It Down",
+    "category": "super",
+    "flags": [
+     "proj"
+    ]
+   }
+  },
+  "Nagoriyuki": {
+   "Zarameyuki": {
+    "notation": "236S",
+    "name": "Zarameyuki",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "Hukyou": {
+    "notation": "236K",
+    "name": "Forward Fukyo",
+    "category": "special",
+    "flags": []
+   },
+   "Hukyou_B": {
+    "notation": "214K",
+    "name": "Backward Fukyo",
+    "category": "special",
+    "flags": []
+   },
+   "Kamuriyuki": {
+    "notation": "214H",
+    "name": "Kamuriyuki",
+    "category": "special",
+    "flags": []
+   },
+   "Shizuriyuki": {
+    "notation": "623H",
+    "name": "Shizuriyuki",
+    "category": "special",
+    "flags": []
+   },
+   "Bloodsucking_Universe": {
+    "notation": "623P",
+    "name": "Bloodsucking Universe",
+    "category": "special",
+    "flags": [
+     "grab"
+    ]
+   },
+   "Bloodsucking_UniverseExe": {
+    "notation": "623P",
+    "name": "Bloodsucking Universe",
+    "category": "special",
+    "flags": [
+     "grab"
+    ]
+   },
+   "NAG_NewSpecial": {
+    "notation": "214S",
+    "name": "Yukimoyoi",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "Wasureyuki": {
+    "notation": "632146S",
+    "name": "Wasureyuki",
+    "category": "super",
+    "flags": []
+   },
+   "Zansetsu": {
+    "notation": "632146H",
+    "name": "Zansetsu",
+    "category": "super",
+    "flags": []
+   },
+   "berserk": {
+    "notation": "",
+    "name": "Blood Rage",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "berserkEnd": {
+    "notation": "",
+    "name": "Blood Rage end",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   }
+  },
+  "Sol": {
+   "GunFlame": {
+    "notation": "236P",
+    "name": "Gun Flame",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "GunFlameFeint": {
+    "notation": "214P",
+    "name": "Gun Flame (Feint)",
+    "category": "special",
+    "flags": []
+   },
+   "VolcanicViperLandS": {
+    "notation": "623S",
+    "name": "S Volcanic Viper",
+    "category": "special",
+    "flags": []
+   },
+   "VolcanicViperLandHS": {
+    "notation": "623H",
+    "name": "H Volcanic Viper",
+    "category": "special",
+    "flags": []
+   },
+   "VolcanicViperAirS": {
+    "notation": "j.623S",
+    "name": "Aerial S Volcanic Viper",
+    "category": "special",
+    "flags": []
+   },
+   "VolcanicViperAirHS": {
+    "notation": "j.623H",
+    "name": "Aerial H Volcanic Viper",
+    "category": "special",
+    "flags": []
+   },
+   "NewSidewinder": {
+    "notation": "623H~6H",
+    "name": "Side Winder Ignited",
+    "category": "special",
+    "flags": []
+   },
+   "BanditRevolver_Land": {
+    "notation": "236K",
+    "name": "Bandit Revolver",
+    "category": "special",
+    "flags": []
+   },
+   "BanditRevolver_Air": {
+    "notation": "j.236K",
+    "name": "Aerial Bandit Revolver",
+    "category": "special",
+    "flags": []
+   },
+   "BanditBringer_Land": {
+    "notation": "214K",
+    "name": "Bandit Bringer",
+    "category": "special",
+    "flags": []
+   },
+   "BanditBringer_Air": {
+    "notation": "j.214K",
+    "name": "Aerial Bandit Bringer",
+    "category": "special",
+    "flags": []
+   },
+   "BukkirabouNiNageru": {
+    "notation": "623K",
+    "name": "Wild Throw",
+    "category": "special",
+    "flags": [
+     "grab"
+    ]
+   },
+   "BukkiraExe": {
+    "notation": "623K",
+    "name": "Wild Throw",
+    "category": "special",
+    "flags": [
+     "grab"
+    ]
+   },
+   "Vortex": {
+    "notation": "214S",
+    "name": "Night Raid Vortex",
+    "category": "special",
+    "flags": []
+   },
+   "Fefnir": {
+    "notation": "41236H",
+    "name": "Fafnir",
+    "category": "special",
+    "flags": []
+   },
+   "TyrantRave": {
+    "notation": "632146H",
+    "name": "Tyrant Rave",
+    "category": "super",
+    "flags": [
+     "inferred"
+    ]
+   }
+  },
+  "Ky": {
+   "StunEdge1": {
+    "notation": "236S",
+    "name": "Stun Edge",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "StunEdge2": {
+    "notation": "236H",
+    "name": "Charged Stun Edge",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "AirStunEdge1": {
+    "notation": "j.236S",
+    "name": "Aerial S Stun Edge",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "AirStunEdge2": {
+    "notation": "j.236H",
+    "name": "Aerial H Stun Edge",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "VaporThrustC": {
+    "notation": "623S",
+    "name": "S Vapor Thrust",
+    "category": "special",
+    "flags": []
+   },
+   "VaporThrustD": {
+    "notation": "623H",
+    "name": "H Vapor Thrust",
+    "category": "special",
+    "flags": []
+   },
+   "AirVaporThrustC": {
+    "notation": "j.623S",
+    "name": "Air S Vapor Thrust",
+    "category": "special",
+    "flags": []
+   },
+   "AirVaporThrustD": {
+    "notation": "j.623H",
+    "name": "Air H Vapor Thrust",
+    "category": "special",
+    "flags": []
+   },
+   "StunDipper": {
+    "notation": "236K",
+    "name": "Stun Dipper",
+    "category": "special",
+    "flags": []
+   },
+   "FadulArc": {
+    "notation": "214K",
+    "name": "Foudre Arc",
+    "category": "special",
+    "flags": []
+   },
+   "Diaekura": {
+    "notation": "214S",
+    "name": "Dire Eclat",
+    "category": "special",
+    "flags": []
+   },
+   "Lightning": {
+    "notation": "214P|632146H",
+    "name": "Lightning Strike / Ride the Lightning (unresolved)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "SacredEdge": {
+    "notation": "236236P",
+    "name": "Sacred Edge",
+    "category": "super",
+    "flags": [
+     "proj"
+    ]
+   },
+   "DragonInstall": {
+    "notation": "214214H",
+    "name": "Dragon Install",
+    "category": "super",
+    "flags": [
+     "nonattack"
+    ]
+   }
+  },
+  "Chipp": {
+   "AlphaBlade": {
+    "notation": "236K",
+    "name": "Alpha Blade (Diagonal)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "AlphaBlade_yoko": {
+    "notation": "236P",
+    "name": "Alpha Blade (Horizontal)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "AlphaBlade_Cancel": {
+    "notation": "236P/K",
+    "name": "Alpha Blade",
+    "category": "special",
+    "flags": []
+   },
+   "AirAlphaBlade_yoko": {
+    "notation": "j.236P",
+    "name": "Air Alpha Blade (Horizontal)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "AirAlphaBlade_Cancel": {
+    "notation": "j.236P/K",
+    "name": "Air Alpha Blade",
+    "category": "special",
+    "flags": []
+   },
+   "GammaBlade": {
+    "notation": "236H",
+    "name": "Gamma Blade",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "Shuriken": {
+    "notation": "j.214P",
+    "name": "Shuriken",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "Sushi": {
+    "notation": "236S",
+    "name": "Resshou",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "Sukiyaki": {
+    "notation": "236S 236S",
+    "name": "Rokusai",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "Banzai": {
+    "notation": "236S 236K",
+    "name": "Senshuu",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "ItoAtk": {
+    "notation": "214H",
+    "name": "Tightrope (attack)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "BankiMessai": {
+    "notation": "236236P",
+    "name": "Banki Messai",
+    "category": "super",
+    "flags": []
+   },
+   "ThreadRun_Jump": {
+    "notation": "214H",
+    "name": "Tightrope",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "ThreadRun_Down": {
+    "notation": "214H",
+    "name": "Tightrope",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "ThreadRun_K_Down": {
+    "notation": "214H",
+    "name": "Tightrope",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "ThreadRun_S_Down": {
+    "notation": "214H",
+    "name": "Tightrope",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "ThreadRun_HS_Down": {
+    "notation": "214H",
+    "name": "Tightrope",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "ThreadRun_6HS_Down": {
+    "notation": "214H",
+    "name": "Tightrope",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "WallRun_Down": {
+    "notation": "214H",
+    "name": "Tightrope",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   }
+  },
+  "Ramlethal": {
+   "BajonetoC": {
+    "notation": "236S",
+    "name": "S Bajoneto",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "BajonetoD": {
+    "notation": "236H",
+    "name": "H Bajoneto",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "Dauro": {
+    "notation": "623P",
+    "name": "Dauro",
+    "category": "special",
+    "flags": []
+   },
+   "Ondo": {
+    "notation": "236K",
+    "name": "Ondo",
+    "category": "special",
+    "flags": []
+   },
+   "ShirudoLand": {
+    "notation": "214K",
+    "name": "Sildo Detruo",
+    "category": "special",
+    "flags": []
+   },
+   "Sabrobato": {
+    "notation": "214H",
+    "name": "Sabrubato",
+    "category": "special",
+    "flags": []
+   },
+   "Erarurumo1": {
+    "notation": "214P",
+    "name": "Erarlumo (1)",
+    "category": "special",
+    "flags": []
+   },
+   "Erarurumo2": {
+    "notation": "214P 4P",
+    "name": "Erarlumo (2)",
+    "category": "special",
+    "flags": []
+   },
+   "Erarurumo3": {
+    "notation": "214P 4P 4P",
+    "name": "Erarlumo (3)",
+    "category": "special",
+    "flags": []
+   },
+   "AgresaOrdono": {
+    "notation": "j.214S",
+    "name": "Agressa Ordono",
+    "category": "special",
+    "flags": []
+   },
+   "Falstelo": {
+    "notation": "632146H",
+    "name": "Calvados",
+    "category": "super",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "Morutobato": {
+    "notation": "236236S",
+    "name": "Mortobato",
+    "category": "super",
+    "flags": []
+   }
+  },
+  "Potemkin": {
+   "HammerFall": {
+    "notation": "[4]6H",
+    "name": "Hammer Fall",
+    "category": "special",
+    "flags": []
+   },
+   "HammerFallBrake": {
+    "notation": "[4]6H~P",
+    "name": "Hammer Fall Break",
+    "category": "special",
+    "flags": []
+   },
+   "PotemkinBuster": {
+    "notation": "632146P",
+    "name": "Potemkin Buster",
+    "category": "special",
+    "flags": [
+     "grab"
+    ]
+   },
+   "PotemkinBusterExe": {
+    "notation": "632146P",
+    "name": "Potemkin Buster",
+    "category": "special",
+    "flags": [
+     "grab"
+    ]
+   },
+   "HeatKnucle": {
+    "notation": "623H",
+    "name": "Heat Knuckle",
+    "category": "special",
+    "flags": [
+     "grab"
+    ]
+   },
+   "HeatTackle": {
+    "notation": "623K",
+    "name": "Heat Tackle",
+    "category": "special",
+    "flags": []
+   },
+   "MegaFistFront": {
+    "notation": "236P",
+    "name": "Forward Mega Fist",
+    "category": "special",
+    "flags": []
+   },
+   "MegaFistBack": {
+    "notation": "214P",
+    "name": "Backward Mega Fist",
+    "category": "special",
+    "flags": []
+   },
+   "SlideHead": {
+    "notation": "236S",
+    "name": "Slide Head",
+    "category": "special",
+    "flags": []
+   },
+   "FDB": {
+    "notation": "214K",
+    "name": "F.D.B.",
+    "category": "special",
+    "flags": []
+   },
+   "HeavenlyPBuster": {
+    "notation": "632146S",
+    "name": "Heavenly Potemkin Buster",
+    "category": "super",
+    "flags": [
+     "grab"
+    ]
+   }
+  },
+  "Faust": {
+   "Tsukimasu": {
+    "notation": "41236K",
+    "name": "Thrust",
+    "category": "special",
+    "flags": []
+   },
+   "NiceShot_NoHasei": {
+    "notation": "214H",
+    "name": "Hole In One",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "NanigaDerukana": {
+    "notation": "236P",
+    "name": "What Could This Be?",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "NanigaDerukana_Keep": {
+    "notation": "236[P]",
+    "name": "What Could This Be? (hold)",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "NaNaNaNanigaDerukana": {
+    "notation": "236236P",
+    "name": "W-W-What Could This Be?",
+    "category": "super",
+    "flags": [
+     "proj"
+    ]
+   },
+   "Nekkakonnrenn": {
+    "notation": "236S",
+    "name": "Mix Mix Mix",
+    "category": "special",
+    "flags": []
+   },
+   "Nekkakonnrenn_Air": {
+    "notation": "j.236S",
+    "name": "Air Mix Mix Mix",
+    "category": "special",
+    "flags": []
+   },
+   "MettaGari": {
+    "notation": "236H",
+    "name": "Snip Snip Snip",
+    "category": "special",
+    "flags": [
+     "grab"
+    ]
+   },
+   "MettaGariExe": {
+    "notation": "236H",
+    "name": "Snip Snip Snip",
+    "category": "special",
+    "flags": [
+     "grab"
+    ]
+   },
+   "Ai": {
+    "notation": "j.236P",
+    "name": "Love",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "Kuebiko": {
+    "notation": "214P/K/S",
+    "name": "Scarecrow",
+    "category": "special",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "exciting": {
+    "notation": "632146H",
+    "name": "Bone-crushing Excitement",
+    "category": "super",
+    "flags": []
+   },
+   "excitingexe": {
+    "notation": "632146H",
+    "name": "Bone-crushing Excitement",
+    "category": "super",
+    "flags": []
+   },
+   "CrouchFWalk": {
+    "notation": "3",
+    "name": "crawl",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "CrouchBWalk": {
+    "notation": "1",
+    "name": "crawl",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   }
+  },
+  "I-No": {
+   "TaibokuC": {
+    "notation": "236S",
+    "name": "S Stroke the Big Tree",
+    "category": "special",
+    "flags": []
+   },
+   "TaibokuD": {
+    "notation": "236H",
+    "name": "H Stroke the Big Tree",
+    "category": "special",
+    "flags": []
+   },
+   "KyougenB": {
+    "notation": "j.236K",
+    "name": "K Sultry Performance",
+    "category": "special",
+    "flags": []
+   },
+   "KyougenC": {
+    "notation": "j.236S",
+    "name": "S Sultry Performance",
+    "category": "special",
+    "flags": []
+   },
+   "KyougenD": {
+    "notation": "j.236H",
+    "name": "H Sultry Performance",
+    "category": "special",
+    "flags": []
+   },
+   "KyougenHasei": {
+    "notation": "j.236HH",
+    "name": "H Leap",
+    "category": "special",
+    "flags": []
+   },
+   "KouutsuOnkai": {
+    "notation": "214P",
+    "name": "Antidepressant Scale",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "KouutsuOnkai_Air": {
+    "notation": "j.214P",
+    "name": "Air Antidepressant Scale",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "Chemical": {
+    "notation": "214K",
+    "name": "Chemical Love",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "Chemical_Air": {
+    "notation": "j.214K",
+    "name": "Air Chemical Love",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "Kyouai": {
+    "notation": "214S",
+    "name": "Mad Love Agitato",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "Genkai_Land": {
+    "notation": "632146S",
+    "name": "Ultimate Fortissimo",
+    "category": "super",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "AirHover_4": {
+    "notation": "j.4 (hover)",
+    "name": "hoverdash",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "AirHover_6": {
+    "notation": "j.6 (hover)",
+    "name": "hoverdash",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   }
+  },
+  "Millia": {
+   "TandemTopC": {
+    "notation": "236S",
+    "name": "S Tandem Top",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "TandemTopD": {
+    "notation": "236H",
+    "name": "H Tandem Top",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "LustShaker": {
+    "notation": "214S",
+    "name": "Lust Shaker",
+    "category": "special",
+    "flags": []
+   },
+   "IronSavior": {
+    "notation": "214P",
+    "name": "Iron Savior",
+    "category": "special",
+    "flags": []
+   },
+   "BadMoon": {
+    "notation": "j.236P",
+    "name": "Bad Moon",
+    "category": "special",
+    "flags": []
+   },
+   "KousokuRakka": {
+    "notation": "j.236K",
+    "name": "Turbo Fall",
+    "category": "special",
+    "flags": []
+   },
+   "Mirazh": {
+    "notation": "214K",
+    "name": "Mirazh",
+    "category": "special",
+    "flags": []
+   },
+   "Artemis": {
+    "notation": "214H",
+    "name": "Artemis",
+    "category": "special",
+    "flags": []
+   },
+   "Kapel": {
+    "notation": "j.236H",
+    "name": "Kapel",
+    "category": "special",
+    "flags": []
+   },
+   "SeptemVoices": {
+    "notation": "236236S",
+    "name": "Septem Voices",
+    "category": "super",
+    "flags": []
+   },
+   "Winger": {
+    "notation": "632146H",
+    "name": "Winger",
+    "category": "super",
+    "flags": []
+   }
+  },
+  "Baiken": {
+   "TatamiLand": {
+    "notation": "236K",
+    "name": "Tatami Gaeshi",
+    "category": "special",
+    "flags": []
+   },
+   "TatamiAir": {
+    "notation": "j.236K",
+    "name": "Air Tatami Gaeshi",
+    "category": "special",
+    "flags": []
+   },
+   "Kabari": {
+    "notation": "41236S",
+    "name": "S Kabari",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "HimoKabari": {
+    "notation": "41236H",
+    "name": "H Kabari",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "KabariHasei": {
+    "notation": "41236H~H",
+    "name": "Kabari Followup",
+    "category": "special",
+    "flags": []
+   },
+   "YouZanSen": {
+    "notation": "j.236S",
+    "name": "Youzansen",
+    "category": "special",
+    "flags": []
+   },
+   "Atemi": {
+    "notation": "236P",
+    "name": "Hiiragi",
+    "category": "special",
+    "flags": []
+   },
+   "TsuraneSanzuWatashi": {
+    "notation": "236236S",
+    "name": "Tsurane Sanzu-watashi",
+    "category": "super",
+    "flags": []
+   },
+   "TsuraneSanzuWatashiExe": {
+    "notation": "236236S",
+    "name": "Tsurane Sanzu-watashi",
+    "category": "super",
+    "flags": []
+   },
+   "KenjyuLand": {
+    "notation": "214214P",
+    "name": "Kenjyu",
+    "category": "super",
+    "flags": [
+     "proj"
+    ]
+   }
+  },
+  "Axl": {
+   "Rensengeki": {
+    "notation": "236S",
+    "name": "Sickle Flash",
+    "category": "special",
+    "flags": []
+   },
+   "Sensageki": {
+    "notation": "236S 8",
+    "name": "Soaring Chain Strike",
+    "category": "special",
+    "flags": []
+   },
+   "Kyokusageki": {
+    "notation": "236S 2",
+    "name": "Spinning Chain Strike",
+    "category": "special",
+    "flags": []
+   },
+   "Rensen_Bomb": {
+    "notation": "236S S",
+    "name": "Winter Cherry",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "Rensen_Bomb_Just": {
+    "notation": "236S S",
+    "name": "Winter Cherry (just)",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "WinterMantis": {
+    "notation": "41236H",
+    "name": "Winter Mantis",
+    "category": "special",
+    "flags": [
+     "grab"
+    ]
+   },
+   "WinterMantisExe_Far": {
+    "notation": "41236H",
+    "name": "Winter Mantis",
+    "category": "special",
+    "flags": [
+     "grab"
+    ]
+   },
+   "Niwatazumi": {
+    "notation": "214S",
+    "name": "Rainwater",
+    "category": "special",
+    "flags": []
+   },
+   "Katatumuri": {
+    "notation": "214H",
+    "name": "Snail",
+    "category": "special",
+    "flags": []
+   },
+   "Katatumuri_Air": {
+    "notation": "j.214H",
+    "name": "Air Snail",
+    "category": "special",
+    "flags": []
+   },
+   "AxlBomber": {
+    "notation": "j.236H",
+    "name": "Axl Bomber",
+    "category": "special",
+    "flags": []
+   },
+   "Mogaribue": {
+    "notation": "214K",
+    "name": "Whistling Wind",
+    "category": "special",
+    "flags": []
+   },
+   "ByakueRenshou": {
+    "notation": "236236H",
+    "name": "Sickle Storm",
+    "category": "super",
+    "flags": []
+   },
+   "OneVision": {
+    "notation": "632146P",
+    "name": "One Vision",
+    "category": "super",
+    "flags": []
+   },
+   "OneVision_Add": {
+    "notation": "632146P",
+    "name": "One Vision (attack)",
+    "category": "super",
+    "flags": []
+   }
+  },
+  "Anji": {
+   "Shitsu": {
+    "notation": "236P",
+    "name": "Shitsu",
+    "category": "special",
+    "flags": [
+     "proj"
+    ]
+   },
+   "Suigetsu": {
+    "notation": "236K",
+    "name": "Suigetsu No Hakobi",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "Midare": {
+    "notation": "236K~214P",
+    "name": "Midare",
+    "category": "special",
+    "flags": []
+   },
+   "Kou": {
+    "notation": "236S",
+    "name": "Kou",
+    "category": "special",
+    "flags": []
+   },
+   "Fujin": {
+    "notation": "236H",
+    "name": "Fuujin",
+    "category": "special",
+    "flags": []
+   },
+   "Shin": {
+    "notation": "236H P",
+    "name": "Shin: Ichishiki",
+    "category": "special",
+    "flags": []
+   },
+   "Issokutobi": {
+    "notation": "236H K",
+    "name": "Issokutobi",
+    "category": "special",
+    "flags": []
+   },
+   "Nagiha": {
+    "notation": "236H S",
+    "name": "Nagiha",
+    "category": "special",
+    "flags": []
+   },
+   "Rin": {
+    "notation": "236H H",
+    "name": "Rin",
+    "category": "special",
+    "flags": []
+   },
+   "Sai": {
+    "notation": "632146H",
+    "name": "Issei Ougi: Sai",
+    "category": "super",
+    "flags": []
+   },
+   "KachoFugetsu": {
+    "notation": "632146S",
+    "name": "Kachoufuugetsu Kai",
+    "category": "super",
+    "flags": []
+   },
+   "Dodge": {
+    "notation": "",
+    "name": "dodge (unresolved)",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   }
+  },
+  "Giovanna": {
+   "Special2_land": {
+    "notation": "214S",
+    "name": "Sol Poente",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "Special2_air": {
+    "notation": "j.214S",
+    "name": "Air Sol Poente",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "Special1": {
+    "notation": "236K|214K|623S",
+    "name": "Trovao/Sepultura/Sol Nascente (unresolved)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "Special3": {
+    "notation": "236K|214K|623S",
+    "name": "Trovao/Sepultura/Sol Nascente (unresolved)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "Special4": {
+    "notation": "236K|214K|623S",
+    "name": "Trovao/Sepultura/Sol Nascente (unresolved)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "Shervi": {
+    "notation": "214H",
+    "name": "Chave",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "LandUltimate": {
+    "notation": "632146H",
+    "name": "Ventania",
+    "category": "super",
+    "flags": []
+   },
+   "AirUltimate": {
+    "notation": "j.236236H",
+    "name": "Tempestade",
+    "category": "super",
+    "flags": []
+   }
+  }
+ },
+ "asuka_spell_note": "Asuka's spell identity is not in p*_act (always Magic / Magic_air). Candidates for the logger: the spell projectile object's own action name (spawned entities have their own state names, e.g. the spell's internal name), or Asuka's hand/deck slots in her player struct (the cast slot index at the Magic frame).",
+ "opener_coverage": {
+  "Elphelt": {
+   "mapped": [
+    "CmnActBurst",
+    "ELP_Special1_HS_Air",
+    "ELP_Special1_HS_Land",
+    "ELP_Special3_Chudan",
+    "ELP_Special3_Chudan_2nd",
+    "ELP_Special3_Gedan",
+    "ELP_Special3_Gedan_2nd",
+    "ELP_Special3_Start",
+    "ELP_Ultimate1",
+    "NmlAtk2A",
+    "NmlAtk2B",
+    "NmlAtk2C",
+    "NmlAtk2D",
+    "NmlAtk5B",
+    "NmlAtk5CFar",
+    "NmlAtk5CNear",
+    "NmlAtk5D",
+    "NmlAtk5E",
+    "NmlAtk6A",
+    "NmlAtkAir5A",
+    "NmlAtkAir5B",
+    "NmlAtkAir5C",
+    "NmlAtkAir5D",
+    "NmlAtkAirThrow",
+    "NmlAtkThrow"
+   ],
+   "unmapped": []
+  },
+  "Asuka": {
+   "mapped": [
+    "ASK_Ultimate1",
+    "Change_deck",
+    "Change_deck_air",
+    "CmnActAirGuardLoop",
+    "CmnActBWalk",
+    "CmnActBurst",
+    "CmnActFDash",
+    "CmnActFDashStop",
+    "CmnActLandingStiff",
+    "CmnActMidGuardLoop",
+    "CmnActStand",
+    "Draw_or_Discard",
+    "Draw_or_Discard_air",
+    "Magic",
+    "Magic_air",
+    "NmlAtk2A",
+    "NmlAtk2B",
+    "NmlAtk2C",
+    "NmlAtk2D",
+    "NmlAtk2E",
+    "NmlAtk5A",
+    "NmlAtk5B",
+    "NmlAtk5CFar",
+    "NmlAtk5CNear",
+    "NmlAtk5D",
+    "NmlAtk5E",
+    "NmlAtk6A",
+    "NmlAtk6B",
+    "NmlAtkAir5A",
+    "NmlAtkAir5B",
+    "NmlAtkAir5C",
+    "NmlAtkAir5D",
+    "NmlAtkAir5E",
+    "NmlAtkAirThrow",
+    "NmlAtkThrow",
+    "Special_MP",
+    "WorldSideBreak_Master_DS"
+   ],
+   "unmapped": []
+  },
+  "Lucy": {
+   "mapped": [
+    "CmnActBurst",
+    "LUC_SP_01",
+    "LUC_SP_02",
+    "LUC_SP_03",
+    "LUC_SP_04",
+    "LUC_SP_05",
+    "LUC_SP_06",
+    "LUC_ULT_01",
+    "NmlAtk2A",
+    "NmlAtk2B",
+    "NmlAtk2C",
+    "NmlAtk2D",
+    "NmlAtk2E",
+    "NmlAtk5A",
+    "NmlAtk5B",
+    "NmlAtk5CFar",
+    "NmlAtk5CNear",
+    "NmlAtk5E",
+    "NmlAtk6A",
+    "NmlAtkAir5A",
+    "NmlAtkAir5B",
+    "NmlAtkAir5C",
+    "NmlAtkAir5D",
+    "NmlAtkAir5E",
+    "NmlAtkThrow"
+   ],
+   "unmapped": []
+  },
+  "Leo": {
+   "mapped": [
+    "CmnActAirFDash",
+    "CmnActBDash",
+    "CmnActBurst",
+    "CmnActFDash",
+    "EisenSturmC",
+    "ErstWind",
+    "GlaenzenDunkel",
+    "GraviertWurdeC",
+    "GraviertWurdeD",
+    "GuardAttack",
+    "LeidenschaftDirigent",
+    "NmlAtk2A",
+    "NmlAtk2B",
+    "NmlAtk2C",
+    "NmlAtk5A",
+    "NmlAtk5CFar",
+    "NmlAtk5CNear",
+    "NmlAtk5D",
+    "NmlAtk5E",
+    "NmlAtk6A",
+    "NmlAtkAir5A",
+    "NmlAtkAir5D",
+    "NmlAtkAir5E",
+    "NmlAtkThrow",
+    "Semuke5B",
+    "Semuke5D",
+    "Semuke5E",
+    "ZweitWind"
+   ],
+   "unmapped": []
+  },
+  "Goldlewis": {
+   "mapped": [
+    "AirSwing_pattern3",
+    "CmnActBWalk",
+    "CmnActBurst",
+    "GLD_Ultimate1",
+    "GLD_Ultimate2",
+    "Minigun",
+    "NmlAtk2A",
+    "NmlAtk2B",
+    "NmlAtk2E",
+    "NmlAtk5B",
+    "NmlAtk5CNear",
+    "NmlAtk5D",
+    "NmlAtkAir5B",
+    "NmlAtkAir5E",
+    "Swing_pattern3"
+   ],
+   "unmapped": []
+  },
+  "Ky": {
+   "mapped": [
+    "CmnActBurst",
+    "FadulArc",
+    "NmlAtk2A",
+    "NmlAtk2B",
+    "NmlAtk2C",
+    "NmlAtk5A",
+    "NmlAtk5CFar",
+    "NmlAtk5CNear",
+    "NmlAtk6A",
+    "NmlAtkAir5C",
+    "NmlAtkAir5D",
+    "NmlAtkThrow",
+    "StunDipper",
+    "StunEdge1",
+    "StunEdge2",
+    "VaporThrustC"
+   ],
+   "unmapped": []
+  },
+  "Chipp": {
+   "mapped": [
+    "AlphaBlade_Cancel",
+    "BankiMessai",
+    "CmnActBurst",
+    "NmlAtk2B",
+    "NmlAtk5B",
+    "NmlAtk5D",
+    "NmlAtk6A",
+    "NmlAtk6B",
+    "NmlAtkAir2B",
+    "NmlAtkAir5C",
+    "NmlAtkAir5D",
+    "NmlAtkAir5E",
+    "NmlAtkThrow"
+   ],
+   "unmapped": []
+  },
+  "Giovanna": {
+   "mapped": [
+    "CmnActBurst",
+    "LandUltimate",
+    "NmlAtk2A",
+    "NmlAtk2C",
+    "NmlAtk2D",
+    "NmlAtk5A",
+    "NmlAtk5B",
+    "NmlAtk5CFar",
+    "NmlAtk5CNear",
+    "NmlAtk5D",
+    "NmlAtk5E",
+    "NmlAtk6A",
+    "NmlAtkAir5B",
+    "NmlAtkAir5D",
+    "NmlAtkAir5E",
+    "NmlAtkThrow",
+    "Special2_land"
+   ],
+   "unmapped": []
+  },
+  "Slayer": {
+   "mapped": [
+    "CmnActBurst",
+    "NmlAtk2A",
+    "NmlAtk2B",
+    "NmlAtk2D",
+    "NmlAtk2E",
+    "NmlAtk5B",
+    "NmlAtk5CNear",
+    "NmlAtk5E",
+    "NmlAtk6A",
+    "NmlAtk6D",
+    "NmlAtkAir5D",
+    "NmlAtkAirThrow",
+    "NmlAtkThrow",
+    "sly_SP_01",
+    "sly_SP_02",
+    "sly_SP_05",
+    "sly_SP_06",
+    "sly_SP_07",
+    "sly_SP_08",
+    "sly_SP_10",
+    "sly_ULT_02"
+   ],
+   "unmapped": []
+  },
+  "Baiken": {
+   "mapped": [
+    "Atemi",
+    "CmnActBurst",
+    "Kabari",
+    "KenjyuLand",
+    "NmlAtk2B",
+    "NmlAtk2C",
+    "NmlAtk5A",
+    "NmlAtk5CFar",
+    "NmlAtk5CNear",
+    "NmlAtkAir5C",
+    "NmlAtkAirThrow",
+    "NmlAtkThrow",
+    "TatamiLand",
+    "TsuraneSanzuWatashi",
+    "YouZanSen"
+   ],
+   "unmapped": []
+  },
+  "Axl": {
+   "mapped": [
+    "ByakueRenshou",
+    "CmnActBurst",
+    "Katatumuri",
+    "Katatumuri_Air",
+    "Kyokusageki",
+    "Mogaribue",
+    "Niwatazumi",
+    "NmlAtk2A",
+    "NmlAtk2B",
+    "NmlAtk2C",
+    "NmlAtk2D",
+    "NmlAtk2E",
+    "NmlAtk5A",
+    "NmlAtk5B",
+    "NmlAtk5CFar",
+    "NmlAtk5CNear",
+    "NmlAtk5E",
+    "NmlAtk6B",
+    "NmlAtk6D",
+    "NmlAtkAir5A",
+    "NmlAtkAir5B",
+    "NmlAtkAir5C",
+    "NmlAtkAir5D",
+    "NmlAtkAir5E",
+    "NmlAtkThrow",
+    "Rensen_Bomb",
+    "Rensen_Bomb_Just",
+    "Rensengeki",
+    "Sensageki",
+    "WinterMantis"
+   ],
+   "unmapped": []
+  },
+  "Faust": {
+   "mapped": [
+    "CmnActAirFDash",
+    "CmnActAirTurn",
+    "CmnActBDash",
+    "CmnActBurst",
+    "CmnActKirimomiUpper",
+    "CmnActQuickDown",
+    "CrouchBWalk",
+    "MettaGari",
+    "NaNaNaNanigaDerukana",
+    "NanigaDerukana",
+    "Nekkakonnrenn_Air",
+    "NiceShot_NoHasei",
+    "NmlAtk2A",
+    "NmlAtk2B",
+    "NmlAtk2D",
+    "NmlAtk2E",
+    "NmlAtk5A",
+    "NmlAtk5B",
+    "NmlAtk5CNear",
+    "NmlAtk5D",
+    "NmlAtk6A",
+    "NmlAtk6D",
+    "NmlAtkAir2B",
+    "NmlAtkAir5D",
+    "NmlAtkAir5E",
+    "NmlAtkThrow",
+    "Tsukimasu",
+    "exciting"
+   ],
+   "unmapped": []
+  },
+  "A.B.A": {
+   "mapped": [
+    "ABA_SP4",
+    "ABA_SP4_Moroha",
+    "ABA_SP5",
+    "ABA_SP8",
+    "ABA_ULT1",
+    "ABA_ULT2_Moroha",
+    "CmnActBurst",
+    "CmnActFDash",
+    "NmlAtk2B",
+    "NmlAtk2B_Moroha",
+    "NmlAtk2C",
+    "NmlAtk2C_Moroha",
+    "NmlAtk2D_Moroha",
+    "NmlAtk5B",
+    "NmlAtk5CFar",
+    "NmlAtk5CNear",
+    "NmlAtk5D",
+    "NmlAtk5E",
+    "NmlAtk6A_Moroha",
+    "NmlAtkAir5A",
+    "NmlAtkAir5B",
+    "NmlAtkAir5B_Moroha",
+    "NmlAtkAir5C",
+    "NmlAtkAir5C_Moroha",
+    "NmlAtkAir5D_Moroha",
+    "NmlAtkThrow",
+    "WorldSideBreak_Master_DS"
+   ],
+   "unmapped": []
+  },
+  "Ramlethal": {
+   "mapped": [
+    "AgresaOrdono",
+    "BajonetoD",
+    "CmnActBurst",
+    "Erarurumo3",
+    "Falstelo",
+    "Morutobato",
+    "NmlAtk2B",
+    "NmlAtk2E",
+    "NmlAtk5A",
+    "NmlAtk5B",
+    "NmlAtk5CFar",
+    "NmlAtk5CNear",
+    "NmlAtk5D",
+    "NmlAtk5E",
+    "NmlAtk6A",
+    "NmlAtkAir5B",
+    "NmlAtkAir5C",
+    "NmlAtkAir5E",
+    "NmlAtkThrow",
+    "ShirudoLand"
+   ],
+   "unmapped": []
+  },
+  "Sol": {
+   "mapped": [
+    "BanditBringer_Air",
+    "BanditBringer_Land",
+    "BanditRevolver_Land",
+    "BukkirabouNiNageru",
+    "CmnActBurst",
+    "GunFlame",
+    "NmlAtk2B",
+    "NmlAtk2C",
+    "NmlAtk5A",
+    "NmlAtk5CFar",
+    "NmlAtk5CNear",
+    "NmlAtk5D",
+    "NmlAtk5E",
+    "NmlAtk6A",
+    "NmlAtk6C",
+    "NmlAtkThrow",
+    "VolcanicViperLandS",
+    "Vortex",
+    "WorldSideBreak_Master_DS"
+   ],
+   "unmapped": []
+  },
+  "Anji": {
+   "mapped": [
+    "CmnActBurst",
+    "Fujin",
+    "KachoFugetsu",
+    "Midare",
+    "Nagiha",
+    "NmlAtk2A",
+    "NmlAtk2B",
+    "NmlAtk2C",
+    "NmlAtk2E",
+    "NmlAtk5CFar",
+    "NmlAtk5CNear",
+    "NmlAtk6D",
+    "NmlAtkAir5C",
+    "NmlAtkAir5D",
+    "NmlAtkThrow",
+    "Shin",
+    "Shitsu"
+   ],
+   "unmapped": []
+  },
+  "Potemkin": {
+   "mapped": [
+    "CmnActBurst",
+    "CmnActStand2Crouch",
+    "FDB",
+    "HammerFall",
+    "HeatTackle",
+    "MegaFistFront",
+    "NmlAtk5CFar",
+    "NmlAtk5D",
+    "NmlAtkAir5C",
+    "NmlAtkAir5E",
+    "PotemkinBuster"
+   ],
+   "unmapped": []
+  },
+  "I-No": {
+   "mapped": [
+    "Chemical",
+    "CmnActBurst",
+    "CmnActFDash",
+    "Genkai_Land",
+    "KouutsuOnkai_Air",
+    "Kyouai",
+    "KyougenC",
+    "NmlAtk2A",
+    "NmlAtk2B",
+    "NmlAtk2C",
+    "NmlAtk5A",
+    "NmlAtk5E",
+    "NmlAtk6A",
+    "NmlAtk6D",
+    "NmlAtkAir5B",
+    "NmlAtkAir5C",
+    "NmlAtkAir5E",
+    "NmlAtkAirThrow",
+    "NmlAtkThrow",
+    "TaibokuC",
+    "TaibokuD"
+   ],
+   "unmapped": []
+  },
+  "Nagoriyuki": {
+   "mapped": [
+    "Bloodsucking_Universe",
+    "CmnActBurst",
+    "Hukyou",
+    "Kamuriyuki",
+    "NAG_NewSpecial",
+    "NmlAtk2A",
+    "NmlAtk2B",
+    "NmlAtk2C",
+    "NmlAtk5A",
+    "NmlAtk5B",
+    "NmlAtk5CFar",
+    "NmlAtk5CNear",
+    "NmlAtk5D",
+    "NmlAtk5E",
+    "NmlAtk6A",
+    "NmlAtk6D",
+    "NmlAtkThrow",
+    "Shizuriyuki",
+    "berserk"
+   ],
+   "unmapped": []
+  },
+  "Millia": {
+   "mapped": [
+    "BadMoon",
+    "CmnActBurst",
+    "CmnActJump",
+    "CmnActMidGuardLoop",
+    "Kapel",
+    "LustShaker",
+    "NmlAtk2A",
+    "NmlAtk2B",
+    "NmlAtk2C",
+    "NmlAtk2E",
+    "NmlAtk5B",
+    "NmlAtk5CFar",
+    "NmlAtk5CNear",
+    "NmlAtk6B",
+    "NmlAtkAir5A",
+    "NmlAtkAir5B",
+    "NmlAtkAir5C",
+    "NmlAtkAir5D",
+    "NmlAtkAir5E",
+    "NmlAtkThrow",
+    "TandemTopC",
+    "TandemTopD"
+   ],
+   "unmapped": []
+  }
+ }
+}

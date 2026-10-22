@@ -70,7 +70,6 @@ DOJO_TAB = (640, 830, 960, 1010)
 HUD_TOP = (0, 0, 1920, 200)
 
 STEPS = [
-    ("title", None, "u", 4),
     ("main", RETE_TAB, "d d d", 1.5),
     ("dojo", DOJO_TAB, "u", 4),
     ("side", None, "a", 1),
@@ -101,6 +100,7 @@ def to_main():
 if __name__ == "__main__" and sys.argv[1:] == ["main"]:
     to_main()
 elif __name__ == "__main__":
+    to_main()
     for name, box, keys, pause in STEPS:
         wait_for(name, box=box, timeout=90)
         ggst.keys(keys, 300)

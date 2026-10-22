@@ -52,19 +52,21 @@ def newest_csv():
     return max(files, key=os.path.getmtime) if files else None
 
 
-def record_one(index):
+def record_one(index, list_ref="saved_list", menu_ref="replay_menu", menu_box=VIEW_ITEM, extra=None,
+               end_ref="replay_end", end_box=END_MENU):
+    """Open the highlighted entry of a replay list, play it and record it."""
     before = newest_csv()
-    nav.wait_for("saved_list", box=LIST_HEADER, timeout=30)
+    nav.wait_for(list_ref, box=LIST_HEADER, timeout=30)
     # A press while the list is still loading is swallowed: retry, but only while
     # the list itself is still showing.
     for _ in range(5):
         ggst.keys("u", 300)
         time.sleep(2)
-        if nav.score("replay_menu", VIEW_ITEM) < 10:
+        if nav.score(menu_ref, menu_box) < 10:
             break
-        if nav.score("saved_list", LIST_HEADER) >= 14:
+        if nav.score(list_ref, LIST_HEADER) >= 14:
             raise SystemExit("unexpected screen after opening a replay entry")
-    nav.wait_for("replay_menu", box=VIEW_ITEM, timeout=10, thr=10)
+    nav.wait_for(menu_ref, box=menu_box, timeout=10, thr=10)
     ggst.keys("u", 300)
 
     t0 = time.time()
@@ -85,7 +87,7 @@ def record_one(index):
     # The game frame keeps counting under the end-of-replay menu, so the log never
     # stops by itself: watch the screen for that menu instead.
     t0 = time.time()
-    while nav.score("replay_end", END_MENU) >= 10:
+    while nav.score(end_ref, end_box) >= 10:
         if time.time() - t0 > 900:
             break
         time.sleep(2)
@@ -94,7 +96,7 @@ def record_one(index):
     print(f"[{index}] done: {rows} frames")
     with open(MANIFEST, "a") as f:
         f.write(json.dumps({"index": index, "csv": csv, "video": video, "frames": rows,
-                            "recorded_at": time.strftime("%Y-%m-%d %H:%M:%S")}) + "\n")
+                            "recorded_at": time.strftime("%Y-%m-%d %H:%M:%S"), **(extra or {})}) + "\n")
 
 
 if __name__ == "__main__":
