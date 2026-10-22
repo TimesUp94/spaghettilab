@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net8.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <Reference Include="UE4SSDotNetFramework">
+        <HintPath>$(GGSTWin64)\DotNetPlugins\UE4SSDotNetFramework.dll</HintPath>
+        <Private>false</Private>
+      </Reference>
+    </ItemGroup>
+
+</Project>
