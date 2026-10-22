@@ -39,6 +39,7 @@ and stored in config/templates/combo_templates.npz.
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -274,23 +275,33 @@ ACTIVE_GRACE = 15
 class ComboCounterExtractor(BaseExtractor):
     """Per-frame combo counter: which side shows a counter and its hit number."""
 
-    def __init__(self, templates_path: Path | None = None, stride: int = 2):
+    def __init__(self, templates_path: Path | None = None, stride: int = 3, workers: int = 4):
         """``stride`` > 1 reads only every stride-th frame while no counter is
-        shown (matching costs ~40 ms per frame on 1080p).  Once one is found
-        every frame is read until none has been seen for ACTIVE_GRACE
-        samples, and the skipped frame just before the find is read too, so
-        the output does not depend on which frames the stride lands on (a
-        cut of the same video starting one frame later reads the same)."""
+        shown (matching costs ~60 ms per frame).  Once one is found every
+        frame is read until none has been seen for ACTIVE_GRACE samples, and
+        the frames the stride skipped just before the find are read too, so
+        the output does not depend on which frames the stride lands on (a cut
+        of the same video starting one frame later reads the same). A counter
+        shown on fewer than ``stride`` samples can be missed; grouping drops
+        such blips anyway (``_smooth_readings`` keeps runs of 3+ samples).
+
+        ``workers``: template matching runs in threads (OpenCV releases the
+        GIL): 2 = the two sides in parallel, 4 = also the word and the big
+        matcher of each side; 1 = all in the calling thread. The readings do
+        not depend on it."""
         self.stride = max(1, int(stride))
         # Samples left in which every frame is read (counter seen recently).
         self._active = 0
-        # The last frame skipped by the stride: (frame number, rois, data).
-        self._skipped: tuple[int, dict, FrameData] | None = None
+        # Frames skipped by the stride since the last read: (frame number, rois, data).
+        self._skipped: list[tuple[int, dict, FrameData]] = []
         # Spacing between consecutive sampled frame numbers (1 at 30 fps,
         # 2 when a 60 fps video is read every 2nd frame). The stride counts
         # samples, not source frames.
         self._step = 0
         self._prev_frame: int | None = None
+        self.workers = max(1, int(workers))
+        self._side_pool = ThreadPoolExecutor(2, "combo-side") if self.workers >= 2 else None
+        self._big_pool = ThreadPoolExecutor(2, "combo-big") if self.workers >= 4 else None
         tm = load_templates(templates_path)
         words = {int(k[1:]): v for k, v in tm.items() if k.startswith("w")}
         # "g<digit>[variant]" -> keyed "<digit>[variant]"
@@ -316,15 +327,16 @@ class ComboCounterExtractor(BaseExtractor):
         return r
 
     def read_side(self, ctx_rois: dict, side: Side) -> Reading | None:
+        word_roi = ctx_rois.get(WORD_ROI[side])
+        big_roi = ctx_rois.get(BIG_ROI[side])
+        has_big = big_roi is not None and big_roi.size
+        fut = self._big_pool.submit(self.read_big, big_roi, side) if has_big and self._big_pool else None
         best: Reading | None = None
-        roi = ctx_rois.get(WORD_ROI[side])
-        if roi is not None and roi.size:
-            best = self.read_word(roi)
-        roi = ctx_rois.get(BIG_ROI[side])
-        if roi is not None and roi.size:
-            r = self.read_big(roi, side)
-            if r is not None and (best is None or r.score > best.score):
-                best = r
+        if word_roi is not None and word_roi.size:
+            best = self.read_word(word_roi)
+        r = fut.result() if fut is not None else (self.read_big(big_roi, side) if has_big else None)
+        if r is not None and (best is None or r.score > best.score):
+            best = r
         return best
 
     def extract(self, ctx: FrameContext, data: FrameData) -> None:
@@ -338,20 +350,28 @@ class ComboCounterExtractor(BaseExtractor):
         step = self._step or 1
         idx = ctx.frame_number // step
         if self.stride > 1 and idx % self.stride and self._active <= 0:
-            self._skipped = (ctx.frame_number, ctx.rois, data)
+            self._skipped.append((ctx.frame_number, ctx.rois, data))
+            del self._skipped[: -(self.stride - 1)]
             return
         found = self._read_into(ctx.rois, data)
-        skipped, self._skipped = self._skipped, None
+        skipped, self._skipped = self._skipped, []
         if found:
-            if self._active <= 0 and skipped is not None and skipped[0] == ctx.frame_number - step:
-                # The counter may have appeared on the frame the stride skipped.
-                self._read_into(skipped[1], skipped[2])
+            if self._active <= 0:
+                # The counter may have appeared on frames the stride skipped:
+                # read the ones right before this one (oldest first).
+                back = [sk for sk in skipped if 0 < ctx.frame_number - sk[0] < self.stride * step]
+                for _, rois, d in back:
+                    self._read_into(rois, d)
             self._active = ACTIVE_GRACE
         else:
             self._active -= 1
 
     def _read_into(self, rois: dict, data: FrameData) -> bool:
-        self.last = {side: self.read_side(rois, side) for side in (Side.P1, Side.P2)}
+        if self._side_pool is not None:
+            futs = {side: self._side_pool.submit(self.read_side, rois, side) for side in (Side.P1, Side.P2)}
+            self.last = {side: f.result() for side, f in futs.items()}
+        else:
+            self.last = {side: self.read_side(rois, side) for side in (Side.P1, Side.P2)}
         cands = [(s, r) for s, r in self.last.items() if r is not None]
         if not cands:
             return False
@@ -469,92 +489,311 @@ def _hp(f: FrameData, side: Side) -> float | None:
     return None if r is None else r.health_pct
 
 
+def _pending(f: FrameData, side: Side) -> float | None:
+    """Red pending segment (HP already lost in the running combo) of a frame
+    whose bar was read cleanly: its own fill reading agrees with the cleaned
+    HP. None when the bar was covered or misread (a character or an effect
+    over the bar reads as no red)."""
+    raw = f.p1_health_raw if side == Side.P1 else f.p2_health_raw
+    clean = f.p1_health if side == Side.P1 else f.p2_health
+    if raw is None:
+        raw = clean
+    if raw is None:
+        return None
+    fill = raw.raw_pct if raw.raw_pct is not None else raw.health_pct
+    if clean is not None and abs(fill - clean.health_pct) > CLEAN_READ_TOL:
+        return None
+    return raw.pending_pct
+
+
+# ── HUD state (game terms: is the HUD drawn, which round is it) ─────────────
+
+# A run of at least this many samples without a round timer = HUD hidden
+# (super cinematic, wallbreak, round-end slash, menus). Shorter runs are
+# timer misreads.
+HIDDEN_MIN_RUN = 4
+# Below this share of frames with a timer the timer is not trusted at all
+# (no HUD state: every frame counts as visible, a single round).
+TIMER_MIN_SHARE = 0.05
+# A timer reading is supported when at least TIMER_SUPPORT_RUN readings
+# (itself included) within +-TIMER_SUPPORT_WIN samples show the same value
+# (the clock shows each value for a second).  Only supported readings decide
+# whether a hidden stretch ended the round: a lone misread next to the gap
+# (a covered tens digit read "7" for 97) must not.
+TIMER_SUPPORT_RUN = 3
+TIMER_SUPPORT_WIN = 15
+# Red pending segment at least this wide (fraction of the bar) counts as shown.
+PENDING_SHOWN = 0.004
+# A frame's red is only trusted when its fill reading is this close to the
+# cleaned HP (else the bar was covered or misread).
+CLEAN_READ_TOL = 0.02
+# A combo that took less than this from the defender dealt no hit: a counter
+# still on screen from an earlier combo (or after the KO).
+MIN_COMBO_DAMAGE = 0.003
+# hp_before: hits of one combo are never this far apart (samples, like
+# derive_combos' max_gap_frames); an earlier HP drop belongs to something else.
+HIT_PAUSE = 45
+# hp_before: the red pending segment off (under RED_CLEAR wide: slivers are
+# left while it drains) on this many cleanly read frames in a row means no
+# combo was running there.
+RED_OFF_RUN = 8
+RED_CLEAR = 0.015
+# hp_before: a steady bar total (fill + red; frames within TOTAL_STEADY of
+# each other) this far above the combo's own on this many cleanly read frames
+# in a row is an earlier combo's red. (Only above: the red is sometimes read
+# short over a red-ish stage.)
+TOTAL_TOL = 0.06
+TOTAL_STEADY = 0.02
+TOTAL_MISMATCH_RUN = 3
+# Share of HUD frames in a gap that must show the defender's red for the
+# combo to be bridged across it.
+RED_HELD_SHARE = 0.9
+# A 10+ count may come back after a gap having gone up by this many hits per
+# second of gap (the counter was not read in between).
+RESUME_HITS_PER_S = 5.0
+
+
+@dataclass
+class HudState:
+    hidden: np.ndarray  # bool per frame: HUD not drawn
+    over: np.ndarray  # bool per frame: inside the hidden gap that ended a round
+    round_id: np.ndarray  # int per frame: goes up by one when a new round starts
+
+
+def hud_state(frames: list[FrameData]) -> HudState:
+    """Per-frame HUD state from the round timer (game-native HUD only).
+
+    The timer is part of the HUD: it is hidden during super cinematics,
+    wallbreaks and the round transition, and only counts down within a round.
+    A hidden stretch ended the round when the timer comes back higher than it
+    was (a new round starts at 99; the next reading must agree too), or when
+    no timer comes back at all.  Before and after the gap the nearest
+    supported readings (see TIMER_SUPPORT_RUN) are compared when there are
+    any (else the raw ones)."""
+    n = len(frames)
+    timer = [f.timer_value if f.is_gameplay else None for f in frames]
+    hidden = np.zeros(n, dtype=bool)
+    over = np.zeros(n, dtype=bool)
+    round_id = np.zeros(n, dtype=int)
+    n_timer = sum(t is not None for t in timer)
+    if n == 0 or n_timer < TIMER_MIN_SHARE * n:
+        return HudState(hidden, over, round_id)
+    tv = np.array([np.nan if t is None else float(t) for t in timer])
+    same = np.zeros(n, dtype=int)
+    for d in range(-TIMER_SUPPORT_WIN + 1, TIMER_SUPPORT_WIN):
+        lo, hi = max(0, -d), min(n, n - d)
+        same[lo:hi] += tv[lo:hi] == tv[lo + d:hi + d]
+    sup = same >= TIMER_SUPPORT_RUN
+    last_sup = None  # the last supported timer value so far
+    rid = 0
+    prev = None  # index of the last frame with a timer
+    i = 0
+    while i < n:
+        if timer[i] is not None:
+            prev = i
+            if sup[i]:
+                last_sup = timer[i]
+            round_id[i] = rid
+            i += 1
+            continue
+        j = i
+        while j < n and timer[j] is None:
+            j += 1
+        ended = False
+        if j - i >= HIDDEN_MIN_RUN:
+            hidden[i:j] = True
+            if prev is not None:
+                if j >= n:
+                    ended = True
+                else:
+                    before = last_sup if last_sup is not None else timer[prev]
+                    after = next((timer[k] for k in range(j, min(n, j + 2 * TIMER_SUPPORT_WIN)) if sup[k]), None)
+                    if after is not None:
+                        ended = after >= before + 2
+                    else:
+                        nxt = next((timer[k] for k in range(j + 1, min(n, j + 30)) if timer[k] is not None), timer[j])
+                        ended = timer[j] >= before + 2 and nxt >= before + 2
+        round_id[i:j] = rid
+        if ended:
+            over[i:j] = True
+            rid += 1
+        i = j
+    return HudState(hidden, over, round_id)
+
+
 def derive_combos(
     frames: list[FrameData],
     max_gap_frames: int = 45,
     min_frames: int = 3,
-    hp_window: int = 20,
-    lookback_frames: int = 45,
+    hp_window: int = 3,
+    lookback_frames: int = 150,
     short_gap_frames: int = 10,
     linger_frames: int = 30,
     long_gap_frames: int = 120,
+    max_bridge_frames: int = 240,
+    sample_fps: float = 30.0,
+    hud: HudState | None = None,
 ) -> list[Combo]:
     """Group per-frame counter readings into combos.
 
     A combo is a run of frames where the same side shows a counter, allowing
     gaps of up to ``max_gap_frames`` (occlusion, flashes, the counter fading).
-    A new combo starts when the side changes, or when the count falls back to
-    2-3 after having been higher (a fresh combo right after the last one).
-    A 10+ count just above the last one continues the combo after a gap of up
-    to ``long_gap_frames`` (super cinematics hide the counter). After a gap of
-    more than ``short_gap_frames`` the count must go up, or stay at the same
-    4+ count (the counter was briefly hidden).
+    Gaps are counted in frames where the HUD is drawn: while the HUD is
+    hidden (super cinematic, wallbreak; see ``hud_state``) the combo goes on,
+    for at most ``max_bridge_frames`` in all. A new combo starts when the
+    side changes, or when the count falls back to 2-3 after having been
+    higher (a fresh combo right after the last one). After a gap of more
+    than ``short_gap_frames`` the count must go up, or stay at the same 4+
+    count (the counter was briefly hidden). Longer gaps are bridged when:
+
+    * the defender's red pending segment stayed on screen all through the
+      gap (GGST drains it only after the combo ends) and the count did not
+      fall back, or
+    * a 10+ count came back higher, by at most RESUME_HITS_PER_S per second of
+      the gap, within ``long_gap_frames`` (a fresh combo is first read at
+      2-3, never at 10+).
+
+    No combo continues into the next round; a counter seen in the hidden gap
+    after a round ended only extends the combo that was running.
+
+    A combo must deal damage: one whose defender lost no HP (less than
+    MIN_COMBO_DAMAGE) is a counter still on screen from an earlier combo (it
+    lingers ~1 s; after a KO it stays up through the slash), or a misread,
+    and is dropped.
 
     ``max_hits`` comes from ``_confirmed_max`` (drops one-frame misreads).
 
-    Damage = defender HP before the combo minus the lowest defender HP from the
-    last counter frame to ``hp_window`` frames after it. The counter only
-    appears on the 2nd hit, so "before" is the HIGHEST defender reading in the
-    ``lookback_frames`` before the first counter frame (HP only goes down
-    during a combo), never reaching back into the previous combo.
+    The combo ends when its counter goes away (it lingers ~1 s after the last
+    hit, so the HP then is final): ``hp_after`` = lowest defender HP within
+    ``hp_window`` frames of the last counter frame. Later HP loss (the red
+    pending segment draining, chip damage) is not the combo's.
+
+    ``hp_before`` = defender HP before hit 1 (see ``_hp_before``).
     """
     seq = _smooth_readings(frames)
+    n = len(frames)
+    hud = hud or hud_state(frames)
+    hcum = np.cumsum(hud.hidden)
     combos: list[Combo] = []
+    kept: list[dict] = []  # group dicts of ``combos`` (same order)
     cur: dict | None = None
+
+    def hidden_between(a: int, b: int) -> int:
+        """Hidden-HUD frames strictly between frame indices a < b."""
+        return int(hcum[b - 1] - hcum[a]) if b - 1 > a else 0
+
+    def round_start(k: int) -> int:
+        r = hud.round_id[k]
+        while k > 0 and hud.round_id[k - 1] == r:
+            k -= 1
+        return k
+
+    def defender_of(side: Side) -> Side:
+        return Side.P2 if side == Side.P1 else Side.P1
+
+    def red_held(a: int, b: int, defender: Side) -> bool:
+        """The defender's red pending segment stayed on screen between frames
+        a and b (on RED_HELD_SHARE of the HUD frames with a reading: single
+        frames miss it): the combo never ended."""
+        seen = shown = 0
+        for k in range(a + 1, b):
+            if hud.hidden[k]:
+                continue
+            q = _pending(frames[k], defender)
+            if q is None:
+                continue
+            seen += 1
+            shown += q >= PENDING_SHOWN
+        return seen > 0 and shown >= RED_HELD_SHARE * seen
+
+    def build(c: dict) -> Combo:
+        att: Side = c["side"]
+        defender = defender_of(att)
+        first, last = c["first"], c["last"]
+        floor = round_start(first)
+        prev_on = [k["last"] for k in kept if k["side"] == att and k is not c and k["last"] < first]
+        if prev_on:
+            floor = max(floor, prev_on[-1] + 1)
+        before = _hp_before(frames, defender, first, last, floor, lookback_frames, hud.hidden)
+        vals = [_hp(frames[k], defender) for k in range(last, min(n, last + 1 + hp_window))]
+        vals = [v for v in vals if v is not None]
+        if not vals:
+            # no HP on screen when the counter went (round over, HUD gone):
+            # the last HP shown during the combo
+            vals = [v for k in range(last, first - 1, -1) if (v := _hp(frames[k], defender)) is not None][:1]
+        after = min(vals) if vals else None
+        dmg = None
+        if before is not None and after is not None:
+            dmg = max(0.0, before - after)
+        return Combo(
+            attacker=att,
+            frame_start=frames[first].frame_number,
+            frame_end=frames[last].frame_number,
+            start_ms=frames[first].timestamp_ms,
+            end_ms=frames[last].timestamp_ms,
+            max_hits=_confirmed_max(c["counts"]),
+            hp_before=before,
+            hp_after=after,
+            damage=dmg,
+        )
 
     def close(c: dict):
         if c["last"] - c["first"] + 1 < min_frames or len(c["counts"]) < 2:
             return
-        max_hits = _confirmed_max(c["counts"])
-        att: Side = c["side"]
-        floor = combos[-1].frame_end if combos else -1
-        lo = c["first"] - lookback_frames
-        while lo < c["first"] and frames[max(lo, 0)].frame_number <= floor:
-            lo += 1
-        before, after = _defender_hp(frames, att, max(lo, 0), c["first"], c["last"], hp_window)
-        dmg = None
-        if before is not None and after is not None:
-            dmg = max(0.0, before - after)
-        combos.append(
-            Combo(
-                attacker=att,
-                frame_start=frames[c["first"]].frame_number,
-                frame_end=frames[c["last"]].frame_number,
-                start_ms=frames[c["first"]].timestamp_ms,
-                end_ms=frames[c["last"]].timestamp_ms,
-                max_hits=max_hits,
-                hp_before=before,
-                hp_after=after,
-                damage=dmg,
-            )
-        )
+        combo = build(c)
+        if combo.damage is not None and combo.damage < MIN_COMBO_DAMAGE:
+            return  # no hit landed: a counter still on screen
+        kept.append(c)
+        combos.append(combo)
 
     for i, (side, count) in enumerate(seq):
         if side is None or count is None:
             continue
-        if (
-            cur is not None
-            and side == cur["side"]
-            and count == 10
-            and cur["counts"][-1][1] > 10
-            and i - cur["last"] <= max_gap_frames
-        ):
+        if cur is not None and hud.round_id[i] != hud.round_id[cur["last"]]:
+            close(cur)  # a new round started since
+            cur = None
+        raw_gap = i - cur["last"] if cur is not None else 0
+        gap = raw_gap - hidden_between(cur["last"], i) if cur is not None else 0
+        if raw_gap > max_bridge_frames:
+            gap = raw_gap
+        last_count = cur["counts"][-1][1] if cur is not None else 0
+        same = cur is not None and side == cur["side"]
+        held_red = (
+            same and gap > short_gap_frames and raw_gap <= max_bridge_frames
+            and red_held(cur["last"], i, defender_of(side))
+        )
+        if same and count == 10 and last_count > 10 and (gap <= max_gap_frames or held_red):
             # "10" after a higher count is a covered 1x counter (lower bound)
             # of the same combo: it extends the combo but adds no count (so
             # it cannot confirm a one-off misread either)
             cur["last"] = i
             continue
+        if hud.over[i]:
+            # Round over: the KO combo's counter stays on screen through the
+            # slash. It can still go up (the KO hit), it never starts a combo.
+            if same and count >= last_count and (gap <= max_gap_frames or held_red):
+                if count != last_count:
+                    cur["hold_start"] = i
+                cur["last"] = i
+                cur["counts"].append((i, count))
+            continue
         if cur is not None:
-            gap = i - cur["last"]
-            last_count = cur["counts"][-1][1]
             held = cur["last"] - cur["hold_start"] + 1
-            # a big (10+) count just above the last one continues the combo
-            # even after a long gap (super cinematic, round-end slash): a
-            # fresh combo is first read at 2-3, never at 10+
-            resumed = count >= 10 and last_count < count <= last_count + 3 and gap <= long_gap_frames
+            # a 10+ count above the last one continues the combo after a
+            # longer gap (super cinematic, effects over the counter): a fresh
+            # combo is first read at 2-3, never at 10+
+            resumed = (
+                count >= 10 and last_count < count
+                and count - last_count <= max(3, RESUME_HITS_PER_S * gap / sample_fps)
+                and gap <= long_gap_frames
+            )
+            # the defender's red never drained and the count did not fall
+            # back: the same combo went on (2-3 is how a fresh combo is
+            # first read, so those are not bridged)
+            bridged = held_red and count >= max(last_count, 4)
             new = (
-                side != cur["side"]
-                or (gap > max_gap_frames and not resumed)
+                not same
+                or (gap > max_gap_frames and not resumed and not bridged)
                 # a fresh combo starts at 2-3 hits
                 or (count <= 3 and _confirmed_max(cur["counts"]) > count)
                 # after the counter vanished for a while, the same combo can
@@ -566,6 +805,7 @@ def derive_combos(
                 # juggle, and a new combo is first read at 2-3)
                 or (
                     gap > short_gap_frames
+                    and not bridged
                     and (
                         count < last_count
                         or (count == last_count and count <= 3)
@@ -588,15 +828,82 @@ def derive_combos(
     return combos
 
 
-def _defender_hp(frames: list[FrameData], attacker: Side, lo: int, first: int, last: int, window: int):
-    defender = Side.P2 if attacker == Side.P1 else Side.P1
-    vals = [_hp(frames[k], defender) for k in range(lo, first + 1)]
-    vals = [v for v in vals if v is not None]
-    before = max(vals) if vals else None
-    vals = [_hp(frames[k], defender) for k in range(last, min(len(frames), last + 1 + window))]
-    vals = [v for v in vals if v is not None]
-    after = min(vals) if vals else None
-    return before, after
+def _bar_total(f: FrameData, side: Side) -> float | None:
+    """Fill + red pending of a cleanly read bar (see ``_pending``): the HP the
+    defender had before the hits whose red is still shown."""
+    q = _pending(f, side)
+    if q is None:
+        return None
+    raw = f.p1_health_raw if side == Side.P1 else f.p2_health_raw
+    raw = raw or (f.p1_health if side == Side.P1 else f.p2_health)
+    return (raw.raw_pct if raw.raw_pct is not None else raw.health_pct) + q
+
+
+def _hp_before(
+    frames: list[FrameData], defender: Side, first: int, last: int, floor: int, lookback: int, hidden: np.ndarray
+) -> float | None:
+    """Defender HP before hit 1.
+
+    The counter appears on the 2nd hit and is sometimes read late, so the HP
+    at the first counter frame is already short of hit 1 (and more). While a
+    combo runs GGST keeps the HP it took on screen as the red pending
+    segment and drains it only after the combo; so the bar total (fill + red)
+    stays at the HP the defender had before the combo.
+
+    The defender's HP (cleaned: it only falls within a round) is followed back
+    from the first counter frame through the HP drops of the combo. The walk
+    stops before a drop that cannot belong to this combo:
+
+    * the red was off on RED_OFF_RUN cleanly read frames in a row (it drained:
+      no combo was running there);
+    * the red was shown with a steady bar total above the combo's own
+      (median over the combo) on TOTAL_MISMATCH_RUN cleanly read frames in a
+      row: an earlier combo's red (it started from more HP), still draining;
+    * HIT_PAUSE frames passed without a drop (hits of a combo come faster);
+    * the attacker's previous combo or the round start (``floor``), or
+      ``lookback`` frames.
+
+    The nearest drop before the first counter frame always counts (on some
+    hits the red is not read at all).
+
+    ``hp_before`` = the HP just before the earliest drop reached.
+    """
+    floor = max(0, min(floor, first), first - lookback)
+    totals = [t for k in range(first, last + 1) if not hidden[k] and (t := _bar_total(frames[k], defender)) is not None]
+    ref = float(np.median(totals)) if totals else None
+    pre = first  # frame just before the earliest connected HP drop
+    quiet = red_off = mismatch = 0
+    prev_t = None
+    later = None  # HP at the frame after k
+    for k in range(first, floor - 1, -1):
+        q = None if hidden[k] else _pending(frames[k], defender)
+        # (only once a drop was reached: the nearest drop before the counter
+        # is the combo's own, red read or not)
+        if q is not None and k < pre < first:
+            red_off = red_off + 1 if q < RED_CLEAR else 0
+            if q >= RED_CLEAR and ref is not None:
+                t = _bar_total(frames[k], defender)
+                steady = prev_t is not None and abs(t - prev_t) <= TOTAL_STEADY
+                mismatch = mismatch + 1 if t - ref > TOTAL_TOL and (steady or mismatch == 0) else 0
+                prev_t = t
+            if red_off >= RED_OFF_RUN or mismatch >= TOTAL_MISMATCH_RUN:
+                break
+        v = _hp(frames[k], defender)
+        if v is not None and later is not None and v > later + 0.002:
+            pre = k
+            quiet = red_off = mismatch = 0
+            prev_t = None
+        else:
+            quiet += 1
+            if quiet > HIT_PAUSE:
+                break
+        if v is not None:
+            later = v
+    v = _hp(frames[pre], defender)
+    if v is None:
+        vals = [x for k in range(max(floor, first - lookback), first + 1) if (x := _hp(frames[k], defender)) is not None]
+        v = max(vals) if vals else None
+    return v
 
 
 def combos_to_records(combos: list[Combo]) -> list[dict]:

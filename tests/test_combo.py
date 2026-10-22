@@ -8,6 +8,7 @@ from replanal.extractors.combo import (
     ComboCounterExtractor,
     _confirmed_max,
     derive_combos,
+    hud_state,
 )
 from replanal.models import FrameContext, FrameData, HealthReading, Side
 
@@ -221,3 +222,133 @@ def test_stride_counts_samples_not_source_frames(default_config):
     assert len(calls) == 8
     assert (d6.combo_side, d6.combo_count) == (Side.P2, 3)
     assert (d8.combo_side, d8.combo_count) == (Side.P2, 3)
+
+
+# ── grouping with HUD state, damage and the red pending segment ─────────────
+
+
+def _gf(i, side=None, count=None, timer=None, p1=None, p2=None, q1=0.0, q2=0.0):
+    """Frame with a round timer and health; ``q*`` = red pending segment (raw
+    readings equal to the cleaned HP, so the red is trusted)."""
+    f = _frame(i, side, count)
+    f.timer_value = timer
+    for hp, q, slot, raw_slot, s in ((p1, q1, "p1_health", "p1_health_raw", Side.P1),
+                                     (p2, q2, "p2_health", "p2_health_raw", Side.P2)):
+        if hp is not None:
+            setattr(f, slot, HealthReading(s, hp, 0, 0, raw_pct=hp, pending_pct=q))
+            setattr(f, raw_slot, HealthReading(s, hp, 0, 0, raw_pct=hp, pending_pct=q))
+    return f
+
+
+def _seq(rows):
+    return [_gf(i, *r) for i, r in enumerate(rows)]
+
+
+def test_no_combo_starts_after_the_round_ended():
+    """The KO combo's counter stays up through the slash and the timer comes
+    back at 99: the leftover counter is no new combo (set 04 72.8 s)."""
+    rows = [(None, None, 60, 1.0, 0.5)] * 10
+    rows += [(Side.P1, c, 60, 1.0, hp) for c, hp in [(2, 0.4)] * 4 + [(3, 0.0)] * 4]
+    rows += [(None, None, None, 1.0, 0.0)] * 20  # slash: HUD hidden
+    rows += [(Side.P1, 3, 60, 1.0, 0.0)] * 8  # counter still drawn, HUD back
+    rows += [(None, None, None)] * 10
+    rows += [(None, None, 99, 1.0, 1.0)] * 10  # next round
+    combos = derive_combos(_seq(rows))
+    assert [(c.attacker, c.max_hits) for c in combos] == [(Side.P1, 3)]
+    assert combos[0].hp_before == pytest.approx(0.5) and combos[0].hp_after == 0.0
+
+
+def test_combo_continues_across_a_hidden_hud_super():
+    """3 s super cinematic (no timer) in the middle: one combo (set 07 418 s)."""
+    rows = [(None, None, 60, 1.0, 0.8)] * 5
+    rows += [(Side.P2, 5, 60, 0.6, 0.8, 0.2)] * 10
+    rows += [(None, None, None, 0.6, 0.8)] * 90
+    rows += [(Side.P2, 6, 59, 0.4, 0.8, 0.4)] * 10
+    rows += [(None, None, 59, 0.4, 0.8)] * 5
+    combos = derive_combos(_seq(rows))
+    assert [(c.attacker, c.max_hits) for c in combos] == [(Side.P2, 6)]
+
+
+def test_combo_bridged_while_the_red_never_drains():
+    """Counter unread for 3.6 s (wallbreak), HUD shown, red kept on the
+    defender all along: same combo (set 09 576 s)."""
+    rows = [(None, None, 70, 0.8, 0.8)] * 5
+    rows += [(Side.P1, 6, 70, 0.8, 0.45, 0.0, 0.35)] * 8
+    rows += [(None, None, 70, 0.8, 0.4, 0.0, 0.4)] * 100
+    rows += [(Side.P1, 8, 70, 0.8, 0.35, 0.0, 0.45)] * 8
+    combos = derive_combos(_seq(rows))
+    assert [(c.attacker, c.max_hits) for c in combos] == [(Side.P1, 8)]
+    # once the red drained, the same gap ends the combo
+    rows2 = rows[:13] + [(None, None, 70, 0.8, 0.4)] * 100 + rows[113:]
+    assert len(derive_combos(_seq(rows2))) == 2
+
+
+def test_hp_before_follows_the_combo_drops_back_from_a_late_counter():
+    """The counter is first read 2 s after hit 1 (words under the COUNTER
+    banner); hits keep the red up: hp_before is the HP before hit 1 (set 05)."""
+    rows = [(None, None, 90, 0.7, 0.8)] * 30
+    hp = 0.7
+    for k in range(4):  # a hit every 0.5 s
+        hp -= 0.05
+        rows += [(None, None, 90, hp, 0.8, 0.7 - hp)] * 15
+    rows += [(Side.P2, 6, 89, hp, 0.8, 0.7 - hp)] * 10
+    rows += [(None, None, 89, hp, 0.8)] * 30  # red drains: later loss is chip
+    rows += [(None, None, 89, hp - 0.03, 0.8)] * 5
+    c, = derive_combos(_seq(rows))
+    assert c.hp_before == pytest.approx(0.7)
+    assert c.hp_after == pytest.approx(0.5)
+
+
+def test_hp_before_ignores_an_earlier_lone_hit():
+    """A poke 2 s before the combo (its red drained) is not hit 1 (set 10 389 s)."""
+    rows = [(None, None, 90, 0.43, 0.8)] * 10
+    rows += [(None, None, 90, 0.36, 0.8, 0.06)] * 3
+    rows += [(None, None, 90, 0.36, 0.8)] * 25
+    rows += [(None, None, 90, 0.25, 0.8, 0.11)] * 10
+    rows += [(Side.P2, 3, 90, 0.21, 0.8, 0.15)] * 10
+    c, = derive_combos(_seq(rows))
+    assert c.hp_before == pytest.approx(0.36)
+
+
+def test_counter_without_damage_is_dropped():
+    """A lingering "three" read again after a gap with no HP lost (set 01 380 s)."""
+    rows = [(None, None, 80, 1.0, 0.5)] * 5
+    rows += [(Side.P1, 3, 80, 1.0, 0.4, 0.0, 0.1)] * 10
+    rows += [(None, None, 80, 1.0, 0.4)] * 30
+    rows += [(Side.P1, 3, 80, 1.0, 0.4)] * 10
+    combos = derive_combos(_seq(rows))
+    assert [(c.attacker, c.max_hits, round(c.damage, 3)) for c in combos] == [(Side.P1, 3, 0.1)]
+
+
+def test_stride3_and_threads_do_not_change_readings(default_config):
+    """Stride 3 reads the same frames whatever the start parity, and the
+    threaded reader gives the same readings as the sequential one."""
+    if not ComboCounterExtractor().enabled:
+        pytest.skip("combo templates not built")
+    empty, three, twelve = (FRAMES / n for n in ("set17_f10330_x0.jpg", "set17_f09000_x860.jpg",
+                                                 "set17_f08300_x860.jpg"))
+    seq = [empty] * 5 + [three] * 3 + [twelve] * 3 + [empty] * 25 + [twelve] * 3 + [empty] * 4
+    out = []
+    for shift, workers in ((0, 4), (1, 4), (2, 1)):
+        ext = ComboCounterExtractor(stride=3, workers=workers)
+        data = [_read(ext, default_config, p, frame_number=k + shift) for k, p in enumerate(seq)]
+        out.append([(d.combo_side, d.combo_count) for d in data])
+    assert out[0] == out[1] == out[2]
+    assert out[0][5] == (Side.P2, 3) and out[0][36] == (Side.P2, 12)
+
+
+def test_lone_timer_misread_before_a_hidden_gap_does_not_end_the_round():
+    """A covered tens digit reads "7" for 97 on the last frame before a super
+    hides the HUD; the clock comes back at 97: same round (Tappa #4 04_UF
+    144.5 s, yt_KWX 47.8 s)."""
+    rows = [(None, None, 98, 0.9, 0.9)] * 30 + [(None, None, 97, 0.9, 0.9)] * 10
+    rows += [(None, None, 7, 0.9, 0.9)]
+    rows += [(None, None, None, 0.9, 0.9)] * 6
+    rows += [(None, None, 97, 0.9, 0.8)] * 20 + [(None, None, 96, 0.9, 0.8)] * 30
+    hud = hud_state(_seq(rows))
+    assert not hud.over.any()
+    assert (hud.round_id == 0).all()
+    # The same gap followed by a new round's 99 after a low clock ends it.
+    rows2 = [(None, None, 12, 0.9, 0.1)] * 40 + [(None, None, None)] * 6 + [(None, None, 99, 1.0, 1.0)] * 30
+    hud2 = hud_state(_seq(rows2))
+    assert hud2.over[40:46].all() and hud2.round_id[-1] == 1
