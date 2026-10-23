@@ -328,10 +328,12 @@ if __name__ == "__main__":
         wait_online()
         if not ggst.find_window():
             restart_game()
-        go_to_search()
+    need_nav = args.resume
     restarts = 0
     while True:
         try:
+            if need_nav:                                  # a server error here restarts too
+                go_to_search()
             run(args.per_rank, state)
             break
         except (Restart, SystemExit, Exception) as e:
@@ -347,5 +349,5 @@ if __name__ == "__main__":
                 print(f"!! {e}; trying again in 5 minutes")
                 time.sleep(300)
                 continue
-            go_to_search()
+            need_nav = True
             state = load_state() or state
