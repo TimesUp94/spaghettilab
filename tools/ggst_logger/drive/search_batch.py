@@ -5,10 +5,17 @@ matches only), it searches and records the first --per-rank results with
 batch.record_one, saving character and rank range in the manifest, then moves on. It stops when the filter wraps back to "all characters". The game
 must already be on the Search tab's results list (after a first search).
 
-Usage: python search_batch.py [--per-rank 2] [--index 1000]
+Usage: python search_batch.py [--per-rank 2] [--index 1000] [--resume]
+
+Progress is saved to ggst_rec/search_state.json after every replay. If Strive
+disappears (it crashed after ~5 h and ~9 h of replays) or gets stuck, the
+game is restarted and the batch continues where it stopped.
 """
 import argparse
+import ctypes
+import json
 import os
+import subprocess
 import time
 
 import cv2
@@ -17,6 +24,9 @@ import batch
 import ggst
 import nav
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+SEARCH_HEADER = (90, 200, 560, 290)      # "Cerca ..." title: tells the search tab from the other replay tabs
 SEARCH_VIEW = (480, 495, 1410, 545)      # "Visualizza replay" in the search entry menu
 SEARCH_END = (480, 340, 1440, 500)       # end-of-replay menu for downloaded replays (5 items)
 FILTER_TITLE = (480, 130, 1440, 220)
@@ -79,11 +89,11 @@ def read_row(row):
         CHAR_VALUE = keep
 
 
-def set_filters(step_char, lo, hi):
+def set_filters(step_char, lo, hi, target=None):
     """From the results list: open the filter menu (J); set ranked-match rank range
     [lo, hi] (option indices); optionally step 'Character 1' right; Close so the
     results refresh. Returns (character, rank_lo, rank_hi) as read on screen."""
-    nav.wait_for("search_list", box=batch.LIST_HEADER, timeout=30)
+    nav.wait_for("search_list", box=SEARCH_HEADER, timeout=30)
     for _ in range(3):
         ggst.keys("j", 300)
         time.sleep(2)
@@ -92,8 +102,13 @@ def set_filters(step_char, lo, hi):
     nav.wait_for("filter_menu", box=FILTER_TITLE, timeout=10, thr=10)
     ggst.keys("s", 250)                                   # row 1: search filter
     time.sleep(0.4)
-    if "CLASSIF" not in read_row(1).upper():
-        raise SystemExit("search filter is not 'ranked match'")
+    for _ in range(5):                                    # make it "ranked match"
+        if "CLASSIF" in read_row(1).upper():
+            break
+        ggst.keys("d", 300)
+        time.sleep(0.6)
+    else:
+        raise SystemExit("could not set the search filter to 'ranked match'")
     # Highest to the top first so the lowest can move freely, then the real range.
     ggst.keys("s s", 250)
     time.sleep(0.4)
@@ -110,6 +125,15 @@ def set_filters(step_char, lo, hi):
         ggst.keys("d", 300)
         time.sleep(0.8)
     name = read_row(6)
+    if target:                                            # resume: step until it shows target
+        for _ in range(45):
+            if norm(name) == norm(target):
+                break
+            ggst.keys("d", 300)
+            time.sleep(0.8)
+            name = read_row(6)
+        else:
+            raise SystemExit(f"could not find character '{target}' in the filter")
     ggst.keys("s s s s s s", 200)                         # row 12: close
     time.sleep(0.5)
     ggst.keys("u", 300)
@@ -117,44 +141,181 @@ def set_filters(step_char, lo, hi):
     if nav.score("filter_confirm", CONFIRM_BOX) < 10:      # "apply the changed filter?" -> Yes
         ggst.keys("u", 300)
     time.sleep(8)
-    nav.wait_for("search_list", box=batch.LIST_HEADER, timeout=60)
+    nav.wait_for("search_list", box=SEARCH_HEADER, timeout=60)
     return name, rank_lo, rank_hi
 
 
-if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--per-rank", type=int, default=2, help="replays per character and rank tier")
-    ap.add_argument("--index", type=int, default=1000, help="first manifest index")
-    args = ap.parse_args()
-    index = args.index
-    char_step = False   # the first character is whatever the filter shows now
+def norm(name):
+    return "".join(ch for ch in (name or "").lower() if ch.isalnum())
+
+
+SEARCH_START = (490, 310, 1430, 420)     # first visit: "set search conditions" with "Start search" highlighted
+STATE = os.path.join(batch.REC, "search_state.json")
+# Scheduled restarts are off: killing Strive while it shows its save icon can damage
+# save data, so the game is only restarted after it has crashed (it did after ~5 h and
+# ~9 h of replays).
+RESTART_EVERY_S = None
+
+
+class Restart(Exception):
+    pass
+
+
+UE4SS_LOG = r"C:\Program Files (x86)\Steam\steamapps\common\GUILTY GEAR STRIVE\RED\Binaries\Win64\UE4SS.log"
+
+
+def restart_game():
+    """Start Strive through Steam and wait until the logger mod has loaded. A game
+    that is still running is first asked to close (WM_CLOSE) and only killed if it
+    has not exited after a minute."""
+    hwnd = ggst.find_window()
+    if hwnd:
+        ctypes.windll.user32.PostMessageW(hwnd, 0x0010, 0, 0)  # WM_CLOSE
+        for _ in range(60):
+            if "GGST-Win64" not in subprocess.run(["tasklist"], capture_output=True, text=True).stdout:
+                break
+            time.sleep(1)
+    for exe in ("GGST-Win64-Shipping.exe", "GGST.exe"):
+        subprocess.run(["taskkill", "/F", "/IM", exe], capture_output=True)
+    for _ in range(60):
+        out = subprocess.run(["tasklist"], capture_output=True, text=True).stdout
+        if "GGST" not in out:
+            break
+        time.sleep(1)
+    try:
+        os.remove(UE4SS_LOG)
+    except OSError:
+        pass
+    os.startfile("steam://rungameid/1384160")
+    t0 = time.time()
+    while time.time() - t0 < 180:
+        try:
+            if "[InputLogger] UpdateBattle" in open(UE4SS_LOG, encoding="utf-8", errors="ignore").read():
+                return
+        except OSError:
+            pass
+        time.sleep(2)
+    raise SystemExit("Strive did not start")
+
+
+def go_to_search():
+    """Fresh game at the title -> Replay room -> Search tab results (no-op if already there)."""
+    if nav.score("search_list", SEARCH_HEADER) < 10 and nav.score("search_start", SEARCH_START) >= 12:
+        return
+    nav.to_main()
+    ggst.keys("d d d d d d", 300)
+    time.sleep(1.5)
+    nav.wait_for("collection", box=batch.COLLECTION_TAB, timeout=20)
+    ggst.keys("u", 300)
+    time.sleep(8)
+    for _ in range(10):
+        # The conditions dialog shares the list's header, so check it first.
+        if nav.score("search_start", SEARCH_START) < 12:
+            ggst.keys("u", 300)                           # "Start search"
+            time.sleep(8)
+            continue
+        if nav.score("search_list", SEARCH_HEADER) < 14:
+            return
+        ggst.keys("l", 300)
+        time.sleep(4)
+    nav.wait_for("search_list", box=SEARCH_HEADER, timeout=30)
+
+
+def save_state(**st):
+    with open(STATE, "w") as f:
+        json.dump(st, f)
+
+
+def load_state():
+    try:
+        with open(STATE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def run(per_rank, state):
+    """Record from `state` on ({'char', 'tier', 'k', 'index', 'step'}). Raises Restart
+    after RESTART_EVERY_S so the game is restarted before it crashes."""
+    t_start = time.time()
+    index, target = state["index"], state.get("char")
+    tier0, k0, step = state.get("tier", 0), state.get("k", 0), state.get("step", False)
     while True:
-        for t, (tier, lo, hi) in enumerate(TIERS):
-            name, rank_lo, rank_hi = set_filters(char_step and t == 0, lo, hi)
-            char_step = False
+        for t in range(tier0, len(TIERS)):
+            tier, lo, hi = TIERS[t]
+            # First tier of this run: find the saved character, stepping one on if
+            # it was finished. Later tiers keep the filter as it is.
+            first = t == tier0
+            name, rank_lo, rank_hi = set_filters(step and first, lo, hi,
+                                                 target=target if first and not step else None)
+            step, target = False, name
             if not name or name.upper().startswith("TUTT"):
                 print("filter wrapped back to all characters; done")
-                raise SystemExit(0)
+                save_state(index=index, char=name, tier=0, k=0, step=False, done=True)
+                return
             print(f"== character: {name} | {tier}: {rank_lo} .. {rank_hi}")
-            for k in range(args.per_rank):
+            k_first = k0 if first else 0
+            if k_first:
+                ggst.keys(" ".join(["s"] * k_first), 200)
+                time.sleep(1)
+            for k in range(k_first, per_rank):
                 try:
                     batch.record_one(index, list_ref="search_list", menu_ref="search_menu", menu_box=SEARCH_VIEW,
                                      extra={"source": "search", "char_filter": name, "tier": tier,
                                             "rank_lo": rank_lo, "rank_hi": rank_hi},
                                      end_ref="search_end", end_box=SEARCH_END)
                 except SystemExit as e:
+                    if not ggst.find_window():
+                        raise
                     print(f"   skipped ({e})")
                     break
                 index += 1
-                try:
-                    nav.wait_for("search_end", box=SEARCH_END, timeout=10, thr=10)
-                    ggst.keys("u", 300)
-                    time.sleep(6)
-                    nav.wait_for("search_list", box=batch.LIST_HEADER, timeout=60)
-                except SystemExit:
-                    ggst.shot(os.path.join(batch.REC, f"after_search_{index}.png"))
-                    raise SystemExit(f"unexpected screen after search replay {index}")
+                if k + 1 < per_rank:
+                    nxt = dict(index=index, char=name, tier=t, k=k + 1, step=False)
+                elif t + 1 < len(TIERS):
+                    nxt = dict(index=index, char=name, tier=t + 1, k=0, step=False)
+                else:
+                    nxt = dict(index=index, char=name, tier=0, k=0, step=True)
+                save_state(**nxt)
+                nav.wait_for("search_end", box=SEARCH_END, timeout=10, thr=10)
+                ggst.keys("u", 300)
+                time.sleep(6)
+                nav.wait_for("search_list", box=SEARCH_HEADER, timeout=60)
+                if RESTART_EVERY_S and time.time() - t_start > RESTART_EVERY_S:
+                    raise Restart("scheduled restart")
                 ggst.keys("s", 300)
                 time.sleep(1)
-            ggst.keys(" ".join(["w"] * args.per_rank), 200)  # back to the top of the list
-        char_step = True
+            ggst.keys(" ".join(["w"] * per_rank), 200)       # back to the top of the list
+        tier0, k0, step, target = 0, 0, True, None
+
+
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--per-rank", type=int, default=2, help="replays per character and rank tier")
+    ap.add_argument("--index", type=int, default=1000, help="first manifest index (new runs)")
+    ap.add_argument("--resume", action="store_true",
+                    help="restart Strive and continue from search_state.json")
+    args = ap.parse_args()
+    state = load_state() if args.resume else None
+    if state and state.get("done"):
+        raise SystemExit("search_state.json says the batch is complete")
+    if not state:
+        state = dict(index=args.index, char=None, tier=0, k=0, step=False)
+    if args.resume:
+        if not ggst.find_window():
+            restart_game()
+        go_to_search()
+    restarts = 0
+    while True:
+        try:
+            run(args.per_rank, state)
+            break
+        except (Restart, SystemExit, Exception) as e:
+            restarts += 1
+            print(f"!! restarting Strive ({type(e).__name__}: {e}); restart {restarts}")
+            if restarts > 20:
+                raise
+            subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True)
+            restart_game()
+            go_to_search()
+            state = load_state() or state
