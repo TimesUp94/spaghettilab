@@ -164,6 +164,27 @@ class Restart(Exception):
 UE4SS_LOG = r"C:\Program Files (x86)\Steam\steamapps\common\GUILTY GEAR STRIVE\RED\Binaries\Win64\UE4SS.log"
 
 
+def online(host="steamcommunity.com", port=443, timeout=5):
+    import socket
+    try:
+        socket.create_connection((host, port), timeout=timeout).close()
+        return True
+    except OSError:
+        return False
+
+
+def wait_online():
+    """Downloaded replays and Steam's cloud sync need the network: wait for it rather
+    than restarting the game into a Steam 'cloud sync failed' prompt."""
+    if online():
+        return
+    print("!! no internet connection; waiting for it to come back")
+    while not online():
+        time.sleep(30)
+    print("   back online")
+    time.sleep(30)
+
+
 def restart_game():
     """Start Strive through Steam and wait until the logger mod has loaded. A game
     that is still running is first asked to close (WM_CLOSE) and only killed if it
@@ -267,6 +288,8 @@ def run(per_rank, state):
                 except SystemExit as e:
                     if not ggst.find_window():
                         raise
+                    if not online():                      # the replay could not be downloaded
+                        raise
                     print(f"   skipped ({e})")
                     break
                 index += 1
@@ -302,6 +325,7 @@ if __name__ == "__main__":
     if not state:
         state = dict(index=args.index, char=None, tier=0, k=0, step=False)
     if args.resume:
+        wait_online()
         if not ggst.find_window():
             restart_game()
         go_to_search()
@@ -316,6 +340,12 @@ if __name__ == "__main__":
             if restarts > 20:
                 raise
             subprocess.run(["taskkill", "/F", "/IM", "ffmpeg.exe"], capture_output=True)
-            restart_game()
+            wait_online()
+            try:
+                restart_game()
+            except SystemExit as e:                       # e.g. a Steam prompt blocking the launch
+                print(f"!! {e}; trying again in 5 minutes")
+                time.sleep(300)
+                continue
             go_to_search()
             state = load_state() or state
