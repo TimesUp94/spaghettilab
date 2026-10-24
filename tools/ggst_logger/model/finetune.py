@@ -122,7 +122,7 @@ def main():
     X = load_images(R)
     p = run(X, y, folds_all[sel], len(classes), a.epochs)
     res = report(y, p.argmax(1), classes, p)
-    tag = a.task.replace(":", "_")
+    tag = a.task.replace(":", "_").replace("?", "")   # Bedman?: no ? in Windows file names
     np.save(OUT / f"oof_ft_{tag}.npy", p)
     save_json(res, OUT / f"results_ft_{tag}.json")
     print(f"{a.task}: finetuned acc {res['accuracy']:.3f} bal {res['balanced_accuracy']:.3f} top3 {res.get('top3', 0):.3f}")
