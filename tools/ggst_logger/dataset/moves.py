@@ -29,7 +29,7 @@ CHAR_CODES = {
     "JKO": "Jack-O", "COS": "Happy Chaos", "BKN": "Baiken", "TST": "Testament",
     "BGT": "Bridget", "SIN": "Sin", "BED": "Bedman?", "ASK": "Asuka", "JHN": "Johnny",
     "ELP": "Elphelt", "ABA": "A.B.A", "SLY": "Slayer", "sly": "Slayer", "DZY": "Dizzy",
-    "VEN": "Venom", "UNI": "Unika", "LUC": "Lucy",
+    "VEN": "Venom", "UNI": "Unika", "LUC": "Lucy", "USG": "Jam", "ABS": "Robo-Ky",
 }
 
 # Game roster order (character select / internal id), for the logger's future char field.
@@ -97,9 +97,17 @@ def infer_character(acts) -> str:
     return "unknown:" + "/".join(sorted(own)[:4])
 
 
-def resolve_character(acts, logged=None) -> tuple[str, str]:
-    """(character, source). `logged` = the logger's char column values for this player (name or
-    numeric roster id); when present and consistent it wins over the action-name inference."""
+def resolve_character(acts, logged=None, sprites=None) -> tuple[str, str]:
+    """(character, source). `sprites` = the logger's sprite names (sol000_11: the first three
+    letters are the character code) win over everything: the action-name inference only knows
+    the characters in moves.json and mistakes some (Bedman? for Giovanna). `logged` = the
+    logger's char column values (name or numeric roster id), next."""
+    if sprites is not None and len(sprites):
+        codes = collections.Counter(str(v)[:3].upper() for v in sprites if len(str(v)) > 3)
+        if codes:
+            code = codes.most_common(1)[0][0]
+            if code in CHAR_CODES:
+                return CHAR_CODES[code], "sprite"
     inferred = infer_character(acts)
     if logged is not None and len(logged):
         vals = collections.Counter(str(v).strip() for v in logged if str(v).strip() not in ("", "nan"))
@@ -155,6 +163,7 @@ _add("Elphelt", {
     "ELP_Special2": ("214K|214H", "Out of Repair / Bomb-Bomb Chocolat (unresolved)", SPECIAL, "inferred"),
     "ELP_Special4": ("214K|214H", "Out of Repair / Bomb-Bomb Chocolat (unresolved)", SPECIAL, "inferred"),
     "ELP_Special3_Start": ("214S", "Here I Go!", SPECIAL, "verified"),
+    "ELP_Special3_Start_easy_2nd": ("214S~S", "Here I Go! (2nd)", SPECIAL, "inferred"),
     "ELP_Special3_Chudan": ("214S~P", "Up High!", SPECIAL, "verified"),
     "ELP_Special3_Chudan_2nd": ("214S~X~P", "Up High! (Finisher)", SPECIAL, "verified"),
     "ELP_Special3_Gedan": ("214S~K", "Down Low!", SPECIAL, "verified"),
@@ -211,6 +220,7 @@ _add("A.B.A", {  # SP1 = the only air/exe special; SP2-SP6 = the five with JR ("
     "ABA_Moroha_End": ("", "Jealous Rage Deactivation", OTHER, "nonattack"),
     "ABA_ULT1": ("632146H", "The Law is Key, Key is King.", SUPER),
     "ABA_ULT1_exe": ("632146H", "The Law is Key, Key is King.", SUPER),
+    "ABA_ULT1_Moroha": ("JR 632146H", "JR The Law is Key, Key is King.", SUPER, "inferred"),
     "ABA_ULT2": ("632146K", "Keeper of the Key", SUPER, "inferred"),
     "ABA_ULT2_Moroha": ("JR 632146K", "JR Keeper of the Key", SUPER, "inferred"),
 })
@@ -258,6 +268,7 @@ _add("Nagoriyuki", {
     "NAG_NewSpecial": ("214S", "Yukimoyoi", SPECIAL, "inferred"),
     "Wasureyuki": ("632146S", "Wasureyuki", SUPER),
     "Zansetsu": ("632146H", "Zansetsu", SUPER),
+    "Zansetu": ("632146H", "Zansetsu", SUPER, "inferred"),
     "berserk": ("", "Blood Rage", OTHER, "nonattack"),
     "berserkEnd": ("", "Blood Rage end", OTHER, "nonattack"),
 })
@@ -278,6 +289,7 @@ _add("Sol", {
     "Vortex": ("214S", "Night Raid Vortex", SPECIAL),
     "Fefnir": ("41236H", "Fafnir", SPECIAL),
     "TyrantRave": ("632146H", "Tyrant Rave", SUPER, "inferred"),
+    "HMC": ("214214H", "Heavy Mob Cemetery", SUPER, "inferred"),
 })
 _add("Ky", {
     "StunEdge1": ("236S", "Stun Edge", SPECIAL, "proj"),
@@ -291,9 +303,11 @@ _add("Ky", {
     "StunDipper": ("236K", "Stun Dipper", SPECIAL),
     "FadulArc": ("214K", "Foudre Arc", SPECIAL),
     "Diaekura": ("214S", "Dire Eclat", SPECIAL),
-    "Lightning": ("214P|632146H", "Lightning Strike / Ride the Lightning (unresolved)", SPECIAL, "inferred"),
+    "Lightning": ("214P", "Lightning Strike", SPECIAL, "inferred"),  # Ride the Lightning = RideTheLightning
     "SacredEdge": ("236236P", "Sacred Edge", SUPER, "proj"),
     "DragonInstall": ("214214H", "Dragon Install", SUPER, "nonattack"),
+    "RideTheLightning": ("632146H", "Ride the Lightning", SUPER, "inferred"),
+    "AirRideTheLightning": ("j.632146H", "Air Ride the Lightning", SUPER, "inferred"),
 })
 _add("Chipp", {
     "AlphaBlade": ("236K", "Alpha Blade (Diagonal)", SPECIAL, "inferred"),
@@ -301,6 +315,13 @@ _add("Chipp", {
     "AlphaBlade_Cancel": ("236P/K", "Alpha Blade", SPECIAL),
     "AirAlphaBlade_yoko": ("j.236P", "Air Alpha Blade (Horizontal)", SPECIAL, "inferred"),
     "AirAlphaBlade_Cancel": ("j.236P/K", "Air Alpha Blade", SPECIAL),
+    "AirAlphaBlade": ("j.236K", "Air Alpha Blade (Diagonal)", SPECIAL, "inferred"),
+    "BetaBlade": ("623S", "Beta Blade", SPECIAL, "inferred"),
+    "AirBetaBlade": ("j.623S", "Air Beta Blade", SPECIAL, "inferred"),
+    "Genrouzan": ("63214S", "Genrouzan", SPECIAL, "grab inferred"),
+    "GenrouzanExe": ("63214S", "Genrouzan", SPECIAL, "grab inferred"),
+    "ZanseiRouga": ("632146H", "Zansei Rouga", SUPER, "inferred"),
+    "AirZanseiRouga": ("j.632146H", "Air Zansei Rouga", SUPER, "inferred"),
     "GammaBlade": ("236H", "Gamma Blade", SPECIAL, "proj"),
     "Shuriken": ("j.214P", "Shuriken", SPECIAL, "proj"),
     "Sushi": ("236S", "Resshou", SPECIAL, "inferred"),
@@ -318,6 +339,7 @@ _add("Ramlethal", {
     "Dauro": ("623P", "Dauro", SPECIAL),
     "Ondo": ("236K", "Ondo", SPECIAL),
     "ShirudoLand": ("214K", "Sildo Detruo", SPECIAL),
+    "ShirudoAir": ("j.214K", "Air Sildo Detruo", SPECIAL, "inferred"),
     "Sabrobato": ("214H", "Sabrubato", SPECIAL),
     "Erarurumo1": ("214P", "Erarlumo (1)", SPECIAL),
     "Erarurumo2": ("214P 4P", "Erarlumo (2)", SPECIAL),
@@ -338,10 +360,14 @@ _add("Potemkin", {
     "SlideHead": ("236S", "Slide Head", SPECIAL),
     "FDB": ("214K", "F.D.B.", SPECIAL),
     "HeavenlyPBuster": ("632146S", "Heavenly Potemkin Buster", SUPER, "grab"),
+    "GarudaImpact": ("214H", "Garuda Impact", SPECIAL, "inferred"),
+    "Giganter": ("632146H", "Giganter Kai", SUPER, "inferred"),
 })
 _add("Faust", {
     "Tsukimasu": ("41236K", "Thrust", SPECIAL),
     "NiceShot_NoHasei": ("214H", "Hole In One", SPECIAL, "inferred"),
+    "NiceShot": ("41236K~4~H", "Hole in One! (from Pull Back)", SPECIAL, "proj inferred"),
+    "Hikimodoshi": ("41236K~4", "Pull Back", OTHER, "nonattack inferred"),
     "NanigaDerukana": ("236P", "What Could This Be?", SPECIAL, "proj"),
     "NanigaDerukana_Keep": ("236[P]", "What Could This Be? (hold)", SPECIAL, "proj"),
     "NaNaNaNanigaDerukana": ("236236P", "W-W-What Could This Be?", SUPER, "proj"),
@@ -369,6 +395,7 @@ _add("I-No", {
     "Chemical_Air": ("j.214K", "Air Chemical Love", SPECIAL, "proj"),
     "Kyouai": ("214S", "Mad Love Agitato", SPECIAL, "inferred"),
     "Genkai_Land": ("632146S", "Ultimate Fortissimo", SUPER, "inferred"),
+    "Megalomania": ("632146H", "Megalomania", SUPER, "proj inferred"),
     "AirHover_4": ("j.4 (hover)", "hoverdash", OTHER, "nonattack"),
     "AirHover_6": ("j.6 (hover)", "hoverdash", OTHER, "nonattack"),
 })
@@ -396,6 +423,7 @@ _add("Baiken", {
     "TsuraneSanzuWatashi": ("236236S", "Tsurane Sanzu-watashi", SUPER),
     "TsuraneSanzuWatashiExe": ("236236S", "Tsurane Sanzu-watashi", SUPER),
     "KenjyuLand": ("214214P", "Kenjyu", SUPER, "proj"),
+    "KenjyuAir": ("j.214214P", "Air Kenjyu", SUPER, "proj inferred"),
 })
 _add("Axl", {
     "Rensengeki": ("236S", "Sickle Flash", SPECIAL),
@@ -437,6 +465,207 @@ _add("Giovanna", {  # only Special2 (air+land = Sol Poente) and LandUltimate are
     "Shervi": ("214H", "Chave", SPECIAL, "inferred"),
     "LandUltimate": ("632146H", "Ventania", SUPER),
     "AirUltimate": ("j.236236H", "Tempestade", SUPER),
+    "NmlAtk6D2nd": ("6HH", "6H follow-up", CMD, "inferred btn:H stance:stand"),
+})
+
+# --- characters added 2026-10-24 from Dustloop (GGST/<Char>/Data move order + inputs) and the
+# opener stats (distance, airborne, follow-up chains). All `inferred`; a few checked on strips.
+_add("May", {
+    "IrukasanYokoC": ("[4]6S", "S Mr. Dolphin Horizontal", SPECIAL, "inferred"),
+    "IrukasanYokoD": ("[4]6H", "H Mr. Dolphin Horizontal", SPECIAL, "inferred"),
+    "IrukasanTateC": ("[2]8S", "S Mr. Dolphin Vertical", SPECIAL, "inferred"),
+    "IrukasanTateD": ("[2]8H", "H Mr. Dolphin Vertical", SPECIAL, "inferred"),
+    "IrukasanJump": ("[4]6S/H~K", "Mr. Dolphin Split", OTHER, "nonattack inferred"),
+    "IrukasanEnd": ("", "Mr. Dolphin end", OTHER, "nonattack inferred"),
+    "OverHeadKiss": ("623K", "Overhead Kiss", SPECIAL, "grab inferred"),
+    "Arisugawa": ("214P/K", "Arisugawa Sparkle", SPECIAL, "proj inferred"),
+    "Yamada": ("236236S", "Great Yamada Attack", SUPER, "proj inferred"),
+    "Goshogawara": ("632146H", "The Wonderful and Dynamic Goshogawara", SUPER, "inferred"),
+    "AirGoshogawara": ("j.632146H", "Air The Wonderful and Dynamic Goshogawara", SUPER, "inferred"),
+})
+_add("Zato-1", {  # EddieSummonA-D = P/K/S/H Eddie attacks (Pierce / That's a lot / Leap / Oppose)
+    "InviteHell": ("22H", "Invite Hell", SPECIAL, "proj inferred"),
+    "EddieSummonA": ("236P", "Pierce", SPECIAL, "proj inferred"),
+    "EddieSummonB": ("236K", "That's a lot", SPECIAL, "proj inferred"),
+    "EddieSummonC": ("236S", "Leap", SPECIAL, "proj inferred"),
+    "EddieSummonD": ("236H", "Oppose", SPECIAL, "proj inferred"),
+    "EddieCommand": ("236X (Eddie out)", "Eddie command (unresolved P/K/S/H)", SPECIAL, "proj inferred"),
+    "EddieSummonOnly": ("214H", "Summon Eddie", OTHER, "nonattack inferred"),
+    "EddieEnd": ("214H", "Unsummon Eddie", OTHER, "nonattack inferred"),
+    "DamnedFang": ("623S", "Damned Fang", SPECIAL, "grab inferred"),
+    "DamnedFangExe": ("623S", "Damned Fang", SPECIAL, "grab inferred"),
+    "BreakTheLaw": ("214K", "Break The Law", SPECIAL, "inferred"),
+    "DrunkerdShade": ("214S", "Drunkard Shade", SPECIAL, "inferred"),
+    "Fly": ("", "Flight", OTHER, "nonattack inferred"),
+    "Amorphous": ("632146H", "Amorphous", SUPER, "proj inferred"),
+    "SunVoid": ("632146S", "Sun Void", SUPER, "proj inferred"),
+    "SunVoid_Air": ("j.632146S", "Air Sun Void", SUPER, "proj inferred"),
+})
+_add("Jack-O", {  # Ghost = Servant; the servants' hits are detached objects
+    "SummonGhostA": ("236P", "Summon Servant", SPECIAL, "proj inferred"),
+    "ThrowGhost": ("hs.6X", "Throw Servant", SPECIAL, "proj inferred"),
+    "AirThrowGhost": ("hs.j.6X", "Air Throw Servant", SPECIAL, "proj inferred"),
+    "AtkOrderGhost": ("214K", "Attack Command", SPECIAL, "proj inferred"),
+    "AirAtkOrderGhost": ("j.214K", "Air Attack Command", SPECIAL, "proj inferred"),
+    "AtemiGhost": ("214S", "Defend Command", SPECIAL, "proj inferred"),
+    "JibakuGhost": ("214H", "Countdown", SPECIAL, "proj inferred"),
+    "KickGhost": ("236K", "Servant Shoot", SPECIAL, "proj inferred"),
+    "ElysionDriver": ("632146P", "Forever Elysion Driver", SUPER, "inferred"),
+    "ElysionDriverEx": ("632146P", "Forever Elysion Driver", SUPER, "inferred"),
+    "PowerUp": ("236236S/H", "Cheer Servant On", SUPER, "nonattack inferred"),
+})
+_add("Happy Chaos", {
+    "HoldGunAtk": ("5H H", "Fire (At the Ready)", SPECIAL, "proj inferred"),
+    "Sniper": ("214S", "Steady Aim (Fire)", SPECIAL, "proj inferred"),
+    "Reload": ("22P", "Reload", OTHER, "nonattack inferred"),
+    "Routine": ("214P", "Focus", OTHER, "nonattack inferred"),
+    "ForwardRoll": ("214K", "Roll", OTHER, "nonattack inferred"),
+    "Decoy": ("236K", "Scapegoat", OTHER, "nonattack inferred"),
+    "Mark": ("236P", "Curse", SPECIAL, "proj inferred"),
+    "COS_Ultimate1": ("632146S", "Deus Ex Machina", SUPER, "proj inferred"),
+})
+_add("Testament", {  # Grave Reaper = 1-4 (S/H ground, then air); 1/2/8/9 looked at on strips
+    "TST_Special1": ("236S", "S Grave Reaper", SPECIAL, "proj inferred"),
+    "TST_Special2": ("236H", "H Grave Reaper", SPECIAL, "proj inferred"),
+    "TST_Special3": ("j.236S", "Air S Grave Reaper", SPECIAL, "proj inferred"),
+    "TST_Special4": ("j.236H", "Air H Grave Reaper", SPECIAL, "proj inferred"),
+    "TST_Special5": ("214K?", "Possession? (unresolved)", SPECIAL, "inferred"),
+    "TST_Special6": ("", "Testament special 6 (unresolved)", SPECIAL, "inferred"),
+    "TST_Special7": ("214P", "Unholy Diver", SPECIAL, "proj inferred"),
+    "TST_Special8": ("214S", "S Arbiter Sign", SPECIAL, "proj inferred"),
+    "TST_Special9": ("214H", "H Arbiter Sign", SPECIAL, "proj inferred"),
+    "TST_Ultimate1": ("236236P", "Nostrovia", SUPER, "inferred"),
+    "TST_Ultimate2": ("236236K", "Calamity One", SUPER, "inferred"),
+})
+_add("Bridget", {
+    "YOYO_236S_Land": ("236S", "Stop and Dash (S)", SPECIAL, "proj inferred"),
+    "YOYO_236H_Land": ("236H", "Stop and Dash (H)", SPECIAL, "proj inferred"),
+    "YOYO_236S_Air": ("j.236S", "Air Stop and Dash (S)", SPECIAL, "proj inferred"),
+    "YOYO_236H_Air": ("j.236H", "Air Stop and Dash (H)", SPECIAL, "proj inferred"),
+    "YOYO_214S_Land": ("214S", "Stop and Dash (214S)", SPECIAL, "proj inferred"),
+    "YOYO_214H_Land": ("214H", "Stop and Dash (214H)", SPECIAL, "proj inferred"),
+    "YOYO_214S_Air": ("j.214S", "Air Stop and Dash (214S)", SPECIAL, "proj inferred"),
+    "YOYO_214H_Air": ("j.214H", "Air Stop and Dash (214H)", SPECIAL, "proj inferred"),
+    "Rolling": ("214K", "Rolling Movement", SPECIAL, "inferred"),
+    "StarShip": ("623P", "Starship", SPECIAL, "inferred"),
+    "KSMH": ("236K", "Kick Start My Heart", SPECIAL, "inferred"),
+    "KSMH_P": ("236K~P", "Kick Start My Heart - Brake", SPECIAL, "inferred"),
+    "KSMH_K": ("236K~K", "Kick Start My Heart - Shoot", SPECIAL, "inferred"),
+    "FallAtk": ("j.236K", "Roger Dive", SPECIAL, "inferred"),
+    "RockTheBaby_Land": ("63214P", "Rock the Baby", SPECIAL, "grab inferred"),
+    "RockTheBaby_Air": ("j.63214P", "Air Rock the Baby", SPECIAL, "grab inferred"),
+    "KillMachine_Land": ("632146H", "Return of the Killing Machine", SUPER, "proj inferred"),
+    "KillMachine_Air": ("j.632146H", "Air Return of the Killing Machine", SUPER, "proj inferred"),
+})
+_add("Sin", {
+    "BeakDriver": ("236H", "Beak Driver", SPECIAL, "inferred"),
+    "BeakDriver_Add": ("236H~H", "Beak Driver Follow-Up", SPECIAL, "inferred"),
+    "HawkBaker": ("623S", "Hawk Baker", SPECIAL, "inferred"),
+    "HoofStamp": ("214S", "Hoof Stomp", SPECIAL, "inferred"),
+    "ElkHunt": ("236K", "Elk Hunt", SPECIAL, "inferred"),
+    "GazelleStep": ("214K", "Gazelle Step", OTHER, "nonattack inferred"),
+    "StillGrowing": ("63214P", "Still Growing", OTHER, "nonattack inferred"),
+    "RTL_Land": ("632146H", "R.T.L", SUPER, "proj inferred"),
+    "TyrantBarrel": ("236236P", "Tyrant Barrel", SUPER, "inferred"),
+})
+_add("Bedman?", {  # Special1-5 = Dustloop order 236P, 236S, 236H (ground only), 214P, 214K
+    "Special1_Land": ("236P", "call 4BA", SPECIAL, "inferred"),
+    "Special1_Air": ("j.236P", "Air call 4BA", SPECIAL, "inferred"),
+    "Special2_Land": ("236S", "call 4B3", SPECIAL, "inferred"),
+    "Special2_Air": ("j.236S", "Air call 4B3", SPECIAL, "inferred"),
+    "Special3": ("236H", "call 4B9 (Malfunction)", SPECIAL, "inferred"),
+    "Special4_Land": ("214P", "call 0x$0.20", SPECIAL, "inferred"),
+    "Special4_Air": ("j.214P", "Air call 0x$0.20", SPECIAL, "inferred"),
+    "Special5_Land": ("214K", "call 0x$1.00", SPECIAL, "inferred"),
+    "Special5_Air": ("j.214K", "Air call 0x$1.00", SPECIAL, "inferred"),
+    "Ultimate1": ("632146S", "call 13C", SUPER, "inferred"),
+    "Ultimate2": ("632146H", "call 4CC", SUPER, "inferred"),
+    **{f"AirMove{d}": (f"j.{d} (float)" if d else "j. (float)", "air movement", OTHER, "nonattack inferred")
+       for d in ("", "1", "2", "3", "4", "6", "7", "8", "9")},
+})
+_add("Johnny", {  # MistFiner_Attack_A/B/C = released P/K/S; Zweihander = Vault (looked at on strips)
+    "MistFiner_Attack_A": ("214]P[", "Mist Finer (Upward)", SPECIAL, "inferred"),
+    "MistFiner_Attack_B": ("214]K[", "Mist Finer (Horizontal)", SPECIAL, "inferred"),
+    "MistFiner_Attack_C": ("214]S[", "Mist Finer (Downward)", SPECIAL, "inferred"),
+    "AirMistFiner_Attack_A": ("j.214]P[", "Air Mist Finer (Upward)", SPECIAL, "inferred"),
+    "AirMistFiner_Attack_B": ("j.214]K[", "Air Mist Finer (Horizontal)", SPECIAL, "inferred"),
+    "AirMistFiner_Attack_C": ("j.214]S[", "Air Mist Finer (Downward)", SPECIAL, "inferred"),
+    **{k: ("214[X]", "Mist Finer stance", OTHER, "nonattack inferred") for k in
+       ("MistFiner_Stance", "AirMistFiner_Stance", "MistFiner_FDash", "AirMistFiner_FDash",
+        "MistFiner_BDash", "MistFiner_BWalk", "MistFiner_FWalk", "MistFiner_Cancel")},
+    "ThrowCard_A": ("236P", "Deal (P)", SPECIAL, "proj inferred"),
+    "ThrowCard_B": ("236K", "Deal (K)", SPECIAL, "proj inferred"),
+    "ThrowCard_C": ("236S", "Deal (S)", SPECIAL, "proj inferred"),
+    "Zweihander_Land": ("236H", "Vault", SPECIAL, "inferred"),
+    "Zweihander_Land_Add": ("236HH", "Vault Deal", SPECIAL, "inferred"),
+    "Zweihander_Air": ("j.236H", "Air Deal", SPECIAL, "proj inferred"),
+    "Ensenga": ("214H", "Ensenga", SPECIAL, "inferred"),
+    "SoregaOrenonada": ("632146H", "That's My Name", SUPER, "inferred"),
+    "JHN_Ultimate2": ("236236S", "Joker Trick", SUPER, "inferred"),
+})
+_add("Dizzy", {  # Special1-5 = Dustloop order (fish spike, chestnuts, fish summon, Michael Sword, Wings)
+    "DZY_Special1": ("236S/H", "I used this to catch fish", SPECIAL, "proj inferred"),
+    "DZY_Special1_Add": ("236S~6S/236H~6H", "Ice Field", SPECIAL, "proj inferred"),
+    "DZY_Special2": ("236K", "For roasting chestnuts", SPECIAL, "proj inferred"),
+    "DZY_Special3": ("214P/K", "We talked a lot together", SPECIAL, "proj inferred"),
+    "DZY_Special4_S": ("214S", "S Michael Sword", SPECIAL, "proj inferred"),
+    "DZY_Special4_HS": ("214H", "H Michael Sword", SPECIAL, "proj inferred"),
+    "DZY_Special5": ("22H", "Wings of Light", SPECIAL, "proj inferred"),
+    "DZY_ULT1": ("632146S", "Imperial Ray", SUPER, "proj inferred"),
+    "DZY_ULT2": ("632146H", "Gamma Ray", SUPER, "proj inferred"),
+})
+_add("Venom", {  # 01/02 dmg 0 = ball set; 04 has Land/Air = Carcass Raid; 05 long range = Stinger Aim
+    "VEN_Special_01": ("214X", "Ball Set", SPECIAL, "nonattack inferred"),
+    "VEN_Special_02": ("41236K", "Ball Set (Multiple)", SPECIAL, "nonattack inferred"),
+    "VEN_Special_03": ("623X", "QV", SPECIAL, "proj inferred"),
+    "VEN_Special_04_S_Land": ("[2]8S", "S Carcass Raid", SPECIAL, "proj inferred"),
+    "VEN_Special_04_HS_Land": ("[2]8H", "H Carcass Raid", SPECIAL, "proj inferred"),
+    "VEN_Special_04_S_Air": ("j.236S", "Air S Carcass Raid", SPECIAL, "proj inferred"),
+    "VEN_Special_04_HS_Air": ("j.236H", "Air H Carcass Raid", SPECIAL, "proj inferred"),
+    "VEN_Special_05_S": ("[4]6S", "S Stinger Aim", SPECIAL, "proj inferred"),
+    "VEN_Special_05_HS": ("[4]6H", "H Stinger Aim", SPECIAL, "proj inferred"),
+    "VEN_ULT1": ("632146S", "Dark Angel", SUPER, "proj inferred"),
+})
+_add("Unika", {  # names follow Ky's: Edge=Stun Edge (beam), Thrust=Vapor Thrust, Dipper, Sever=Foudre Arc
+    "UNI_SP00_Edge": ("236H", "A.M.T.G. Streak", SPECIAL, "proj inferred"),
+    "UNI_SP01_AirEdge": ("j.236H", "A.A.T.G. Blitz", SPECIAL, "proj inferred"),
+    "UNI_SP02_Thrust": ("623S", "A.C.T.G. Blast-Off", SPECIAL, "inferred"),
+    "UNI_SP03_Dipper": ("236K", "A.T.T.G. Penetrate", SPECIAL, "inferred"),
+    "UNI_SP04_Sever": ("214K", "A.T.T.G. Top-Attack", SPECIAL, "inferred"),
+    "UNI_SP05_Slash": ("214S", "Blaze a Trail", SPECIAL, "inferred"),
+    "UNI_SpecialCancel_FDash": ("", "special cancel dash", OTHER, "nonattack"),
+    "UNI_ULT00_MDBuster": ("632146S", "Megadeath Buster", SUPER, "inferred"),
+    "NmlAtkC_5C": ("~5S", "5S Follow-Up (Arbalest)", CMD, "proj inferred btn:S stance:stand"),
+    "NmlAtkC_2C": ("~2S", "2S Follow-Up (Arbalest)", CMD, "proj inferred btn:S stance:crouch"),
+    "NmlAtkD_5D": ("~5H", "5H Follow-Up (Arbalest)", CMD, "inferred btn:H stance:stand"),
+    "NmlAtkD_2D": ("~2H", "2H Follow-Up (Arbalest)", CMD, "inferred btn:H stance:crouch"),
+})
+_add("Jam", {  # 01-03 have air versions = Ryuujin/Gekirin/Ryuutsui; 05->07, 09->10 chains; 08 -> air specials
+    "USG_Special_01": ("236K", "Ryuujin", SPECIAL, "inferred"),
+    "USG_Special_01_Air": ("j.236K", "Air Ryuujin", SPECIAL, "inferred"),
+    "USG_Special_02": ("236S", "Gekirin", SPECIAL, "inferred"),
+    "USG_Special_02_Air": ("j.236S", "Air Gekirin", SPECIAL, "inferred"),
+    "USG_Special_03": ("236H", "Ryuutsui", SPECIAL, "inferred"),
+    "USG_Special_03_Air": ("j.236H", "Air Ryuutsui", SPECIAL, "inferred"),
+    "USG_Special_04": ("22K/S/H", "Asanagi no Kokyuu", OTHER, "nonattack inferred"),
+    "USG_Special_05": ("214S", "Bakushuu", SPECIAL, "inferred"),
+    "USG_Special_06": ("214S~P/K/S/D", "Bakushuu Break", OTHER, "nonattack inferred"),
+    "USG_Special_07": ("214S~H", "Hyappo Shinshou", SPECIAL, "inferred"),
+    "USG_Special_08": ("214K", "Choujin", OTHER, "nonattack inferred"),
+    "USG_Special_09": ("236P", "Hochifu", SPECIAL, "inferred"),
+    "USG_Special_10": ("236P~6P", "Goushao", SPECIAL, "inferred"),
+    "USG_ULT_01": ("632146H", "Choukyaku Kouryumon", SUPER, "inferred"),
+    "USG_ULT_01_exe": ("632146H", "Choukyaku Kouryumon", SUPER, "inferred"),
+})
+_add("Robo-Ky", {  # ABS_Special_01-06 = Dustloop order; 02/06 have air versions
+    "ABS_Special_01": ("22H", "Gimmic-KY", SPECIAL, "proj inferred"),
+    "ABS_Special_02_Land": ("236S", "Jun-KY Bargain", SPECIAL, "inferred"),
+    "ABS_Special_02_Air": ("j.236S", "Air Jun-KY Bargain", SPECIAL, "inferred"),
+    "ABS_Special_03": ("214S", "KY-zen Blitz", SPECIAL, "inferred"),
+    "ABS_Special_04": ("63214K", "Spar-KY Surprise", SPECIAL, "grab inferred"),
+    "ABS_Special_05": ("214H", "Luc-KY Launcher", SPECIAL, "inferred"),
+    "ABS_Special_06_Land": ("236H", "Beautiful S-KY Today", SPECIAL, "inferred"),
+    "ABS_Special_06_Air": ("j.236H", "Air Beautiful S-KY Today", SPECIAL, "inferred"),
 })
 
 SPELL_NOTE = ("Asuka's spell identity is not in p*_act (always Magic / Magic_air). Candidates for "

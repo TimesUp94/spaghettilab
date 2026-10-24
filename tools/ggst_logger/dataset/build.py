@@ -110,7 +110,7 @@ def load_log(path: str) -> dict:
     cols = list(zip(*rows))
     d = {}
     for k, col in zip(head, cols):
-        if k.endswith(("_act", "_char")):        # p*_char: logger character field (name or id)
+        if k.endswith(("_act", "_char", "_sprite")):  # p*_char: name or id; p*_sprite: e.g. sol000_11
             d[k] = np.array(col)
         else:
             d[k] = np.array(col, dtype=np.float64)
@@ -466,7 +466,7 @@ def match_cv(rows: list[dict], cv: dict, tol=10) -> dict:
         cc = [c for c in cv["combos"] if (2 if c["attacker"] == "P1" else 1) == ds and v - tol <= c["frame_start"] <= span_end]
         r["cv_combo_in_span"] = bool(cc)
         r["cv_combo_max_hits"] = int(cc[0]["max_hits"]) if cc else None
-        r["cv_combo_damage"] = float(cc[0]["damage"]) if cc else None
+        r["cv_combo_damage"] = float(cc[0]["damage"]) if cc and cc[0]["damage"] is not None else None
     # precision over CV events
     tp = fp = tp_len = 0
     for vfr, ds, src in ev:
@@ -589,7 +589,7 @@ def process_replay(entry: dict, args) -> dict:
     log = load_log(entry["csv"])
     cv = load_cv(stem)
     hpmax = {s: float(log[f"p{s}_hp"].max()) for s in (1, 2)}
-    chars = {s: resolve_character(log[f"p{s}_act"], log.get(f"p{s}_char"))[0] for s in (1, 2)}
+    chars = {s: resolve_character(log[f"p{s}_act"], log.get(f"p{s}_char"), log.get(f"p{s}_sprite"))[0] for s in (1, 2)}
     al = align(log, cv, hpmax)
     rows, stats = extract_openers(log, hpmax, args.quiet)
     for r in rows:
@@ -618,12 +618,12 @@ def process_replay(entry: dict, args) -> dict:
 
 
 def relabel(entry: dict, res: dict) -> None:
-    """Characters (logger char column, else action-name inference) and clean move / category
+    """Characters (logger sprite codes, char column, else action-name inference) and clean move / category
     (moves.classify) for a processed replay, cached or fresh: naming changes need no --force."""
     log = load_log(entry["csv"])
     chars, src = {}, {}
     for s in (1, 2):
-        chars[s], src[s] = resolve_character(log[f"p{s}_act"], log.get(f"p{s}_char"))
+        chars[s], src[s] = resolve_character(log[f"p{s}_act"], log.get(f"p{s}_char"), log.get(f"p{s}_sprite"))
     summ = res["summary"]
     summ["p1_char"], summ["p2_char"] = chars[1], chars[2]
     summ["char_source"] = {"p1": src[1], "p2": src[2]}
