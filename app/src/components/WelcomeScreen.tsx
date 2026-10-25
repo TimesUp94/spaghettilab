@@ -6,12 +6,13 @@ const DONATE_URL =
 interface Props {
   onAnalyze: () => void;
   onSplitVod: () => void;
+  onExportStrive: () => void;
   onOpenSpag: () => void;
   onOpenDatabase: () => void;
   onAnnotate: () => void;
 }
 
-export function WelcomeScreen({ onAnalyze, onSplitVod, onOpenSpag, onOpenDatabase, onAnnotate }: Props) {
+export function WelcomeScreen({ onAnalyze, onSplitVod, onExportStrive, onOpenSpag, onOpenDatabase, onAnnotate }: Props) {
   return (
     <div className="h-screen flex flex-col items-center justify-center bg-surface-0">
       <div className="text-center max-w-lg">
@@ -35,7 +36,7 @@ export function WelcomeScreen({ onAnalyze, onSplitVod, onOpenSpag, onOpenDatabas
         <div className="w-48 h-px bg-gradient-to-r from-transparent via-accent-purple/40 to-transparent mx-auto mb-10" />
 
         {/* Actions */}
-        <div className="grid grid-cols-5 gap-3 max-w-2xl mx-auto">
+        <div className="grid grid-cols-3 gap-3 max-w-2xl mx-auto">
           <button
             onClick={onOpenDatabase}
             className="px-5 py-4 bg-accent-purple/12 text-accent-purple border border-accent-purple/20
@@ -76,6 +77,20 @@ export function WelcomeScreen({ onAnalyze, onSplitVod, onOpenSpag, onOpenDatabas
             <div className="font-medium text-sm">Split VOD</div>
             <div className="text-[10px] text-text-muted mt-1">
               Cut a VOD into sets
+            </div>
+          </button>
+          <button
+            onClick={onExportStrive}
+            className="px-5 py-4 bg-p1/12 text-p1 border border-p1/20
+                       rounded-xl hover:bg-p1/20 hover:border-p1/35
+                       transition-all duration-300 cursor-pointer group"
+          >
+            <div className="text-lg mb-1 opacity-70 group-hover:opacity-100 transition-opacity">
+              &#9210;
+            </div>
+            <div className="font-medium text-sm">Export Strive Replays</div>
+            <div className="text-[10px] text-text-muted mt-1">
+              Record your saved replays
             </div>
           </button>
           <button

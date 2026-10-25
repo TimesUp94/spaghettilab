@@ -13,6 +13,8 @@ import type {
   Drawing,
   SpagSession,
   SpagzSession,
+  StriveExportOptions,
+  StriveExportSummary,
 } from "./types";
 
 export async function getReplays(dbPath: string): Promise<Replay[]> {
@@ -211,4 +213,15 @@ export async function createQuickSession(
   videoUrl?: string
 ): Promise<SpagzSession> {
   return invoke("create_quick_session", { videoPath, videoUrl: videoUrl ?? null });
+}
+
+// Strive replay export: drives the running game and records saved replays
+
+export async function exportStriveReplays(options: StriveExportOptions): Promise<StriveExportSummary> {
+  return invoke("export_strive_replays", { options });
+}
+
+/** Stop after the current replay (`now` false) or at once, finalising the current file. */
+export async function cancelStriveExport(now: boolean): Promise<void> {
+  return invoke("cancel_strive_export", { now });
 }

@@ -19,5 +19,9 @@ dev = ["pytest>=7.0"]
 [tool.setuptools.packages.find]
 include = ["replanal*"]
 
+[tool.setuptools.package-data]
+# Reference screenshots for recognising Strive's menus (per UI language)
+"replanal.strive_export" = ["refs/*/*.jpg", "refs/*/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

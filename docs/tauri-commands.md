@@ -143,6 +143,16 @@ pub struct CutSetRequest {
     pub p1_name: Option<String>,
     pub p2_name: Option<String>,
 }
+
+pub struct StriveExportOptions {
+    pub output_dir: String,
+    pub mode: String,            // "all" | "count" | "since"
+    pub count: Option<u32>,      // mode "count"
+    pub since: Option<String>,   // YYYY-MM-DD, mode "since"
+    pub start: Option<u32>,      // skip the N newest first
+    pub dry_run: Option<bool>,   // walk the list, record nothing
+    pub lang: Option<String>,    // UI language for the text checks ("auto" when absent)
+}
 ```
 
 ---
@@ -510,6 +520,41 @@ async fn cut_vod_sets(app_handle: AppHandle, video_path: String, sets: Vec<CutSe
 
 ---
 
+## Strive Replay Export Commands
+
+See `docs/strive-export.md` for the exporter itself.
+
+### export_strive_replays
+
+```rust
+async fn export_strive_replays(app_handle: AppHandle, options: StriveExportOptions) -> Result<serde_json::Value, String>
+```
+
+**Purpose:** Drive the running Guilty Gear -Strive- to its saved replays and record each one as an mp4 in `options.output_dir`.
+
+**Process:**
+1. Windows only; refuses a second export while one runs.
+2. Build the CLI arguments (`strive_export_args`): `export --out DIR --json-progress` plus `--all` / `--count N` / `--since DATE`, `--start`, `--dry-run`, `--lang`.
+3. Spawn `<python> -u -m replanal.strive_export ...` with `PYTHONPATH` = project root and `SPAGHETTI_FFMPEG` = `ffmpeg_bin()` (one more candidate; the module prefers any FFmpeg with `gfxcapture`).
+4. Keep the child's stdin in `STRIVE_EXPORT_STDIN` for `cancel_strive_export`.
+5. Forward every stdout JSON line verbatim as a `strive-export-progress` event; remember the `done` event (summary) and the last `error` message.
+
+**Returns:** the `done` event: `{event, reason, listed, exported: [paths], skipped: [paths], manifest}`. Errors with the exporter's `error` message (or stderr's last line).
+
+**Events emitted:** `strive-export-progress` (one JSON object per event: `ffmpeg`, `start`, `screen`, `status`, `warning`, `list`, `entry`, `recording`, `recorded`, `skipped`, `done`, `error`)
+
+---
+
+### cancel_strive_export
+
+```rust
+fn cancel_strive_export(now: bool) -> Result<(), String>
+```
+
+**Purpose:** Stop the running export. `now = false` writes `cancel` to its stdin (finish the replay being recorded, return to the list, stop); `now = true` writes `stop` (finalise the current mp4 at once, marked `partial` in the manifest, and leave the game in the replay). Errors when no export runs.
+
+---
+
 ## Utility Commands
 
 ### get_default_db_path
@@ -595,6 +640,7 @@ get_match_stats, get_highlights, get_default_db_path,
 analyze_video, reanalyze_replay, reanalyze_all,
 export_clip, resolve_video_path, extract_preview_frame,
 scan_vod, cut_vod_sets,
+export_strive_replays, cancel_strive_export,
 get_notes, add_note, update_note, delete_note,
 export_spag, open_spag, save_spag, set_round_winner,
 ```

@@ -3559,6 +3559,217 @@ pub struct SpagSession {
     pub replay_id: String,
 }
 
+// ── Strive replay export ────────────────────────────────────────────────────
+//
+// Drives the running game through Collection > Replay > Saved replays and
+// records each replay (python -m replanal.strive_export, see
+// docs/strive-export.md). Progress arrives as one JSON object per stdout line
+// and is forwarded verbatim as "strive-export-progress" events; cancelling
+// writes "cancel" (after the current replay) or "stop" (now, finalising the
+// current mp4) to the process's stdin.
+
+#[derive(Debug, Deserialize)]
+pub struct StriveExportOptions {
+    pub output_dir: String,
+    /// "all", "count" or "since"
+    pub mode: String,
+    pub count: Option<u32>,
+    /// YYYY-MM-DD (or "today")
+    pub since: Option<String>,
+    pub start: Option<u32>,
+    pub dry_run: Option<bool>,
+    /// UI language for the text checks; "auto" when absent
+    pub lang: Option<String>,
+}
+
+/// The running export's stdin, for cancel_strive_export. Some = running.
+static STRIVE_EXPORT_STDIN: std::sync::Mutex<Option<std::process::ChildStdin>> =
+    std::sync::Mutex::new(None);
+
+/// The CLI arguments for the module (after `-m replanal.strive_export`).
+fn strive_export_args(o: &StriveExportOptions) -> Result<Vec<String>, String> {
+    let mut a: Vec<String> = vec!["export".into(), "--out".into(), o.output_dir.clone(), "--json-progress".into()];
+    match o.mode.as_str() {
+        "all" => a.push("--all".into()),
+        "count" => {
+            let n = o.count.unwrap_or(0);
+            if n == 0 {
+                return Err("How many replays? Enter a number of at least 1.".into());
+            }
+            a.push("--count".into());
+            a.push(n.to_string());
+        }
+        "since" => {}
+        other => return Err(format!("unknown export mode '{}'", other)),
+    }
+    let since = o.since.as_deref().unwrap_or("").trim();
+    if o.mode == "since" && since.is_empty() {
+        return Err("Pick the date to export from.".into());
+    }
+    if !since.is_empty() {
+        a.push("--since".into());
+        a.push(since.to_string());
+    }
+    if let Some(st) = o.start.filter(|s| *s > 0) {
+        a.push("--start".into());
+        a.push(st.to_string());
+    }
+    if o.dry_run.unwrap_or(false) {
+        a.push("--dry-run".into());
+    }
+    if let Some(l) = o.lang.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
+        a.push("--lang".into());
+        a.push(l.to_string());
+    }
+    Ok(a)
+}
+
+#[tauri::command]
+async fn export_strive_replays(
+    app_handle: tauri::AppHandle,
+    options: StriveExportOptions,
+) -> Result<serde_json::Value, String> {
+    // An export runs for as long as the replays play (hours for --all): keep
+    // it off the async runtime's worker threads.
+    tauri::async_runtime::spawn_blocking(move || run_strive_export(app_handle, options))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn run_strive_export(
+    app_handle: tauri::AppHandle,
+    options: StriveExportOptions,
+) -> Result<serde_json::Value, String> {
+    if !cfg!(target_os = "windows") {
+        return Err("Exporting Strive replays works on Windows only.".into());
+    }
+    let args = strive_export_args(&options)?;
+    if STRIVE_EXPORT_STDIN.lock().unwrap().is_some() {
+        return Err("An export is already running.".into());
+    }
+    std::fs::create_dir_all(&options.output_dir).map_err(|e| e.to_string())?;
+    let project_root = find_project_root()?;
+    let python = require_python()?;
+
+    let mut cmd = python.command();
+    cmd.env("PYTHONPATH", project_root.to_str().unwrap())
+        .env("PYTHONIOENCODING", "utf-8")
+        .arg("-u")
+        .args(["-m", "replanal.strive_export"])
+        .args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // The module looks for an FFmpeg with window capture (8+) itself; offer
+    // ours as one more candidate.
+    if let Ok(ff) = ffmpeg_bin() {
+        cmd.env("SPAGHETTI_FFMPEG", ff);
+    }
+    eprintln!("[STRIVE-EXPORT] Spawning: {} -m replanal.strive_export {}", python, args.join(" "));
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn python: {}", e))?;
+    *STRIVE_EXPORT_STDIN.lock().unwrap() = child.stdin.take();
+
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = String::new();
+        let _ = std::io::BufReader::new(stderr).read_to_string(&mut buf);
+        buf
+    });
+
+    let mut summary: Option<serde_json::Value> = None;
+    let mut error: Option<String> = None;
+    for line in std::io::BufReader::new(stdout).lines() {
+        let Ok(line) = line else { break };
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
+            match v["event"].as_str() {
+                Some("done") => summary = Some(v.clone()),
+                Some("error") => error = v["message"].as_str().map(|s| s.to_string()),
+                _ => {}
+            }
+            let _ = app_handle.emit("strive-export-progress", &line);
+        } else {
+            eprintln!("[STRIVE-EXPORT] {}", line);
+        }
+    }
+
+    let status = child.wait().map_err(|e| e.to_string());
+    *STRIVE_EXPORT_STDIN.lock().unwrap() = None;
+    let stderr_output = stderr_thread.join().unwrap_or_default();
+    if !stderr_output.is_empty() {
+        eprintln!("[STRIVE-EXPORT] stderr:\n{}", stderr_output);
+    }
+    if let Some(s) = summary {
+        return Ok(s);
+    }
+    let status = status?;
+    Err(error.unwrap_or_else(|| {
+        let last = stderr_output.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("unknown error");
+        format!("Export failed (exit {}): {}", status.code().unwrap_or(-1), last)
+    }))
+}
+
+/// Ask the running export to stop: after the current replay (`now` false),
+/// or at once, finalising the file being recorded (`now` true).
+#[tauri::command]
+fn cancel_strive_export(now: bool) -> Result<(), String> {
+    let mut guard = STRIVE_EXPORT_STDIN.lock().unwrap();
+    let stdin = guard.as_mut().ok_or("No export is running.")?;
+    let msg: &[u8] = if now { b"stop\n" } else { b"cancel\n" };
+    stdin.write_all(msg).and_then(|_| stdin.flush()).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod strive_export_tests {
+    use super::*;
+
+    fn opts(mode: &str) -> StriveExportOptions {
+        StriveExportOptions {
+            output_dir: "C:/out".into(),
+            mode: mode.into(),
+            count: None,
+            since: None,
+            start: None,
+            dry_run: None,
+            lang: None,
+        }
+    }
+
+    #[test]
+    fn export_args_for_each_mode() {
+        assert_eq!(strive_export_args(&opts("all")).unwrap(), ["export", "--out", "C:/out", "--json-progress", "--all"]);
+        let mut o = opts("count");
+        assert!(strive_export_args(&o).is_err());
+        o.count = Some(5);
+        o.start = Some(2);
+        o.dry_run = Some(true);
+        assert_eq!(
+            strive_export_args(&o).unwrap(),
+            ["export", "--out", "C:/out", "--json-progress", "--count", "5", "--start", "2", "--dry-run"]
+        );
+        let mut o = opts("since");
+        assert!(strive_export_args(&o).is_err());
+        o.since = Some("2026-10-23".into());
+        o.lang = Some("en".into());
+        assert_eq!(
+            strive_export_args(&o).unwrap(),
+            ["export", "--out", "C:/out", "--json-progress", "--since", "2026-10-23", "--lang", "en"]
+        );
+        assert!(strive_export_args(&opts("bogus")).is_err());
+    }
+
+    #[test]
+    fn cancel_without_an_export_is_an_error() {
+        if STRIVE_EXPORT_STDIN.lock().unwrap().is_none() {
+            assert!(cancel_strive_export(false).is_err());
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Clone)]
 pub struct SpagzSession {
     pub db_path: String,
@@ -4319,6 +4530,8 @@ pub fn run() {
             extract_preview_frame,
             scan_vod,
             cut_vod_sets,
+            export_strive_replays,
+            cancel_strive_export,
             get_notes,
             add_note,
             update_note,

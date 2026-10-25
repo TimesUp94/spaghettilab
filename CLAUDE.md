@@ -43,6 +43,12 @@ cargo test test_slycoops_rounds -- --nocapture # single test
 # NOTE: Rust tests are round-detection debug harnesses that open the hardcoded
 # C:/Projects/replanal/output/analysis.db and print rounds; they fail without that DB.
 
+# Export saved Strive replays from the running game (Windows; game at the title screen,
+# keyboard controls; the tool presses keys in the game window)
+python -m replanal.strive_export --out <dir> --count 10    # or --all / --since today; --dry-run
+python -m replanal.strive_export probe                     # ffmpeg/capture/encoder + current screen, no keys
+python -m replanal.strive_export calibrate --lang en       # reference screens for another UI language
+
 # Release (from repo root)
 ./release.sh                      # auto-version YYYY.M.DD-preview.N
 ./release.sh 2026.4.1-preview.1   # explicit version
@@ -61,6 +67,7 @@ See `docs/` for detailed documentation of each subsystem:
 - `docs/vod-splitter.md` — VOD splitting with OCR-based name detection
 - `docs/frontend.md` — React UI components and state management
 - `docs/tauri-commands.md` — All Rust/Tauri backend commands
+- `docs/strive-export.md` — Exporting saved Strive replays by driving the game (screen recognition, key safety, capture)
 
 ### Data Pipeline
 
@@ -100,6 +107,7 @@ Video (1080p @30fps)
 - **Quad ROIs:** VOD splitter name tag regions use 4-point quads that follow the rotated name text in GGS and leave out the game's "Player 1/2" label. Perspective-warped to rectangles before OCR. Defaults in `split_vod.py`, RoiPicker `DEFAULT_ROIS` and `docs/vod-splitter.md` must agree (a pytest checks the first two). P2's quad runs under the label to x 1795 for long names; check quad changes on both Tappa #4 (1080p) and the new VOD (720p), with and without OCR.
 - **`.spag` / `.spagz` files:** `.spag` is a ZIP with an SQLite snapshot (plus video); `.spagz` is the lightweight variant (analysis DB only, no video — stores `video_url` so YouTube/Twitch sessions re-embed on reopen). Both registered as file associations.
 - **Annotate mode:** Lightweight session from a YouTube/Twitch URL (`create_quick_session`, `AnnotateSetup`/`AnnotateView`) — embeds the video via IFrame API for timestamped notes, drawings and the review questionnaire, without running the CV pipeline. `VideoPlayer` abstracts playback over both `<video>` and embeds.
+- **Strive replay export:** `replanal/strive_export/` drives the running game (title → Collection → Replay → Saved replays) and records each replay with FFmpeg (`gfxcapture` from FFmpeg 8+, else `ddagrab`). A key is only pressed on a recognised screen and from that screen's allow-list (`exporter.key_allowed`); ranked matchmaking and "Delete replay" must stay unreachable, and `tests/test_strive_export.py` checks this. Screen checks are language-independent (layout, colours, icons) plus per-language text checks against `refs/<lang>/` (Italian ships; `calibrate` adds others). The app runs it through `export_strive_replays` / `cancel_strive_export` (`StriveExportView`).
 - **Questionnaire:** Templates in `app/src/lib/questionnaireTemplate.ts`; answers keyed by `(replay_id, question_key)` with template-id-prefixed keys (e.g. `ggst.roundstart.main_options`).
 
 ### Database Schema

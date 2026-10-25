@@ -56,6 +56,7 @@ import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ExportModal } from "./components/ExportModal";
 import { AnalysisProgress } from "./components/AnalysisProgress";
 import { SplitVodView } from "./components/SplitVodView";
+import { StriveExportView } from "./components/StriveExportView";
 import { NotesPanel } from "./components/NotesPanel";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { SpagzVideoModal } from "./components/SpagzVideoModal";
@@ -108,7 +109,7 @@ function groupRoundsIntoMatches(rounds: RoundResult[]): Match[] {
   return matches;
 }
 
-type AppView = "welcome" | "analyze" | "split" | "dashboard" | "annotate";
+type AppView = "welcome" | "analyze" | "split" | "strive" | "dashboard" | "annotate";
 
 function ReanalyzeOverlay({ isAll }: { isAll: boolean }) {
   const [progress, setProgress] = useState("");
@@ -908,6 +909,7 @@ export default function App() {
         <WelcomeScreen
           onAnalyze={() => setView("analyze")}
           onSplitVod={() => setView("split")}
+          onExportStrive={() => setView("strive")}
           onOpenSpag={handleOpenSpag}
           onOpenDatabase={handleOpenDefaultDb}
           onAnnotate={() => setShowAnnotateSetup(true)}
@@ -968,6 +970,16 @@ export default function App() {
       <AnalysisProgress
         onComplete={handleAnalysisComplete}
         onCancel={() => setView(dbPath ? "dashboard" : "welcome")}
+      />
+    );
+  }
+
+  // Strive replay export view
+  if (view === "strive") {
+    return (
+      <StriveExportView
+        onComplete={handleAnalysisComplete}
+        onCancel={() => setView("welcome")}
       />
     );
   }

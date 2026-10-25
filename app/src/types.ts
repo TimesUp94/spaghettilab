@@ -164,3 +164,51 @@ export interface CutSetRequest {
   p1_name: string | null;
   p2_name: string | null;
 }
+
+// Strive replay export (export_strive_replays)
+
+export interface StriveExportOptions {
+  output_dir: string;
+  mode: "all" | "count" | "since";
+  count?: number;
+  /** YYYY-MM-DD */
+  since?: string;
+  start?: number;
+  dry_run?: boolean;
+  lang?: string;
+}
+
+/** One line of the exporter's JSON progress ("strive-export-progress"). */
+export interface StriveExportEvent {
+  event: string;
+  message?: string;
+  index?: number;
+  file?: string;
+  date?: string | null;
+  time?: string | null;
+  p1?: string | null;
+  p2?: string | null;
+  duration_s?: number;
+  partial?: boolean;
+  screen?: string;
+  detail?: string;
+  total?: number;
+  capture?: string;
+  encoder?: string | null;
+  path?: string;
+  reason?: string;
+  exported?: string[];
+  skipped?: string[];
+  listed?: number;
+  manifest?: string | null;
+  [key: string]: unknown;
+}
+
+export interface StriveExportSummary {
+  event: "done";
+  reason: string;
+  listed: number;
+  exported: string[];
+  skipped: string[];
+  manifest: string | null;
+}
