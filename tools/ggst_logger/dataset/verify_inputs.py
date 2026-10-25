@@ -9,7 +9,8 @@ before the action, and the longest motion in the 24 frames before that press. Pe
     .venv/Scripts/python.exe tools/ggst_logger/dataset/verify_inputs.py [--char Giovanna] [--all]
 
 Prints one line per action: n, the top readings with their share, and the table's
-notation; `!!` marks a table entry whose motion+button the inputs don't support, `??` an
+notation; `!!` marks a table entry whose motion+button the inputs don't support (unless
+the entry is flagged `dustloop`: checked on Dustloop's frame data), `??` an
 action with no table entry. Writes the full table to $GGST_DATA/ggst_dataset/input_check.json.
 """
 from __future__ import annotations
@@ -170,7 +171,8 @@ def main():
         follow = (bool(table) and ("~" in table or re.search(r"([PKSHD])\1$", table) is not None)
                   or re.search(r"(_?[Ee]xe|_Cancel|_Add)$", a) is not None)
         flag = ("??" if mi is None else
-                "!!" if allowed and support / n < 0.3 and not (state or follow) else "  ")
+                "!!" if (allowed and support / n < 0.3 and not (state or follow)
+                         and "dustloop" not in mi[3]) else "  ")
         report.setdefault(char, {})[a] = {"n": n, "top": top, "table": table, "support": round(support / n, 2)}
         if flag.strip() or args.all:
             tops = ", ".join(f"{k} {v / n:.0%}" for k, v in top)

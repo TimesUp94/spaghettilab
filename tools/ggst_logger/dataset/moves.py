@@ -133,7 +133,9 @@ NORMAL, CMD, SPECIAL, SUPER, THROW, PROJ, BURST, OTHER = (
 # flags: proj = the move's hit is a projectile / detached object; grab = command grab;
 # nonattack = not an attack (a hit while in it comes from an earlier projectile);
 # inferred = mapping from Dustloop order / variants, not seen on video; verified = seen on strips;
-# inputs = the motion + button checked against the logged inputs (verify_inputs.py).
+# inputs = the motion + button checked against the logged inputs (verify_inputs.py);
+# dustloop = the notation checked on Dustloop's frame data (rare moves the logged inputs
+# are too few or too sloppy to settle).
 # act -> (notation, name, category, flags)
 M = {}
 
@@ -162,8 +164,8 @@ _add("Elphelt", {
     "ELP_Special1_S_Land": ("236S", "Miss Charlotte", SPECIAL, "proj"),
     "ELP_Special1_HS_Land": ("236H", "Miss Charlotte", SPECIAL, "proj verified"),
     # the inputs settle the motions; which of the two names goes with which is not checked
-    "ELP_Special2": ("214K", "214K (Out of Repair / Bomb-Bomb Chocolat)", SPECIAL, "inputs"),
-    "ELP_Special4": ("214H", "214H (Out of Repair / Bomb-Bomb Chocolat)", SPECIAL, "inputs"),
+    "ELP_Special2": ("214K", "Out of Repair", SPECIAL, "inputs dustloop"),
+    "ELP_Special4": ("214H", "Bomb-Bomb Chocolat", SPECIAL, "inputs dustloop"),
     "ELP_Special3_Start": ("214S", "Here I Go!", SPECIAL, "verified"),
     "ELP_Special3_Start_easy_2nd": ("214S~S", "Here I Go! (2nd)", SPECIAL, "inferred"),
     "ELP_Special3_Chudan": ("214S~P", "Up High!", SPECIAL, "verified"),
@@ -240,7 +242,7 @@ _add("Leo", {
     "GlaenzenDunkelExe": ("bt.214K", "Glaenzendes Dunkel", SPECIAL),
     "SchildBrechen": ("bt.214H?", "Blitzschlag?", SPECIAL, "inferred"),
     "GuardAttack": ("bt.P", "Kahn-Schild (guard attack)", SPECIAL, "inferred"),
-    "StahlWirbel": ("632146S", "Stahl Wirbel", SUPER),
+    "StahlWirbel": ("632146S", "Stahl Wirbel", SUPER, "dustloop"),
     "LeidenschaftDirigent": ("632146H", "Leidenschaft des Dirigenten", SUPER),
     "Semuke": ("bt.", "backturn", OTHER, "nonattack"),
     "SemukeFWalk": ("bt.6", "backturn walk", OTHER, "nonattack"),
@@ -296,7 +298,7 @@ _add("Sol", {
     "Vortex": ("214S", "Night Raid Vortex", SPECIAL),
     "Fefnir": ("41236H", "Fafnir", SPECIAL),
     "TyrantRave": ("632146H", "Tyrant Rave", SUPER, "inferred"),
-    "HMC": ("214214H", "Heavy Mob Cemetery", SUPER, "inferred"),
+    "HMC": ("214214H", "Heavy Mob Cemetery", SUPER, "dustloop"),
     "HMCExe": ("214214H", "Heavy Mob Cemetery", SUPER, "inferred"),
 })
 _add("Ky", {
@@ -406,7 +408,7 @@ _add("I-No", {
     "Chemical": ("214K", "Chemical Love", SPECIAL, "proj"),
     "Chemical_Air": ("j.214K", "Air Chemical Love", SPECIAL, "proj"),
     "Kyouai": ("214S", "Mad Love Agitato", SPECIAL, "inferred"),
-    "Genkai_Land": ("632146S", "Ultimate Fortissimo", SUPER, "inferred"),
+    "Genkai_Land": ("632146S", "Ultimate Fortissimo", SUPER, "dustloop"),
     "Genkai_Air": ("j.632146S", "Air Ultimate Fortissimo", SUPER, "inputs"),
     "Megalomania": ("632146H", "Megalomania", SUPER, "proj inferred"),
     "AirHover_4": ("j.4 (hover)", "hoverdash", OTHER, "nonattack"),
@@ -451,7 +453,7 @@ _add("Axl", {
     "Katatumuri_Air": ("j.214H", "Air Snail", SPECIAL),
     "AxlBomber": ("j.236H", "Axl Bomber", SPECIAL),
     "Mogaribue": ("214K", "Whistling Wind", SPECIAL),
-    "ByakueRenshou": ("236236H", "Sickle Storm", SUPER),
+    "ByakueRenshou": ("236236H", "Sickle Storm", SUPER, "dustloop"),
     "OneVision": ("632146P", "One Vision", SUPER),
     "OneVision_Add": ("632146P", "One Vision (attack)", SUPER),
 })
@@ -493,7 +495,7 @@ _add("May", {
     "OverHeadKiss": ("623K", "Overhead Kiss", SPECIAL, "grab inferred"),
     "Arisugawa": ("214P/K", "Arisugawa Sparkle", SPECIAL, "proj inferred"),
     "Yamada": ("236236S", "Great Yamada Attack", SUPER, "proj inferred"),
-    "Goshogawara": ("632146H", "The Wonderful and Dynamic Goshogawara", SUPER, "inferred"),
+    "Goshogawara": ("632146H", "The Wonderful and Dynamic Goshogawara", SUPER, "dustloop"),
     "AirGoshogawara": ("j.632146H", "Air The Wonderful and Dynamic Goshogawara", SUPER, "inferred"),
 })
 _add("Zato-1", {  # EddieSummonA-D = P/K/S/H Eddie attacks (Pierce / That's a lot / Leap / Oppose)
@@ -513,7 +515,7 @@ _add("Zato-1", {  # EddieSummonA-D = P/K/S/H Eddie attacks (Pierce / That's a lo
     "Amorphous": ("632146H", "Amorphous", SUPER, "proj inferred"),
     "SunVoid": ("632146S", "Sun Void", SUPER, "proj inferred"),
     "SunVoid_Air": ("j.632146S", "Air Sun Void", SUPER, "proj inferred"),
-    "EddieSurround": ("?", "Eddie surround (unresolved)", SPECIAL, "proj inferred"),
+    "EddieSurround": ("214P", "Float", OTHER, "nonattack inputs dustloop"),
 })
 _add("Jack-O", {  # Ghost = Servant; the servants' hits are detached objects
     "SummonGhostA": ("236P", "Summon Servant", SPECIAL, "proj inferred"),
@@ -607,7 +609,7 @@ _add("Bedman?", {  # Special1-5 = Dustloop order 236P, 236S, 236H (ground only),
     "Special5_Land": ("214K", "call 0x$1.00", SPECIAL, "inferred"),
     "Special5_Air": ("j.214K", "Air call 0x$1.00", SPECIAL, "inferred"),
     "Ultimate1": ("632146S", "call 13C", SUPER, "inferred"),
-    "Ultimate2": ("632146H", "call 4CC", SUPER, "inferred"),
+    "Ultimate2": ("632146H", "call 4CC", SUPER, "dustloop"),
     **{f"AirMove{d}": (f"j.{d} (float)" if d else "j. (float)", "air movement", OTHER, "nonattack inferred")
        for d in ("", "1", "2", "3", "4", "6", "7", "8", "9")},
 })
@@ -660,7 +662,7 @@ _add("Venom", {  # 01/02 dmg 0 = ball set; 04 has Land/Air = Carcass Raid; 05 lo
 _add("Unika", {  # names follow Ky's: Edge=Stun Edge (beam), Thrust=Vapor Thrust, Dipper, Sever=Foudre Arc
     "UNI_SP00_Edge": ("236H", "A.M.T.G. Streak", SPECIAL, "proj inferred"),
     "UNI_SP01_AirEdge": ("j.236H", "A.A.T.G. Blitz", SPECIAL, "proj inferred"),
-    "UNI_SP02_Thrust": ("623S", "A.C.T.G. Blast-Off", SPECIAL, "inferred"),
+    "UNI_SP02_Thrust": ("623S", "A.C.T.G. Blast-Off", SPECIAL, "dustloop"),
     "UNI_SP03_Dipper": ("236K", "A.T.T.G. Penetrate", SPECIAL, "inferred"),
     "UNI_SP04_Sever": ("214K", "A.T.T.G. Top-Attack", SPECIAL, "inferred"),
     "UNI_SP05_Slash": ("214S", "Blaze a Trail", SPECIAL, "inferred"),
@@ -687,7 +689,7 @@ _add("Jam", {  # 01-03 have air versions = Ryuujin/Gekirin/Ryuutsui; 05->07, 09-
     "USG_Special_10": ("236P~6P", "Goushao", SPECIAL, "inferred"),
     "USG_ULT_01": ("632146H", "Choukyaku Kouryumon", SUPER, "inferred"),
     "USG_ULT_01_exe": ("632146H", "Choukyaku Kouryumon", SUPER, "inferred"),
-    "USG_ULT_02": ("632146P", "Bao Saishinshou?", SUPER, "inferred"),
+    "USG_ULT_02": ("632146P", "Asanagi no Kokyuu: Shinki Kaiten", SUPER, "nonattack inputs dustloop"),
 })
 _add("Robo-Ky", {  # ABS_Special_01-06 = Dustloop order; 02/06 have air versions
     "ABS_Special_01": ("22H", "Gimmic-KY", SPECIAL, "proj inferred"),

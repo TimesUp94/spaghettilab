@@ -451,17 +451,19 @@
    },
    "ELP_Special2": {
     "notation": "214K",
-    "name": "214K (Out of Repair / Bomb-Bomb Chocolat)",
+    "name": "Out of Repair",
     "category": "special",
     "flags": [
+     "dustloop",
      "inputs"
     ]
    },
    "ELP_Special4": {
     "notation": "214H",
-    "name": "214H (Out of Repair / Bomb-Bomb Chocolat)",
+    "name": "Bomb-Bomb Chocolat",
     "category": "special",
     "flags": [
+     "dustloop",
      "inputs"
     ]
    },
@@ -986,7 +988,9 @@
     "notation": "632146S",
     "name": "Stahl Wirbel",
     "category": "super",
-    "flags": []
+    "flags": [
+     "dustloop"
+    ]
    },
    "LeidenschaftDirigent": {
     "notation": "632146H",
@@ -1426,7 +1430,7 @@
     "name": "Heavy Mob Cemetery",
     "category": "super",
     "flags": [
-     "inferred"
+     "dustloop"
     ]
    },
    "HMCExe": {
@@ -2200,7 +2204,7 @@
     "name": "Ultimate Fortissimo",
     "category": "super",
     "flags": [
-     "inferred"
+     "dustloop"
     ]
    },
    "Genkai_Air": {
@@ -2471,7 +2475,9 @@
     "notation": "236236H",
     "name": "Sickle Storm",
     "category": "super",
-    "flags": []
+    "flags": [
+     "dustloop"
+    ]
    },
    "OneVision": {
     "notation": "632146P",
@@ -2721,7 +2727,7 @@
     "name": "The Wonderful and Dynamic Goshogawara",
     "category": "super",
     "flags": [
-     "inferred"
+     "dustloop"
     ]
    },
    "AirGoshogawara": {
@@ -2877,12 +2883,13 @@
     ]
    },
    "EddieSurround": {
-    "notation": "?",
-    "name": "Eddie surround (unresolved)",
-    "category": "special",
+    "notation": "214P",
+    "name": "Float",
+    "category": "other",
     "flags": [
-     "inferred",
-     "proj"
+     "dustloop",
+     "inputs",
+     "nonattack"
     ]
    }
   },
@@ -3590,7 +3597,7 @@
     "name": "call 4CC",
     "category": "super",
     "flags": [
-     "inferred"
+     "dustloop"
     ]
    },
    "AirMove": {
@@ -4097,7 +4104,7 @@
     "name": "A.C.T.G. Blast-Off",
     "category": "special",
     "flags": [
-     "inferred"
+     "dustloop"
     ]
    },
    "UNI_SP03_Dipper": {
@@ -4309,10 +4316,12 @@
    },
    "USG_ULT_02": {
     "notation": "632146P",
-    "name": "Bao Saishinshou?",
+    "name": "Asanagi no Kokyuu: Shinki Kaiten",
     "category": "super",
     "flags": [
-     "inferred"
+     "dustloop",
+     "inputs",
+     "nonattack"
     ]
    }
   },
