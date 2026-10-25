@@ -59,8 +59,10 @@ def has_motion(dirs: list[str], m: str) -> bool:
     return all(any(c == d for d in it) for c in m)
 
 
-def read_command(rec: list[int], face: list[int], t: int) -> str | None:
-    """The motion + button that started an action at frame t (None: no press found)."""
+def read_command(rec: list[int], face: list[int], t: int) -> list[str] | None:
+    """The motion + button readings that could have started an action at frame t, the most
+    likely first (None: no press found). All matching motions are kept: a jump-cancelled 236
+    rolled into 6236 also reads as 623."""
     for b in range(t, max(0, t - PRESS_BEFORE) - 1, -1):
         pressed = [n for bit, n in BUTTONS if rec[b] & bit and not (b and rec[b - 1] & bit)]
         if pressed:
@@ -70,9 +72,7 @@ def read_command(rec: list[int], face: list[int], t: int) -> str | None:
     btn = "/".join(pressed) if len(pressed) > 1 else pressed[0]
     lo = max(0, b - MOTION_WINDOW)
     dirs = [numpad(rec[i], face[i]) for i in range(lo, b + 1)]
-    for m in MOTIONS:
-        if has_motion(dirs, m):
-            return m + btn
+    out = [m + btn for m in MOTIONS if has_motion(dirs, m)]
     # charge: back (or down) held for CHARGE frames (in total: the game keeps a charge through
     # short gaps), then forward (up) by the press
     lo2 = max(0, b - CHARGE_WINDOW)
@@ -82,8 +82,9 @@ def read_command(rec: list[int], face: list[int], t: int) -> str | None:
         while k >= 0 and held[k] in rel:      # the release, up to the press
             k -= 1
         if k < len(held) - 1 and sum(c in ch for c in held[:k + 1]) >= CHARGE:
-            return name + btn
-    return dirs[-1].replace("5", "") + btn if dirs[-1] != "5" else btn
+            out.append(name + btn)
+    out.append(dirs[-1].replace("5", "") + btn)
+    return out
 
 
 def load(csv_path: str):
@@ -128,6 +129,7 @@ def main():
 
     entries = [json.loads(l) for l in open(MANIFEST, encoding="utf-8")]
     reads = collections.defaultdict(collections.Counter)
+    cands = collections.defaultdict(list)       # every occurrence's candidate readings
     for e in entries:
         if not os.path.exists(e["csv"]):
             continue
@@ -148,7 +150,9 @@ def main():
                 mi = moves.move_info(char, a)
                 if mi and mi[2] not in (moves.SPECIAL, moves.SUPER, moves.CMD, moves.PROJ):
                     continue
-                reads[(char, a)][read_command(rec, face, t) or "-"] += 1
+                cmds = read_command(rec, face, t) or ["-"]
+                reads[(char, a)][cmds[0]] += 1
+                cands[(char, a)].append(cmds)
 
     report = {}
     for (char, a), c in sorted(reads.items()):
@@ -159,9 +163,12 @@ def main():
         table = mi[0] if mi else None
         allowed = norm_notation(table) if table else set()
         top = c.most_common(3)
-        support = sum(v for k, v in c.items() if supports(k, allowed))
+        support = sum(any(supports(k, allowed) for k in cmds) for cmds in cands[(char, a)])
         state = c["-"] / n >= 0.7           # entered from another action, not by a press
-        follow = bool(table) and ("~" in table or re.search(r"([PKSHD])\1$", table) is not None)
+        # a follow-up (a~b, 236HH) or a later state of the move (exe / cancel / follow-up
+        # parts) starts from the earlier action, not from its own command
+        follow = (bool(table) and ("~" in table or re.search(r"([PKSHD])\1$", table) is not None)
+                  or re.search(r"(_?[Ee]xe|_Cancel|_Add)$", a) is not None)
         flag = ("??" if mi is None else
                 "!!" if allowed and support / n < 0.3 and not (state or follow) else "  ")
         report.setdefault(char, {})[a] = {"n": n, "top": top, "table": table, "support": round(support / n, 2)}

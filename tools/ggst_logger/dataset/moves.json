@@ -705,6 +705,14 @@
     "flags": [
      "inputs"
     ]
+   },
+   "sly_ULT_01_exe": {
+    "notation": "236236H",
+    "name": "Last Horizon",
+    "category": "super",
+    "flags": [
+     "inputs"
+    ]
    }
   },
   "A.B.A": {
@@ -743,6 +751,14 @@
    "ABA_SP1_Air_exe": {
     "notation": "j.214H",
     "name": "Air Bonding and Dissolving",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "ABA_SP1_Air_Moroha": {
+    "notation": "JR j.214H",
+    "name": "JR Air Bonding and Dissolving",
     "category": "special",
     "flags": [
      "inferred"
@@ -1412,6 +1428,14 @@
     "flags": [
      "inferred"
     ]
+   },
+   "HMCExe": {
+    "notation": "214214H",
+    "name": "Heavy Mob Cemetery",
+    "category": "super",
+    "flags": [
+     "inferred"
+    ]
    }
   },
   "Ky": {
@@ -1730,6 +1754,54 @@
    "WallRun_Down": {
     "notation": "214H",
     "name": "Tightrope",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "ThreadRun": {
+    "notation": "214H",
+    "name": "Tightrope",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "ThreadRun_Reverse": {
+    "notation": "214H",
+    "name": "Tightrope",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "ThreadRun_Reverse_Down": {
+    "notation": "214H",
+    "name": "Tightrope",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "ThreadRun_S": {
+    "notation": "214H~S",
+    "name": "Tightrope (S attack)",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "WallRun": {
+    "notation": "",
+    "name": "Wall Run",
+    "category": "other",
+    "flags": [
+     "nonattack"
+    ]
+   },
+   "WallRun_jump": {
+    "notation": "",
+    "name": "Wall Run",
     "category": "other",
     "flags": [
      "nonattack"
@@ -2129,6 +2201,14 @@
     "category": "super",
     "flags": [
      "inferred"
+    ]
+   },
+   "Genkai_Air": {
+    "notation": "j.632146S",
+    "name": "Air Ultimate Fortissimo",
+    "category": "super",
+    "flags": [
+     "inputs"
     ]
    },
    "Megalomania": {
@@ -2795,6 +2875,15 @@
      "inferred",
      "proj"
     ]
+   },
+   "EddieSurround": {
+    "notation": "?",
+    "name": "Eddie surround (unresolved)",
+    "category": "special",
+    "flags": [
+     "inferred",
+     "proj"
+    ]
    }
   },
   "Jack-O": {
@@ -2894,6 +2983,51 @@
      "inferred",
      "nonattack"
     ]
+   },
+   "ReleaseGhost": {
+    "notation": "hs.D",
+    "name": "Release Servant",
+    "category": "other",
+    "flags": [
+     "inferred",
+     "nonattack"
+    ]
+   },
+   "AirReleaseGhost": {
+    "notation": "hs.j.D",
+    "name": "Air Release Servant",
+    "category": "other",
+    "flags": [
+     "inferred",
+     "nonattack"
+    ]
+   },
+   "ReturnGhost": {
+    "notation": "214P",
+    "name": "Recover Servant",
+    "category": "other",
+    "flags": [
+     "inputs",
+     "nonattack"
+    ]
+   },
+   "PickAtkOrderGhost": {
+    "notation": "hs.214K",
+    "name": "Attack Command (held Servant)",
+    "category": "special",
+    "flags": [
+     "inferred",
+     "proj"
+    ]
+   },
+   "PickKickGhost": {
+    "notation": "hs.236K",
+    "name": "Servant Shoot (held Servant)",
+    "category": "special",
+    "flags": [
+     "inferred",
+     "proj"
+    ]
    }
   },
   "Happy Chaos": {
@@ -2967,6 +3101,33 @@
     "flags": [
      "inferred",
      "proj"
+    ]
+   },
+   "Routine_Super": {
+    "notation": "214214P",
+    "name": "Super Focus",
+    "category": "super",
+    "flags": [
+     "inputs",
+     "nonattack"
+    ]
+   },
+   "HoldMiss": {
+    "notation": "5H H",
+    "name": "Fire (empty)",
+    "category": "other",
+    "flags": [
+     "inferred",
+     "nonattack"
+    ]
+   },
+   "SniperEnd": {
+    "notation": "214S",
+    "name": "Steady Aim (end)",
+    "category": "other",
+    "flags": [
+     "inferred",
+     "nonattack"
     ]
    }
   },
@@ -3206,6 +3367,15 @@
      "inferred"
     ]
    },
+   "RockTheBaby_LandExe": {
+    "notation": "63214P",
+    "name": "Rock the Baby",
+    "category": "special",
+    "flags": [
+     "grab",
+     "inferred"
+    ]
+   },
    "KillMachine_Land": {
     "notation": "632146H",
     "name": "Return of the Killing Machine",
@@ -3296,6 +3466,38 @@
    "TyrantBarrel": {
     "notation": "236236P",
     "name": "Tyrant Barrel",
+    "category": "super",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "ElkHunt_Add": {
+    "notation": "236K~K",
+    "name": "Elk Hunt Follow-Up",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "HawkBaker_Add": {
+    "notation": "623S~S",
+    "name": "Hawk Baker Follow-Up",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "HoofStamp_Add": {
+    "notation": "214S~S",
+    "name": "Hoof Stomp Follow-Up",
+    "category": "special",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "TyrantBarrel_Add": {
+    "notation": "236236P~P",
+    "name": "Tyrant Barrel Follow-Up",
     "category": "super",
     "flags": [
      "inferred"
@@ -3669,6 +3871,22 @@
     "flags": [
      "inferred"
     ]
+   },
+   "SoregaOrenonada_exe": {
+    "notation": "632146H",
+    "name": "That's My Name",
+    "category": "super",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "JHN_Ultimate2_exe": {
+    "notation": "236236S",
+    "name": "Joker Trick",
+    "category": "super",
+    "flags": [
+     "inferred"
+    ]
    }
   },
   "Dizzy": {
@@ -3736,6 +3954,15 @@
     ]
    },
    "DZY_ULT1": {
+    "notation": "632146S",
+    "name": "Imperial Ray",
+    "category": "super",
+    "flags": [
+     "inferred",
+     "proj"
+    ]
+   },
+   "DZY_ULT1_exe": {
     "notation": "632146S",
     "name": "Imperial Ray",
     "category": "super",
@@ -4075,6 +4302,14 @@
    "USG_ULT_01_exe": {
     "notation": "632146H",
     "name": "Choukyaku Kouryumon",
+    "category": "super",
+    "flags": [
+     "inferred"
+    ]
+   },
+   "USG_ULT_02": {
+    "notation": "632146P",
+    "name": "Bao Saishinshou?",
     "category": "super",
     "flags": [
      "inferred"

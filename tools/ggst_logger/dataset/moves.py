@@ -200,6 +200,7 @@ _add("Slayer", {  # Dustloop order == internal numbering; SP_08 / SP_02 checked 
     "sly_SP_10": ("44~6S", "Hand of Doom", SPECIAL),
     "sly_ULT_01": ("236236H", "Last Horizon", SUPER, "inputs"),
     "sly_ULT_02": ("632146S", "Super Mappa Hunch", SUPER, "inputs"),
+    "sly_ULT_01_exe": ("236236H", "Last Horizon", SUPER, "inputs"),
 })
 _add("A.B.A", {  # SP1 = the only air/exe special; SP2-SP6 = the five with JR ("Moroha") versions
     "ABA_SP1_Land": ("214H", "Bonding and Dissolving", SPECIAL, "inferred"),
@@ -207,6 +208,7 @@ _add("A.B.A", {  # SP1 = the only air/exe special; SP2-SP6 = the five with JR ("
     "ABA_SP1_Land_Moroha": ("JR 214H", "JR Bonding and Dissolving", SPECIAL, "inferred"),
     "ABA_SP1_Air": ("j.214H", "Air Bonding and Dissolving", SPECIAL, "inferred"),
     "ABA_SP1_Air_exe": ("j.214H", "Air Bonding and Dissolving", SPECIAL, "inferred"),
+    "ABA_SP1_Air_Moroha": ("JR j.214H", "JR Air Bonding and Dissolving", SPECIAL, "inferred"),
     "ABA_SP2": ("63214P", "Changing and Swaying", SPECIAL, "inferred grab"),
     "ABA_SP2_Moroha": ("JR 63214P", "JR Changing and Swaying", SPECIAL, "inferred grab"),
     "ABA_SP3": ("214K", "Haul and Heed", SPECIAL, "inferred"),
@@ -295,6 +297,7 @@ _add("Sol", {
     "Fefnir": ("41236H", "Fafnir", SPECIAL),
     "TyrantRave": ("632146H", "Tyrant Rave", SUPER, "inferred"),
     "HMC": ("214214H", "Heavy Mob Cemetery", SUPER, "inferred"),
+    "HMCExe": ("214214H", "Heavy Mob Cemetery", SUPER, "inferred"),
 })
 _add("Ky", {
     "StunEdge1": ("236S", "Stun Edge", SPECIAL, "proj"),
@@ -337,6 +340,10 @@ _add("Chipp", {
     **{k: ("214H", "Tightrope", OTHER, "nonattack") for k in
        ("ThreadRun_Jump", "ThreadRun_Down", "ThreadRun_K_Down", "ThreadRun_S_Down", "ThreadRun_HS_Down",
         "ThreadRun_6HS_Down", "WallRun_Down")},
+    **{k: ("214H", "Tightrope", OTHER, "nonattack") for k in
+       ("ThreadRun", "ThreadRun_Reverse", "ThreadRun_Reverse_Down")},
+    "ThreadRun_S": ("214H~S", "Tightrope (S attack)", SPECIAL, "inferred"),
+    **{k: ("", "Wall Run", OTHER, "nonattack") for k in ("WallRun", "WallRun_jump")},
 })
 _add("Ramlethal", {
     "BajonetoC": ("236S", "S Bajoneto", SPECIAL, "proj"),
@@ -400,6 +407,7 @@ _add("I-No", {
     "Chemical_Air": ("j.214K", "Air Chemical Love", SPECIAL, "proj"),
     "Kyouai": ("214S", "Mad Love Agitato", SPECIAL, "inferred"),
     "Genkai_Land": ("632146S", "Ultimate Fortissimo", SUPER, "inferred"),
+    "Genkai_Air": ("j.632146S", "Air Ultimate Fortissimo", SUPER, "inputs"),
     "Megalomania": ("632146H", "Megalomania", SUPER, "proj inferred"),
     "AirHover_4": ("j.4 (hover)", "hoverdash", OTHER, "nonattack"),
     "AirHover_6": ("j.6 (hover)", "hoverdash", OTHER, "nonattack"),
@@ -505,6 +513,7 @@ _add("Zato-1", {  # EddieSummonA-D = P/K/S/H Eddie attacks (Pierce / That's a lo
     "Amorphous": ("632146H", "Amorphous", SUPER, "proj inferred"),
     "SunVoid": ("632146S", "Sun Void", SUPER, "proj inferred"),
     "SunVoid_Air": ("j.632146S", "Air Sun Void", SUPER, "proj inferred"),
+    "EddieSurround": ("?", "Eddie surround (unresolved)", SPECIAL, "proj inferred"),
 })
 _add("Jack-O", {  # Ghost = Servant; the servants' hits are detached objects
     "SummonGhostA": ("236P", "Summon Servant", SPECIAL, "proj inferred"),
@@ -518,6 +527,12 @@ _add("Jack-O", {  # Ghost = Servant; the servants' hits are detached objects
     "ElysionDriver": ("632146P", "Forever Elysion Driver", SUPER, "inferred"),
     "ElysionDriverEx": ("632146P", "Forever Elysion Driver", SUPER, "inferred"),
     "PowerUp": ("236236S/H", "Cheer Servant On", SUPER, "nonattack inferred"),
+    # hs. = holding a Servant (picked up with D)
+    "ReleaseGhost": ("hs.D", "Release Servant", OTHER, "nonattack inferred"),
+    "AirReleaseGhost": ("hs.j.D", "Air Release Servant", OTHER, "nonattack inferred"),
+    "ReturnGhost": ("214P", "Recover Servant", OTHER, "nonattack inputs"),
+    "PickAtkOrderGhost": ("hs.214K", "Attack Command (held Servant)", SPECIAL, "proj inferred"),
+    "PickKickGhost": ("hs.236K", "Servant Shoot (held Servant)", SPECIAL, "proj inferred"),
 })
 _add("Happy Chaos", {
     "HoldGunAtk": ("5H H", "Fire (At the Ready)", SPECIAL, "proj inferred"),
@@ -528,6 +543,9 @@ _add("Happy Chaos", {
     "Decoy": ("236K", "Scapegoat", OTHER, "nonattack inferred"),
     "Mark": ("236P", "Curse", SPECIAL, "proj inferred"),
     "COS_Ultimate1": ("632146S", "Deus Ex Machina", SUPER, "proj inferred"),
+    "Routine_Super": ("214214P", "Super Focus", SUPER, "nonattack inputs"),
+    "HoldMiss": ("5H H", "Fire (empty)", OTHER, "nonattack inferred"),
+    "SniperEnd": ("214S", "Steady Aim (end)", OTHER, "nonattack inferred"),
 })
 _add("Testament", {  # Grave Reaper = 1-4 (S/H ground, then air); 1/2/8/9 looked at on strips
     "TST_Special1": ("236S", "S Grave Reaper", SPECIAL, "proj inferred"),
@@ -559,6 +577,7 @@ _add("Bridget", {
     "FallAtk": ("j.236K", "Roger Dive", SPECIAL, "inferred"),
     "RockTheBaby_Land": ("63214P", "Rock the Baby", SPECIAL, "grab inferred"),
     "RockTheBaby_Air": ("j.63214P", "Air Rock the Baby", SPECIAL, "grab inferred"),
+    "RockTheBaby_LandExe": ("63214P", "Rock the Baby", SPECIAL, "grab inferred"),
     "KillMachine_Land": ("632146H", "Return of the Killing Machine", SUPER, "proj inferred"),
     "KillMachine_Air": ("j.632146H", "Air Return of the Killing Machine", SUPER, "proj inferred"),
 })
@@ -572,6 +591,10 @@ _add("Sin", {
     "StillGrowing": ("63214P", "Still Growing", OTHER, "nonattack inferred"),
     "RTL_Land": ("632146H", "R.T.L", SUPER, "proj inferred"),
     "TyrantBarrel": ("236236P", "Tyrant Barrel", SUPER, "inferred"),
+    "ElkHunt_Add": ("236K~K", "Elk Hunt Follow-Up", SPECIAL, "inferred"),
+    "HawkBaker_Add": ("623S~S", "Hawk Baker Follow-Up", SPECIAL, "inferred"),
+    "HoofStamp_Add": ("214S~S", "Hoof Stomp Follow-Up", SPECIAL, "inferred"),
+    "TyrantBarrel_Add": ("236236P~P", "Tyrant Barrel Follow-Up", SUPER, "inferred"),
 })
 _add("Bedman?", {  # Special1-5 = Dustloop order 236P, 236S, 236H (ground only), 214P, 214K
     "Special1_Land": ("236P", "call 4BA", SPECIAL, "inferred"),
@@ -607,6 +630,8 @@ _add("Johnny", {  # MistFiner_Attack_A/B/C = released P/K/S; Zweihander = Vault 
     "Ensenga": ("214H", "Ensenga", SPECIAL, "inferred"),
     "SoregaOrenonada": ("632146H", "That's My Name", SUPER, "inferred"),
     "JHN_Ultimate2": ("236236S", "Joker Trick", SUPER, "inferred"),
+    "SoregaOrenonada_exe": ("632146H", "That's My Name", SUPER, "inferred"),
+    "JHN_Ultimate2_exe": ("236236S", "Joker Trick", SUPER, "inferred"),
 })
 _add("Dizzy", {  # Special1-5 = Dustloop order (fish spike, chestnuts, fish summon, Michael Sword, Wings)
     "DZY_Special1": ("236S/H", "I used this to catch fish", SPECIAL, "proj inferred"),
@@ -617,6 +642,7 @@ _add("Dizzy", {  # Special1-5 = Dustloop order (fish spike, chestnuts, fish summ
     "DZY_Special4_HS": ("214H", "H Michael Sword", SPECIAL, "proj inferred"),
     "DZY_Special5": ("22H", "Wings of Light", SPECIAL, "proj inferred"),
     "DZY_ULT1": ("632146S", "Imperial Ray", SUPER, "proj inferred"),
+    "DZY_ULT1_exe": ("632146S", "Imperial Ray", SUPER, "proj inferred"),
     "DZY_ULT2": ("632146H", "Gamma Ray", SUPER, "proj inferred"),
 })
 _add("Venom", {  # 01/02 dmg 0 = ball set; 04 has Land/Air = Carcass Raid; 05 long range = Stinger Aim
@@ -661,6 +687,7 @@ _add("Jam", {  # 01-03 have air versions = Ryuujin/Gekirin/Ryuutsui; 05->07, 09-
     "USG_Special_10": ("236P~6P", "Goushao", SPECIAL, "inferred"),
     "USG_ULT_01": ("632146H", "Choukyaku Kouryumon", SUPER, "inferred"),
     "USG_ULT_01_exe": ("632146H", "Choukyaku Kouryumon", SUPER, "inferred"),
+    "USG_ULT_02": ("632146P", "Bao Saishinshou?", SUPER, "inferred"),
 })
 _add("Robo-Ky", {  # ABS_Special_01-06 = Dustloop order; 02/06 have air versions
     "ABS_Special_01": ("22H", "Gimmic-KY", SPECIAL, "proj inferred"),
