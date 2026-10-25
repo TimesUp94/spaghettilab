@@ -132,7 +132,8 @@ NORMAL, CMD, SPECIAL, SUPER, THROW, PROJ, BURST, OTHER = (
 
 # flags: proj = the move's hit is a projectile / detached object; grab = command grab;
 # nonattack = not an attack (a hit while in it comes from an earlier projectile);
-# inferred = mapping from Dustloop order / variants, not seen on video; verified = seen on strips.
+# inferred = mapping from Dustloop order / variants, not seen on video; verified = seen on strips;
+# inputs = the motion + button checked against the logged inputs (verify_inputs.py).
 # act -> (notation, name, category, flags)
 M = {}
 
@@ -160,8 +161,9 @@ _add("Elphelt", {
     "ELP_Special1_HS_Air": ("j.236H", "Air Miss Charlotte", SPECIAL, "proj verified"),
     "ELP_Special1_S_Land": ("236S", "Miss Charlotte", SPECIAL, "proj"),
     "ELP_Special1_HS_Land": ("236H", "Miss Charlotte", SPECIAL, "proj verified"),
-    "ELP_Special2": ("214K|214H", "Out of Repair / Bomb-Bomb Chocolat (unresolved)", SPECIAL, "inferred"),
-    "ELP_Special4": ("214K|214H", "Out of Repair / Bomb-Bomb Chocolat (unresolved)", SPECIAL, "inferred"),
+    # the inputs settle the motions; which of the two names goes with which is not checked
+    "ELP_Special2": ("214K", "214K (Out of Repair / Bomb-Bomb Chocolat)", SPECIAL, "inputs"),
+    "ELP_Special4": ("214H", "214H (Out of Repair / Bomb-Bomb Chocolat)", SPECIAL, "inputs"),
     "ELP_Special3_Start": ("214S", "Here I Go!", SPECIAL, "verified"),
     "ELP_Special3_Start_easy_2nd": ("214S~S", "Here I Go! (2nd)", SPECIAL, "inferred"),
     "ELP_Special3_Chudan": ("214S~P", "Up High!", SPECIAL, "verified"),
@@ -196,8 +198,8 @@ _add("Slayer", {  # Dustloop order == internal numbering; SP_08 / SP_02 checked 
     "sly_SP_09": ("63214H", "Bloodsucking Universe", SPECIAL, "grab"),
     "sly_SP_09_exe": ("63214H", "Bloodsucking Universe", SPECIAL, "grab"),
     "sly_SP_10": ("44~6S", "Hand of Doom", SPECIAL),
-    "sly_ULT_01": ("632146S", "Super Mappa Hunch", SUPER, "inferred"),
-    "sly_ULT_02": ("236236H", "Last Horizon", SUPER),
+    "sly_ULT_01": ("236236H", "Last Horizon", SUPER, "inputs"),
+    "sly_ULT_02": ("632146S", "Super Mappa Hunch", SUPER, "inputs"),
 })
 _add("A.B.A", {  # SP1 = the only air/exe special; SP2-SP6 = the five with JR ("Moroha") versions
     "ABA_SP1_Land": ("214H", "Bonding and Dissolving", SPECIAL, "inferred"),
@@ -247,11 +249,14 @@ _add("Leo", {
     "SemukeReverse": ("bt.22", "backturn reverse", OTHER, "nonattack"),
     "SemukeJumpAttack": ("bt.j.X?", "backturn jump attack (unresolved)", CMD, "inferred"),
 })
+BEHEMOTH = ["41236", "47896", "63214", "69874", "89632", "23698", "87412", "21478"]
 _add("Goldlewis", {
-    **{f"Swing_pattern{i}": (f"{p}H", f"Behemoth Typhoon ({p})", SPECIAL, "inferred")
-       for i, p in enumerate(["41236", "63214", "23698", "21478", "69874", "47896", "87412", "89632"], 1)},
-    **{f"AirSwing_pattern{i}": (f"j.{p}H", f"Air Behemoth Typhoon ({p})", SPECIAL, "inferred")
-       for i, p in enumerate(["41236", "63214", "23698", "21478", "69874", "47896", "87412", "89632"], 1)},
+    # pattern order read from the logged inputs (verify_inputs.py): half circles in pairs,
+    # 7 by elimination
+    **{f"Swing_pattern{i}": (f"{p}H", f"Behemoth Typhoon ({p})", SPECIAL, "inputs")
+       for i, p in enumerate(BEHEMOTH, 1)},
+    **{f"AirSwing_pattern{i}": (f"j.{p}H", f"Air Behemoth Typhoon ({p})", SPECIAL, "inputs")
+       for i, p in enumerate(BEHEMOTH, 1)},
     "Drone": ("214S", "Thunderbird", SPECIAL, "proj inferred"),
     "Minigun": ("236S", "Skyfish", SPECIAL, "inferred"),
     "GLD_Ultimate1": ("632146P", "Down With The System", SUPER, "grab"),
@@ -415,8 +420,8 @@ _add("Millia", {
 _add("Baiken", {
     "TatamiLand": ("236K", "Tatami Gaeshi", SPECIAL),
     "TatamiAir": ("j.236K", "Air Tatami Gaeshi", SPECIAL),
-    "Kabari": ("41236S", "S Kabari", SPECIAL, "inferred"),
-    "HimoKabari": ("41236H", "H Kabari", SPECIAL, "inferred"),
+    "Kabari": ("41236H", "H Kabari", SPECIAL, "inputs"),
+    "HimoKabari": ("41236S", "S Kabari", SPECIAL, "inputs"),
     "KabariHasei": ("41236H~H", "Kabari Followup", SPECIAL),
     "YouZanSen": ("j.236S", "Youzansen", SPECIAL),
     "Atemi": ("236P", "Hiiragi", SPECIAL),
@@ -456,12 +461,12 @@ _add("Anji", {
     "KachoFugetsu": ("632146S", "Kachoufuugetsu Kai", SUPER),
     "Dodge": ("", "dodge (unresolved)", OTHER, "nonattack"),
 })
-_add("Giovanna", {  # only Special2 (air+land = Sol Poente) and LandUltimate are anchored
+_add("Giovanna", {  # Special1/3/4 read from the logged inputs (verify_inputs.py)
     "Special2_land": ("214S", "Sol Poente", SPECIAL, "inferred"),
     "Special2_air": ("j.214S", "Air Sol Poente", SPECIAL, "inferred"),
-    "Special1": ("236K|214K|623S", "Trovao/Sepultura/Sol Nascente (unresolved)", SPECIAL, "inferred"),
-    "Special3": ("236K|214K|623S", "Trovao/Sepultura/Sol Nascente (unresolved)", SPECIAL, "inferred"),
-    "Special4": ("236K|214K|623S", "Trovao/Sepultura/Sol Nascente (unresolved)", SPECIAL, "inferred"),
+    "Special1": ("214K", "Sepultura", SPECIAL, "inputs"),
+    "Special3": ("623S", "Sol Nascente", SPECIAL, "inputs"),
+    "Special4": ("236K", "Trovao", SPECIAL, "inputs"),
     "Shervi": ("214H", "Chave", SPECIAL, "inferred"),
     "LandUltimate": ("632146H", "Ventania", SUPER),
     "AirUltimate": ("j.236236H", "Tempestade", SUPER),

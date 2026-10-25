@@ -407,10 +407,30 @@ def extract_openers(log: dict, hpmax: dict, n_quiet: int) -> tuple[list[dict], d
     return out, dict(stats)
 
 
+def banner_kind(r: dict) -> str | None:
+    """'counter', 'punish', 'large' (red COUNTER), 'unclear' (a banner word, but not which),
+    'none', or None (no word scores: no video pass)."""
+    w = r.get("banner_words")
+    if not w:
+        return None
+    c, p = w.get("counter", 0), w.get("punish", 0)
+    # the yellow banners' lower half shades to orange, which the red mask also takes: red
+    # must win clearly over both yellow words, and read as COUNTER rather than PUNISH
+    rc = w.get("red_counter", 0)
+    if rc >= KIND_THR and rc >= max(c, p) + KIND_MARGIN and rc > w.get("red_punish", 0):
+        return "large"
+    if max(c, p) < KIND_THR:
+        return "none"
+    if abs(c - p) < KIND_MARGIN:
+        return "unclear"
+    return "counter" if c > p else "punish"
+
+
 def mark_counter_hits(rows: list[dict]) -> None:
-    """Counter hit = small-CH banner (yellow "COUNTER" box on the attacker's HUD side, measured
-    in the video pass) or large CH (giant "COUNTER" text and a long hitstop freeze, which the
-    banner box misses).
+    """Counter hit = the attacker's HUD shows the yellow "COUNTER" banner (small CH) or the red
+    one (large CH), told from the "PUNISH" banner by the word's shape (banner_kind, from the
+    video pass). Without word scores, the older guesses: any yellow in the banner box (which
+    also takes PUNISH for a counter) and a large CH from the hitstop.
 
     Large CH from the log: per (attacker char, move) the normal hitstop is the most common
     hitstop among hits without a banner (>= 3 samples; else the move's minimum); a hitstop at
@@ -419,7 +439,8 @@ def mark_counter_hits(rows: list[dict]) -> None:
     key = lambda r: (r["attacker_char"], r["move_act"])
     by = collections.defaultdict(list)
     for r in rows:
-        if not r.get("counter_banner"):
+        kind = banner_kind(r)
+        if kind == "none" or (kind is None and not r.get("counter_banner")):
             by[key(r)].append(r["hitstop"])
     at = {(r["replay"], r["log_row"], r["attacker"]) for r in rows}
     for r in rows:
@@ -428,14 +449,25 @@ def mark_counter_hits(rows: list[dict]) -> None:
         hs = by.get(key(r), [])
         normal = (collections.Counter(hs).most_common(1)[0][0] if len(hs) >= 3 else min(hs)) if hs else None
         r["hitstop_normal"] = None if normal is None else int(normal)
-        large = (not r["is_throw"] and not r["trade"]
-                 and (r["hitstop"] >= normal + 10 if normal is not None else r["hitstop"] >= 25))
-        r["counter_hit_large"] = bool(large)
-        banner = r.get("counter_banner")
-        if banner is None and not large:
-            r["counter_hit"] = None            # no video pass: unknown unless large
+        long_stop = (not r["is_throw"] and not r["trade"]
+                     and (r["hitstop"] >= normal + 10 if normal is not None else r["hitstop"] >= 25))
+        kind = banner_kind(r)
+        r["banner_kind"] = kind
+        r["punish"] = None if kind is None else kind == "punish"
+        if kind is None:
+            large = long_stop
+            banner = r.get("counter_banner")
+            if banner is None and not large:
+                r["counter_hit"] = None        # no video pass: unknown unless large
+            else:
+                r["counter_hit"] = bool((banner or large) and not r["trade"])
         else:
-            r["counter_hit"] = bool((banner or large) and not r["trade"])
+            large = (kind == "large" or (long_stop and kind in ("none", "unclear"))) and not r["trade"]
+            if kind == "unclear" and not large:
+                r["counter_hit"] = None        # a banner, but its word can't be told
+            else:
+                r["counter_hit"] = bool((kind == "counter" or large) and not r["trade"])
+        r["counter_hit_large"] = bool(large)
         r["counter_type"] = ("large" if large else "small") if r["counter_hit"] else None
 
 
@@ -516,6 +548,45 @@ def yellow_frac(img: np.ndarray, side: int) -> float:
     return float(m.mean())
 
 
+# Two yellow banners share that box: "COUNTER" (counter hit) and "PUNISH" (the defender was
+# hit in recovery, e.g. a whiffed or blocked move, or a blocked burst). A large counter hit
+# shows a big red "COUNTER" instead. The word is told by template matching its mask in a
+# wider box (the text slides in and can stick out of BANNER_BOX); a half-word template covers
+# a word partly hidden behind effects.
+KIND_OFFS = tuple(range(8, 49, 4))
+KIND_BOX = {1: (40, 190, 600, 350), 2: (1320, 190, 1880, 350)}
+KIND_THR, KIND_MARGIN = 0.5, 0.1
+_TEMPLATES: dict = {}
+
+
+def banner_templates() -> dict:
+    import cv2
+    if not _TEMPLATES:
+        for word in ("counter", "punish"):
+            t = cv2.imread(str(Path(__file__).with_name(f"banner_{word}.png")), cv2.IMREAD_GRAYSCALE)
+            t = t.astype(np.float32) / 255
+            h = t.shape[1] // 2
+            _TEMPLATES[word] = (t, t[:, :h + 10], t[:, h - 10:])
+    return _TEMPLATES
+
+
+def banner_word_scores(img: np.ndarray, side: int) -> dict:
+    """Best template match of each banner word in one frame, in its yellow and its red mask."""
+    import cv2
+    x1, y1, x2, y2 = KIND_BOX[side]
+    hsv = cv2.cvtColor(img[y1:y2, x1:x2], cv2.COLOR_BGR2HSV)
+    hue, sat, val = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    masks = {"": ((hue >= 15) & (hue <= 35) & (sat >= 110) & (val >= 160)),
+             "red_": (((hue <= 8) | (hue >= 172)) & (sat >= 150) & (val >= 120))}
+    out = {}
+    for pre, m in masks.items():
+        m = m.astype(np.float32)
+        for word, ts in banner_templates().items():
+            out[pre + word] = 0.0 if m.mean() < 0.02 else max(
+                float(cv2.matchTemplate(m, t, cv2.TM_CCOEFF_NORMED).max()) for t in ts)
+    return out
+
+
 def video_pass(video: str, rows: list[dict], stem: str, tile_w=480) -> None:
     """One sequential decode: strip tiles + COUNTER-banner score per opener; writes the strips."""
     import cv2
@@ -525,10 +596,11 @@ def video_pass(video: str, rows: list[dict], stem: str, tile_w=480) -> None:
         old.unlink()              # names depend on labels: drop strips of a previous build
     want = collections.defaultdict(list)
     for k, r in enumerate(rows):
-        for o in set(STRIP_OFFS) | set(BANNER_OFFS) | {BANNER_BASE}:
+        for o in set(STRIP_OFFS) | set(BANNER_OFFS) | set(KIND_OFFS) | {BANNER_BASE}:
             want[r["video_frame"] + o].append((k, o))
     tiles = collections.defaultdict(dict)
     banner = collections.defaultdict(dict)
+    words = collections.defaultdict(dict)
     cap = cv2.VideoCapture(video)
     last = max(want) if want else -1
     th = tile_w * 9 // 16
@@ -542,6 +614,9 @@ def video_pass(video: str, rows: list[dict], stem: str, tile_w=480) -> None:
             for k, o in want[f]:
                 if o in BANNER_OFFS or o == BANNER_BASE:
                     banner[k][o] = yellow_frac(img, int(rows[k]["attacker"][1]))
+                if o in KIND_OFFS:
+                    for w, v in banner_word_scores(img, int(rows[k]["attacker"][1])).items():
+                        words[k][w] = max(words[k].get(w, 0.0), v)
                 if o in STRIP_OFFS:
                     tt = t.copy()
                     cv2.putText(tt, f"{o:+d}", (8, th - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 0), 4)
@@ -557,6 +632,8 @@ def video_pass(video: str, rows: list[dict], stem: str, tile_w=480) -> None:
         if BANNER_BASE in b and any(o in b for o in BANNER_OFFS):
             r["counter_banner_score"] = round(max(b[o] for o in BANNER_OFFS if o in b) - b[BANNER_BASE], 4)
             r["counter_banner"] = bool(r["counter_banner_score"] >= COUNTER_BANNER_THR)
+        if words[k]:
+            r["banner_words"] = {w: round(v, 3) for w, v in words[k].items()}
     for k, r in enumerate(rows):
         if len(tiles[k]) != len(STRIP_OFFS):
             continue
@@ -697,12 +774,18 @@ def main():
     rows = [r for _, res, _ in results for r in res["rows"]]
     mark_counter_hits(rows)
     if not args.no_strips:
-        for e, res, fresh in results:
-            if fresh or any("strip" not in r for r in res["rows"]):
-                t0 = time.time()
-                video_pass(e["video"], res["rows"], res["summary"]["replay"])
-                print(f"  strips {res['summary']['replay']}: {len(res['rows'])} in {time.time() - t0:.0f}s")
-                (run_dir(res["summary"]["replay"]) / "openers.json").write_text(json.dumps(res, indent=1, default=float))
+        def strips(item):
+            e, res, _ = item
+            t0 = time.time()
+            video_pass(e["video"], res["rows"], res["summary"]["replay"])
+            (run_dir(res["summary"]["replay"]) / "openers.json").write_text(json.dumps(res, indent=1, default=float))
+            return res["summary"]["replay"], len(res["rows"]), time.time() - t0
+
+        stale = [it for it in results
+                 if it[2] or any("strip" not in r or "banner_words" not in r for r in it[1]["rows"])]
+        with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
+            for stem, n, dt in ex.map(strips, stale):
+                print(f"  strips {stem}: {n} in {dt:.0f}s")
     mark_counter_hits(rows)       # again, with the banner scores of the video pass
     write_outputs(results, rows)
 
