@@ -110,7 +110,8 @@ def load_log(path: str) -> dict:
     cols = list(zip(*rows))
     d = {}
     for k, col in zip(head, cols):
-        if k.endswith(("_act", "_char", "_sprite")):  # p*_char: name or id; p*_sprite: e.g. sol000_11
+        # p*_char: name or id; p*_sprite: e.g. sol000_11; objs / p*_hitby: pool objects (logger mod)
+        if k.endswith(("_act", "_char", "_sprite", "_hitby", "_refs")) or k == "objs":
             d[k] = np.array(col)
         else:
             d[k] = np.array(col, dtype=np.float64)
@@ -295,6 +296,46 @@ def freeze_len(log: dict, side: int, h: int, max_len=60) -> int:
     return n
 
 
+def log_objects(log: dict, k: int) -> dict:
+    """Pool objects on log row k: {"o5": (player, action)} (logger column objs:
+    index/player/action/x/y/parent, joined by '|'; player = the owner at the end of the
+    owner chain)."""
+    out = {}
+    for e in log["objs"][k].split("|") if "objs" in log else ():
+        f = e.split("/")
+        if len(f) >= 3:
+            out["o" + f[0]] = (f[1], f[2])
+    return out
+
+
+def hit_source(log: dict, dside: int, aside: int, h: int, max_back: int = 600) -> dict | None:
+    """The attacker's pool object that dealt the hit on row h (projectile, summon, spell,
+    detached hitbox), from the defender's hit-by field (logger column p*_hitby, set on the
+    hit frame): its action, and the attacker's action when it appeared (the move that made
+    it). None for a direct hit or a log without the columns."""
+    col = log.get(f"p{dside}_hitby")
+    if col is None:
+        return None
+    k = h
+    if not col[k].startswith("o"):
+        return None
+    oid = col[k]
+    obj = log_objects(log, k).get(oid)
+    if obj is None or obj[0] != f"P{aside}":
+        return None
+    # the object's lifetime: back while the same slot holds an object of this attacker
+    s = k
+    while s > max(0, k - max_back) and log_objects(log, s - 1).get(oid, ("",))[0] == f"P{aside}":
+        s -= 1
+    acts = log[f"p{aside}_act"]
+    spawn = next((acts[j] for j in range(s, max(-1, s - 8), -1) if not is_common(acts[j])), acts[s])
+    # earlier actions, newest first: an object can appear after its move was cancelled
+    # (Asuka's spell after a cancel into Draw), so moves.classify skips non-attacks
+    before = list(dict.fromkeys(acts[j] for j in range(s, max(-1, s - 90), -1) if not is_common(acts[j])))
+    return dict(hit_object=obj[1], hit_object_slot=oid, hit_object_age=int(h - s),
+                hit_object_spawn_act=spawn, hit_object_spawn_row=int(s), hit_object_prior_acts=before[:6])
+
+
 def extract_openers(log: dict, hpmax: dict, n_quiet: int) -> tuple[list[dict], dict]:
     n = log["n"]
     rnd = log["round"]
@@ -363,7 +404,10 @@ def extract_openers(log: dict, hpmax: dict, n_quiet: int) -> tuple[list[dict], d
                 move_act = prev_act
             elif a_act == "CmnActRomanCancel" and h - a_start <= 3 and prev_act:
                 move_act = prev_act      # RC'd on hit: the hit came from the cancelled move
-            projectile_likely = (is_common(a_act) and a_act not in ("CmnActBurst", "CmnActRomanCancel")
+            src = hit_source(log, dside, aside, h)
+            if src and src["hit_object_spawn_act"] != a_act:
+                move_act = src["hit_object_spawn_act"]   # the object of an earlier move hit
+            projectile_likely = (src is not None and src["hit_object_spawn_act"] != a_act) if "p1_hitby" in log else (is_common(a_act) and a_act not in ("CmnActBurst", "CmnActRomanCancel")
                                  or (h - a_start) > 45 and "Ultimate" not in a_act and not a_act.endswith("ThrowExe"))
             rc_recent = any(aact[k] == "CmnActRomanCancel" for k in range(max(0, h - 30), h + 1))
             dx = abs(log[f"p1_x"][h] - log[f"p2_x"][h])
@@ -399,6 +443,10 @@ def extract_openers(log: dict, hpmax: dict, n_quiet: int) -> tuple[list[dict], d
                 ko=bool(hp[h:min(e + 1, n)].min() <= 0),
                 is_burst=a_act == "CmnActBurst",
                 attacker_hp=int(log[f"p{aside}_hp"][h]),
+                hit_logged="p1_hitby" in log,     # the log has the hit source (else the guesses)
+                **(src or dict(hit_object=None, hit_object_slot=None, hit_object_age=None,
+                               hit_object_spawn_act=None, hit_object_spawn_row=None,
+                               hit_object_prior_acts=None)),
             )
             out.append(row)
             stats["openers"] += 1

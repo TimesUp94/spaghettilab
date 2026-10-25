@@ -4,6 +4,11 @@
 // the 2026-09 Strive build (object manager +0xC38, analysers +0x3868 (P1) and +0x39E2 (P2), each the first of three,
 // game frame +0x3E7C). Player objects (pointers at +0x928/+0x930): action name
 // +0x38A8, facing +0x3AC (0 = right), x/y +0x3B0/+0x3B4, HP +0x1254, sprite name +0x12F8.
+// +0x928 is an array of 102 object pointers: P1, P2, then a pool of 100 objects
+// (projectiles, summons, effects; 0x6300 bytes apart, same layout as the players:
+// +0x2C0 = the owner, a player or another object, +0x2C8 = the opponent).
+// +0xD00 of a player = the object that last hit (or was blocked by) it: the attacking
+// player for a direct hit, the pool object for projectiles, summons, spells.
 using System.Globalization;
 using Stopwatch = System.Diagnostics.Stopwatch;
 using System.Runtime.CompilerServices;
@@ -80,7 +85,8 @@ public static class Main
         var path = Path.Combine(LogDir, $"inputs_{DateTime.Now:yyyyMMdd_HHmmss}.csv");
         _out = new StreamWriter(path) { AutoFlush = true };
         _out.WriteLine("qpc,qpc_freq,call,dt,round,game_frame,p1_rec,p2_rec,"
-                       + "p1_act,p1_face,p1_x,p1_y,p1_hp,p2_act,p2_face,p2_x,p2_y,p2_hp,p1_sprite,p2_sprite");
+                       + "p1_act,p1_face,p1_x,p1_y,p1_hp,p2_act,p2_face,p2_x,p2_y,p2_hp,p1_sprite,p2_sprite,"
+                       + "objs,p1_hitby,p2_hitby" + (LogRefs ? ",p1_refs,p2_refs" : ""));
         _trace = new StreamWriter(Path.Combine(LogDir, $"calls_{DateTime.Now:yyyyMMdd_HHmmss}.csv")) { AutoFlush = true };
         _trace.WriteLine("game_frame,call,analyzer_off,rec_flag,ret");
         _traceRows = 0;
@@ -105,6 +111,93 @@ public static class Main
         var spr = Marshal.PtrToStringAnsi((IntPtr)(p + 0x12F8), 32) ?? "";
         var nul = spr.IndexOf('\0');
         return nul >= 0 ? spr[..nul] : spr;
+    }
+
+    private const int Pool = 100, ObjSize = 0x6300, PlayerScan = 0x20000, HitByOff = 0xD00;
+    // GGST_LOG_REFS=1 (set before starting the game) adds the research columns: every
+    // field of the players and pool objects that points at one of the 102 objects.
+    private static readonly bool LogRefs = Environment.GetEnvironmentVariable("GGST_LOG_REFS") == "1";
+    private static readonly Dictionary<long, string> _refName = new();
+    private static long _refLo, _refHi;
+
+    // Names the 102 objects of the object array: P1, P2, o0..o99.
+    private static unsafe void BuildRefs(BattleObjectManager* om)
+    {
+        _refName.Clear();
+        _refLo = long.MaxValue;
+        _refHi = 0;
+        var arr = (long*)((byte*)om + 0x928);
+        for (int i = 0; i < Pool + 2; i++)
+        {
+            long q = arr[i];
+            if (q == 0) continue;
+            _refName[q] = i == 0 ? "P1" : i == 1 ? "P2" : $"o{i - 2}";
+            _refLo = Math.Min(_refLo, q);
+            _refHi = Math.Max(_refHi, q);
+        }
+    }
+
+    private static unsafe string HitBy(byte* p)
+    {
+        if (p == null || !Readable((IntPtr)(p + HitByOff), 8)) return "";
+        return _refName.TryGetValue(*(long*)(p + HitByOff), out var n) ? n : "";
+    }
+
+    // The player an object belongs to: follows the owner field through parent objects.
+    private static unsafe string Root(byte* o)
+    {
+        for (int k = 0; k < 6 && o != null; k++)
+        {
+            long q = *(long*)(o + 0x2C0);
+            if (!_refName.TryGetValue(q, out var n)) return "";
+            if (n[0] == 'P') return n;
+            if (q == (long)o || !Readable((IntPtr)q, ObjSize)) return "";
+            o = (byte*)q;
+        }
+        return "";
+    }
+
+    // Research column: every field of an object that points at one of the 102 objects,
+    // as "offset:name" pairs (the owner / opponent fields at 0x2B8-0x2C8 left out).
+    private static unsafe string Refs(byte* p, int size)
+    {
+        if (p == null || !Readable((IntPtr)p, size)) return "";
+        var sb = new System.Text.StringBuilder();
+        for (int off = 0; off < size; off += 8)
+        {
+            if (off >= 0x2B8 && off <= 0x2C8) continue;
+            long q = *(long*)(p + off);
+            if (q < _refLo || q > _refHi || !_refName.TryGetValue(q, out var n)) continue;
+            if (sb.Length > 0) sb.Append(';');
+            sb.Append(off.ToString("X")).Append(':').Append(n);
+        }
+        return sb.ToString();
+    }
+
+    // The pool objects with an action: "index/player/action/x/y/parent", joined by '|'
+    // (player: the owner at the end of the owner chain; parent: the owning object when
+    // the owner is another object). With LogRefs, "/refs" follows.
+    private static unsafe string Objects(BattleObjectManager* om)
+    {
+        BuildRefs(om);
+        var arr = (long*)((byte*)om + 0x928);
+        var sb = new System.Text.StringBuilder();
+        for (int i = 0; i < Pool; i++)
+        {
+            var o = (byte*)arr[i + 2];
+            if (o == null || !Readable((IntPtr)o, ObjSize)) continue;
+            var act = Marshal.PtrToStringAnsi((IntPtr)(o + 0x38A8), 32) ?? "";
+            var nul = act.IndexOf('\0');
+            if (nul >= 0) act = act[..nul];
+            if (act.Length == 0) continue;
+            _refName.TryGetValue(*(long*)(o + 0x2C0), out var parent);
+            if (parent is not null && parent[0] == 'P') parent = "";
+            if (sb.Length > 0) sb.Append('|');
+            sb.Append(string.Create(CultureInfo.InvariantCulture,
+                $"{i}/{Root(o)}/{act}/{*(int*)(o + 0x3B0)}/{*(int*)(o + 0x3B4)}/{parent}"));
+            if (LogRefs) sb.Append('/').Append(Refs(o, ObjSize));
+        }
+        return sb.ToString();
     }
 
     private static void Close()
@@ -209,7 +302,9 @@ public static class Main
             if (frame == _lastFrame && round == _lastRound) return;
             _lastFrame = frame;
             _lastRound = round;
-            _out!.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{Stopwatch.GetTimestamp()},{Stopwatch.Frequency},{_calls},{dt:F5},{round},{frame},{_p1},{_p2},{Player(om->PlayerP1)},{Player(om->PlayerP2)},{Sprite(om->PlayerP1)},{Sprite(om->PlayerP2)}"));
+            var line = string.Create(CultureInfo.InvariantCulture, $"{Stopwatch.GetTimestamp()},{Stopwatch.Frequency},{_calls},{dt:F5},{round},{frame},{_p1},{_p2},{Player(om->PlayerP1)},{Player(om->PlayerP2)},{Sprite(om->PlayerP1)},{Sprite(om->PlayerP2)},{Objects(om)},{HitBy(om->PlayerP1)},{HitBy(om->PlayerP2)}");
+            if (LogRefs) line += $",{Refs(om->PlayerP1, PlayerScan)},{Refs(om->PlayerP2, PlayerScan)}";
+            _out!.WriteLine(line);
             _rows++;
         }
         catch (Exception e)

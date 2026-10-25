@@ -53,6 +53,35 @@ def _send(scan: int, up: bool) -> None:
         scan &= 0xFF
     inp = INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(0, scan, flags, 0, 0))
     user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+    global _sent_tick
+    _sent_tick = kernel32.GetTickCount()
+
+
+kernel32 = ctypes.WinDLL("kernel32")
+kernel32.GetTickCount.restype = wt.DWORD
+_sent_tick = 0
+USER_QUIET_S = 60       # someone else's keyboard/mouse input pauses the driver this long
+
+
+class _LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wt.UINT), ("dwTime", wt.DWORD)]
+
+
+def wait_user_idle() -> None:
+    """Wait while someone else is using the PC: input newer than our own last key press
+    (SendInput also counts as input) within USER_QUIET_S."""
+    said = False
+    while True:
+        li = _LASTINPUTINFO(ctypes.sizeof(_LASTINPUTINFO), 0)
+        user32.GetLastInputInfo(ctypes.byref(li))
+        now = kernel32.GetTickCount()
+        theirs = (li.dwTime - _sent_tick) & 0xFFFFFFFF > 1000 and (li.dwTime - _sent_tick) & 0xFFFFFFFF < 0x80000000
+        if not theirs or (now - li.dwTime) & 0xFFFFFFFF >= USER_QUIET_S * 1000:
+            return
+        if not said:
+            print("  someone is using the PC; waiting for them to stop", flush=True)
+            said = True
+        time.sleep(5)
 
 
 def find_window() -> int:
@@ -74,18 +103,26 @@ def focus() -> None:
     hwnd = find_window()
     if not hwnd:
         raise SystemExit("Strive window not found")
-    if user32.GetForegroundWindow() != hwnd:
+    for _ in range(5):
+        if user32.GetForegroundWindow() == hwnd:
+            return
         # Alt tap lets SetForegroundWindow succeed from a background process.
         _send(0x38, False); _send(0x38, True)
         user32.ShowWindow(hwnd, 9)
         user32.SetForegroundWindow(hwnd)
         time.sleep(0.3)
+    # SendInput types into whatever window is in front: never into someone else's app
+    raise SystemExit("could not bring the Strive window to the front; no keys sent")
 
 
 def keys(seq: str, gap_ms: int = 150) -> None:
     """Press keys in order. 'a+s:100' holds a and s together for 100 ms."""
+    wait_user_idle()
     focus()
+    hwnd = find_window()
     for tok in seq.split():
+        if user32.GetForegroundWindow() != hwnd:
+            raise SystemExit("the Strive window lost focus; stopped sending keys")
         name, _, ms = tok.partition(":")
         codes = [SCAN[k] for k in name.split("+")]
         for c in codes:

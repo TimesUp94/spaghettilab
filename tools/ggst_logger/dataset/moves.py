@@ -779,14 +779,31 @@ def notation(act: str, char: str = "") -> str:
 def classify(row: dict) -> dict:
     """Clean move fields for one opener row (build.py extract_openers + attacker_char).
 
-    The hitting move is the attacker's current action unless that is not an attack (moving,
-    guarding, Asuka drawing cards, Leo backturn walk ...): then a projectile/object from the
-    attacker's last attack hit, and the move is that attack (category 'projectile')."""
+    With the logged hit source (hit_logged): an object hit takes the move that made the object
+    (category 'projectile' once the attacker has moved on), a direct hit the current action.
+    Older logs: the hitting move is the attacker's current action unless that is not an attack
+    (moving, guarding, Asuka drawing cards, Leo backturn walk ...): then a projectile/object
+    from the attacker's last attack hit, and the move is that attack (category 'projectile')."""
     char = row.get("attacker_char", "")
     act = row["move_act"]
     mi = move_info(char, act)
     src = "action"
-    if (mi is None or "nonattack" in mi[3]) and act not in ("CmnActBurst",):
+    spawn = row.get("hit_object_spawn_act")
+    if spawn:
+        # logged hit source (logger p*_hitby): a pool object of the attacker hit, made by
+        # `spawn`; a projectile when the attacker is no longer in that move
+        cands = [spawn] + list(row.get("hit_object_prior_acts") or [])
+        spawn = next((c for c in cands if (m := move_info(char, c)) and "nonattack" not in m[3]), spawn)
+        smi = move_info(char, spawn)
+        if smi:
+            mi, act, src = smi, spawn, "object"
+            nota, name, cat, flags = smi
+            if spawn != row.get("attacker_act") and cat not in (SUPER, BURST, THROW):
+                cat = PROJ
+            return _fields(char, act, src, (nota, name, cat, flags))
+    if row.get("hit_logged"):
+        mi = mi or ("", act, OTHER, {"unmapped"})   # logged direct hit: the current action is the move
+    elif (mi is None or "nonattack" in mi[3]) and act not in ("CmnActBurst",):
         la = row.get("last_real_attack_act") or row.get("last_attack_act") or ""
         lmi = move_info(char, la) if la else None
         if lmi and "nonattack" not in lmi[3]:
@@ -796,8 +813,14 @@ def classify(row: dict) -> dict:
     nota, name, cat, flags = mi
     if src == "last_attack" and cat not in (SUPER, BURST, THROW):
         cat = PROJ
-    elif "proj" in flags and cat == SPECIAL and row.get("projectile_likely") and (row.get("attacker_act_age") or 0) > 45:
+    elif ("proj" in flags and cat == SPECIAL and not row.get("hit_logged") and row.get("projectile_likely")
+          and (row.get("attacker_act_age") or 0) > 45):
         cat = PROJ                       # the special's object hit long after the cast
+    return _fields(char, act, src, (nota, name, cat, flags))
+
+
+def _fields(char, act, src, mi) -> dict:
+    nota, name, cat, flags = mi
     btn = next((f[4:] for f in flags if f.startswith("btn:")), None)
     stance = next((f[7:] for f in flags if f.startswith("stance:")), None)
     return dict(

@@ -10,6 +10,7 @@ Windows only. **Never go online with the mod installed.** To play online, remove
   - It hooks the battle update and input functions, using the signatures from [WistfulHopes/GGSTReplayTakeover](https://github.com/WistfulHopes/GGSTReplayTakeover) (MIT).
   - In replay and training modes it writes one CSV row per game frame to `$GGST_INPUT_LOG_DIR` (default `G:\Projects\replanal-data\ggst_logs`).
   - It starts a new file whenever the game frame counter restarts.
+  - It also logs the game's pool of 100 objects (projectiles, summons, spells, detached hitboxes) as `objs` (`index/player/action/x/y/parent`, joined by `|`). Each player's hit-by field goes in `p1_hitby` / `p2_hitby`: the attacking player for a direct hit, the pool object (`o5`) for an object's hit. `dataset/build.py` uses these to give an object's hit to the move that made the object. With `GGST_LOG_REFS=1` set before starting the game, `p*_refs` and per-object refs list every pointer field, for finding new fields.
   - F6 and F7 write memory snapshots (`dump_*.bin`) that are used to find new fields.
   - The offsets are for game version 5.03 and are listed at the top of `Main.cs`. A game patch can move them.
 - **`drive/`:** drives the game.
