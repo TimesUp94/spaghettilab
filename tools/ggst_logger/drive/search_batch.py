@@ -181,7 +181,7 @@ def norm(name):
 
 
 SEARCH_START = (490, 310, 1430, 420)     # first visit: "set search conditions" with "Start search" highlighted
-STATE = os.path.join(batch.REC, "search_state.json")
+STATE = os.environ.get("GGST_SEARCH_STATE") or os.path.join(batch.REC, "search_state.json")
 # Scheduled restarts are off: killing Strive while it shows its save icon can damage
 # save data, so the game is only restarted after it has crashed (it did after ~5 h and
 # ~9 h of replays).
@@ -243,6 +243,8 @@ def restart_game():
     while time.time() - t0 < 180:
         try:
             if "[InputLogger] UpdateBattle" in open(UE4SS_LOG, encoding="utf-8", errors="ignore").read():
+                time.sleep(5)
+                ggst.place_window()
                 return
         except OSError:
             pass
@@ -345,18 +347,57 @@ def run(per_rank, state):
         tier0, k0, step, target = 0, 0, True, None
 
 
+def run_chars(chars, per_rank, state):
+    """Like run(), for a list of characters (filter spellings or usual names): every rank
+    tier of each. State {'index', 'ci', 'tier', 'k'} = next replay to record."""
+    index = state["index"]
+    for ci in range(state.get("ci", 0), len(chars)):
+        for t in range(state.get("tier", 0) if ci == state.get("ci", 0) else 0, len(TIERS)):
+            tier, lo, hi = TIERS[t]
+            name, rank_lo, rank_hi = set_filters(False, lo, hi, target=chars[ci])
+            print(f"== character: {name} | {tier}: {rank_lo} .. {rank_hi}")
+            k0 = state.get("k", 0) if (ci, t) == (state.get("ci", 0), state.get("tier", 0)) else 0
+            if k0:
+                ggst.keys(" ".join(["s"] * k0), 200)
+                time.sleep(1)
+            for k in range(k0, per_rank):
+                try:
+                    batch.record_one(index, list_ref="search_list", menu_ref="search_menu", menu_box=SEARCH_VIEW,
+                                     extra={"source": "search", "char_filter": name, "tier": tier,
+                                            "rank_lo": rank_lo, "rank_hi": rank_hi},
+                                     end_ref="search_end", end_box=SEARCH_END)
+                except SystemExit as e:
+                    if not ggst.find_window() or not online():
+                        raise
+                    print(f"   skipped ({e})")
+                    break
+                index += 1
+                nxt = (ci, t, k + 1) if k + 1 < per_rank else (ci, t + 1, 0) if t + 1 < len(TIERS) else (ci + 1, 0, 0)
+                save_state(index=index, ci=nxt[0], tier=nxt[1], k=nxt[2], chars=chars)
+                nav.wait_for("search_end", box=SEARCH_END, timeout=10, thr=10)
+                ggst.keys("u", 300)
+                time.sleep(6)
+                nav.wait_for("search_list", box=SEARCH_HEADER, timeout=60)
+                ggst.keys("s", 300)
+                time.sleep(1)
+            ggst.keys(" ".join(["w"] * per_rank), 200)       # back to the top of the list
+    save_state(index=index, ci=len(chars), tier=0, k=0, chars=chars, done=True)
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--per-rank", type=int, default=2, help="replays per character and rank tier")
     ap.add_argument("--index", type=int, default=1000, help="first manifest index (new runs)")
     ap.add_argument("--resume", action="store_true",
                     help="restart Strive and continue from search_state.json")
+    ap.add_argument("--chars", help="comma-separated characters to record (default: all, stepping)")
     args = ap.parse_args()
+    chars = args.chars.split(",") if args.chars else None
     state = load_state() if args.resume else None
     if state and state.get("done"):
         raise SystemExit("search_state.json says the batch is complete")
     if not state:
-        state = dict(index=args.index, char=None, tier=0, k=0, step=False)
+        state = dict(index=args.index, char=None, tier=0, k=0, step=False, ci=0)
     if args.resume:
         wait_online()
         if not ggst.find_window():
@@ -367,7 +408,10 @@ if __name__ == "__main__":
         try:
             if need_nav:                                  # a server error here restarts too
                 go_to_search()
-            run(args.per_rank, state)
+            if chars:
+                run_chars(chars, args.per_rank, state)
+            else:
+                run(args.per_rank, state)
             break
         except (Restart, SystemExit, Exception) as e:
             restarts += 1

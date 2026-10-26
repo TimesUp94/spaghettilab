@@ -1,6 +1,7 @@
 """Drive Guilty Gear Strive from a script: screenshots of its window and keyboard input.
 
 Usage: python ggst.py shot <out.png>
+       python ggst.py place               (borderless 1920x1080 at GGST_WINDOW_POS)
        python ggst.py keys "<key>[:ms] <key>[:ms] ..." [gap_ms]
 Keys are scan-code names (see SCAN). By default they are posted to the Strive window
 as WM_KEYDOWN/WM_KEYUP, which the game takes while in the background, so the PC stays
@@ -198,6 +199,27 @@ def keys(seq: str, gap_ms: int = 150) -> None:
         time.sleep(gap_ms / 1000)
 
 
+# Where the game window goes (left, top of a borderless 1920x1080 window): this PC's
+# monitor 3, bottom right. The screen checks need a 1920x1080 client area.
+WINDOW_POS = tuple(int(v) for v in os.environ.get("GGST_WINDOW_POS", "5760,1080").split(","))
+
+
+def place_window() -> None:
+    """Make the game window borderless 1920x1080 at WINDOW_POS, without activating it."""
+    hwnd = find_window()
+    if not hwnd:
+        raise SystemExit("Strive window not found")
+    user32.SetProcessDPIAware()
+    style = user32.GetWindowLongW(hwnd, -16)
+    user32.SetWindowLongW(hwnd, -16, style & ~(0x00C00000 | 0x00040000))  # no caption / sizing frame
+    # NOZORDER | NOACTIVATE | FRAMECHANGED
+    user32.SetWindowPos(hwnd, 0, WINDOW_POS[0], WINDOW_POS[1], 1920, 1080, 0x0004 | 0x0010 | 0x0020)
+    rc = wt.RECT()
+    user32.GetClientRect(hwnd, ctypes.byref(rc))
+    if (rc.right, rc.bottom) != (1920, 1080):
+        raise SystemExit(f"game area is {rc.right}x{rc.bottom}, not 1920x1080")
+
+
 def shot(out: str) -> None:
     subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-filter_complex",
                     "gfxcapture=window_exe=GGST-Win64-Shipping:capture_cursor=0,hwdownload,format=bgra",
@@ -207,5 +229,7 @@ def shot(out: str) -> None:
 if __name__ == "__main__":
     if sys.argv[1] == "shot":
         shot(sys.argv[2])
+    elif sys.argv[1] == "place":
+        place_window()
     elif sys.argv[1] == "keys":
         keys(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 150)
