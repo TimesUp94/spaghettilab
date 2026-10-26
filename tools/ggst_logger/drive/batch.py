@@ -133,6 +133,15 @@ def record_one(index, list_ref="saved_list", menu_ref="replay_menu", menu_box=VI
         if s >= 255 and not said:
             print(f"[{index}]   screen capture failing")
             said = True
+        if s >= 255 and not ggst.find_window():          # the game closed: drop this one
+            ff.kill()
+            log.f.close()
+            for p in (video, csv):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+            raise SystemExit("Strive closed during the recording")
         if won_at is None and log.poll().match_over:
             won_at = time.time()
         if won_at is not None and time.time() - won_at > MATCH_OVER_S:
