@@ -669,11 +669,15 @@ _TEMPLATES: dict = {}
 def banner_templates() -> dict:
     import cv2
     if not _TEMPLATES:
+        # filled in one step: the video pass and refine_banners call this from several threads,
+        # and imread lets another thread see a half-filled dict
+        ts = {}
         for word in BANNER_WORDS:
             t = cv2.imread(str(Path(__file__).with_name(f"banner_{word}.png")), cv2.IMREAD_GRAYSCALE)
             t = t.astype(np.float32) / 255
             h = t.shape[1] // 2
-            _TEMPLATES[word] = (t, t[:, :h + 10], t[:, h - 10:])
+            ts[word] = (t, t[:, :h + 10], t[:, h - 10:])
+        _TEMPLATES.update(ts)
     return _TEMPLATES
 
 
