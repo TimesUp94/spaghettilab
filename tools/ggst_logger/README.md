@@ -17,6 +17,7 @@ Windows only. **Never go online with the mod installed.** To play online, remove
   - `ggst.py` sends keyboard input and takes window screenshots. Screenshots use FFmpeg 9's `gfxcapture`, so they work while the window is covered.
   - `nav.py` is the menu navigator. It checks every screen against `ref/*.jpg` before it presses a key.
   - `batch.py` plays saved replays one by one, records each one, and appends to `ggst_rec/manifest.jsonl`.
+    A recording stops when the end-of-replay menu is recognised, 60 s after a player's `CmnActMatchWin` in the log, or after 10 minutes; the manifest's `stop` field says which (`menu`, `match over`, `max duration`). Only the recording stops early: the next key still waits for the recognised menu.
   - `dumps.py` and `act.py` read the memory snapshots.
 - **`dataset/build.py`:** builds the dataset from the recordings.
   - It runs the CV pipeline on each recording.
