@@ -332,8 +332,12 @@ def hit_source(log: dict, dside: int, aside: int, h: int, max_back: int = 600) -
     # earlier actions, newest first: an object can appear after its move was cancelled
     # (Asuka's spell after a cancel into Draw), so moves.classify skips non-attacks
     before = list(dict.fromkeys(acts[j] for j in range(s, max(-1, s - 90), -1) if not is_common(acts[j])))
+    # the attacker's actions while the object was out, newest first: a summon's attacks
+    # are ordered by later moves (Jack-O's Attack Command, Zato's Eddie attacks)
+    during = list(dict.fromkeys(acts[j] for j in range(k, s, -1) if not is_common(acts[j])))
     return dict(hit_object=obj[1], hit_object_slot=oid, hit_object_age=int(h - s),
-                hit_object_spawn_act=spawn, hit_object_spawn_row=int(s), hit_object_prior_acts=before[:6])
+                hit_object_spawn_act=spawn, hit_object_spawn_row=int(s), hit_object_prior_acts=before[:6],
+                hit_object_cmd_acts=during[:6])
 
 
 def extract_openers(log: dict, hpmax: dict, n_quiet: int) -> tuple[list[dict], dict]:
@@ -446,7 +450,7 @@ def extract_openers(log: dict, hpmax: dict, n_quiet: int) -> tuple[list[dict], d
                 hit_logged="p1_hitby" in log,     # the log has the hit source (else the guesses)
                 **(src or dict(hit_object=None, hit_object_slot=None, hit_object_age=None,
                                hit_object_spawn_act=None, hit_object_spawn_row=None,
-                               hit_object_prior_acts=None)),
+                               hit_object_prior_acts=None, hit_object_cmd_acts=None)),
             )
             out.append(row)
             stats["openers"] += 1

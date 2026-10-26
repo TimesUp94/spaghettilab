@@ -132,6 +132,7 @@ NORMAL, CMD, SPECIAL, SUPER, THROW, PROJ, BURST, OTHER = (
 
 # flags: proj = the move's hit is a projectile / detached object; grab = command grab;
 # nonattack = not an attack (a hit while in it comes from an earlier projectile);
+# command = orders a summon that stays out (Servant, Eddie, crow): its later hits are this move's;
 # inferred = mapping from Dustloop order / variants, not seen on video; verified = seen on strips;
 # inputs = the motion + button checked against the logged inputs (verify_inputs.py);
 # dustloop = the notation checked on Dustloop's frame data (rare moves the logged inputs
@@ -500,11 +501,11 @@ _add("May", {
 })
 _add("Zato-1", {  # EddieSummonA-D = P/K/S/H Eddie attacks (Pierce / That's a lot / Leap / Oppose)
     "InviteHell": ("22H", "Invite Hell", SPECIAL, "proj inferred"),
-    "EddieSummonA": ("236P", "Pierce", SPECIAL, "proj inferred"),
-    "EddieSummonB": ("236K", "That's a lot", SPECIAL, "proj inferred"),
-    "EddieSummonC": ("236S", "Leap", SPECIAL, "proj inferred"),
-    "EddieSummonD": ("236H", "Oppose", SPECIAL, "proj inferred"),
-    "EddieCommand": ("236X (Eddie out)", "Eddie command (unresolved P/K/S/H)", SPECIAL, "proj inferred"),
+    "EddieSummonA": ("236P", "Pierce", SPECIAL, "proj inferred command"),
+    "EddieSummonB": ("236K", "That's a lot", SPECIAL, "proj inferred command"),
+    "EddieSummonC": ("236S", "Leap", SPECIAL, "proj inferred command"),
+    "EddieSummonD": ("236H", "Oppose", SPECIAL, "proj inferred command"),
+    "EddieCommand": ("236X (Eddie out)", "Eddie command (unresolved P/K/S/H)", SPECIAL, "proj inferred command"),
     "EddieSummonOnly": ("214H", "Summon Eddie", OTHER, "nonattack inferred"),
     "EddieEnd": ("214H", "Unsummon Eddie", OTHER, "nonattack inferred"),
     "DamnedFang": ("623S", "Damned Fang", SPECIAL, "grab inferred"),
@@ -519,13 +520,13 @@ _add("Zato-1", {  # EddieSummonA-D = P/K/S/H Eddie attacks (Pierce / That's a lo
 })
 _add("Jack-O", {  # Ghost = Servant; the servants' hits are detached objects
     "SummonGhostA": ("236P", "Summon Servant", SPECIAL, "proj inferred"),
-    "ThrowGhost": ("hs.6X", "Throw Servant", SPECIAL, "proj inferred"),
-    "AirThrowGhost": ("hs.j.6X", "Air Throw Servant", SPECIAL, "proj inferred"),
-    "AtkOrderGhost": ("214K", "Attack Command", SPECIAL, "proj inferred"),
-    "AirAtkOrderGhost": ("j.214K", "Air Attack Command", SPECIAL, "proj inferred"),
-    "AtemiGhost": ("214S", "Defend Command", SPECIAL, "proj inferred"),
-    "JibakuGhost": ("214H", "Countdown", SPECIAL, "proj inferred"),
-    "KickGhost": ("236K", "Servant Shoot", SPECIAL, "proj inferred"),
+    "ThrowGhost": ("hs.6X", "Throw Servant", SPECIAL, "proj inferred command"),
+    "AirThrowGhost": ("hs.j.6X", "Air Throw Servant", SPECIAL, "proj inferred command"),
+    "AtkOrderGhost": ("214K", "Attack Command", SPECIAL, "proj inferred command"),
+    "AirAtkOrderGhost": ("j.214K", "Air Attack Command", SPECIAL, "proj inferred command"),
+    "AtemiGhost": ("214S", "Defend Command", SPECIAL, "proj inferred command"),
+    "JibakuGhost": ("214H", "Countdown", SPECIAL, "proj inferred command"),
+    "KickGhost": ("236K", "Servant Shoot", SPECIAL, "proj inferred command"),
     "ElysionDriver": ("632146P", "Forever Elysion Driver", SUPER, "inferred"),
     "ElysionDriverEx": ("632146P", "Forever Elysion Driver", SUPER, "inferred"),
     "PowerUp": ("236236S/H", "Cheer Servant On", SUPER, "nonattack inferred"),
@@ -533,8 +534,8 @@ _add("Jack-O", {  # Ghost = Servant; the servants' hits are detached objects
     "ReleaseGhost": ("hs.D", "Release Servant", OTHER, "nonattack inferred"),
     "AirReleaseGhost": ("hs.j.D", "Air Release Servant", OTHER, "nonattack inferred"),
     "ReturnGhost": ("214P", "Recover Servant", OTHER, "nonattack inputs"),
-    "PickAtkOrderGhost": ("hs.214K", "Attack Command (held Servant)", SPECIAL, "proj inferred"),
-    "PickKickGhost": ("hs.236K", "Servant Shoot (held Servant)", SPECIAL, "proj inferred"),
+    "PickAtkOrderGhost": ("hs.214K", "Attack Command (held Servant)", SPECIAL, "proj inferred command"),
+    "PickKickGhost": ("hs.236K", "Servant Shoot (held Servant)", SPECIAL, "proj inferred command"),
 })
 _add("Happy Chaos", {
     "HoldGunAtk": ("5H H", "Fire (At the Ready)", SPECIAL, "proj inferred"),
@@ -556,7 +557,7 @@ _add("Testament", {  # Grave Reaper = 1-4 (S/H ground, then air); 1/2/8/9 looked
     "TST_Special4": ("j.236H", "Air H Grave Reaper", SPECIAL, "proj inferred"),
     "TST_Special5": ("214K?", "Possession? (unresolved)", SPECIAL, "inferred"),
     "TST_Special6": ("", "Testament special 6 (unresolved)", SPECIAL, "inferred"),
-    "TST_Special7": ("214P", "Unholy Diver", SPECIAL, "proj inferred"),
+    "TST_Special7": ("214P", "Unholy Diver", SPECIAL, "proj inferred command"),
     "TST_Special8": ("214S", "S Arbiter Sign", SPECIAL, "proj inferred"),
     "TST_Special9": ("214H", "H Arbiter Sign", SPECIAL, "proj inferred"),
     "TST_Ultimate1": ("236236P", "Nostrovia", SUPER, "inferred"),
@@ -792,7 +793,11 @@ def classify(row: dict) -> dict:
     if spawn:
         # logged hit source (logger p*_hitby): a pool object of the attacker hit, made by
         # `spawn`; a projectile when the attacker is no longer in that move
-        cands = [spawn] + list(row.get("hit_object_prior_acts") or [])
+        # a summon that stays out (Servant, Eddie, Testament's crow) attacks on its owner's
+        # order: the newest `command` move since it appeared made the hit
+        cmd = next((c for c in row.get("hit_object_cmd_acts") or []
+                    if (m := move_info(char, c)) and "command" in m[3]), None)
+        cands = ([cmd] if cmd else []) + [spawn] + list(row.get("hit_object_prior_acts") or [])
         spawn = next((c for c in cands if (m := move_info(char, c)) and "nonattack" not in m[3]), spawn)
         smi = move_info(char, spawn)
         if smi:
