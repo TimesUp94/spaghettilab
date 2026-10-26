@@ -124,14 +124,35 @@ def wait_user_idle() -> None:
         time.sleep(5)
 
 
+def _window_exe(hwnd) -> str:
+    """File name (no extension) of the process that owns hwnd, or ""."""
+    pid = wt.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wt.HANDLE
+    h = k32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return ""
+    try:
+        buf, n = ctypes.create_unicode_buffer(1024), wt.DWORD(1024)
+        if not k32.QueryFullProcessImageNameW(wt.HANDLE(h), 0, buf, ctypes.byref(n)):
+            return ""
+        return buf.value.rsplit("\\", 1)[-1].rsplit(".", 1)[0]
+    finally:
+        k32.CloseHandle(wt.HANDLE(h))
+
+
 def find_window() -> int:
+    """The game window: titled GUILTY GEAR and owned by the game's process, so posted
+    keys never reach a browser tab or video player named after the game."""
     found = []
 
     @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
     def cb(hwnd, _):
         buf = ctypes.create_unicode_buffer(256)
         user32.GetWindowTextW(hwnd, buf, 256)
-        if user32.IsWindowVisible(hwnd) and "GUILTY GEAR" in buf.value.upper():
+        if (user32.IsWindowVisible(hwnd) and "GUILTY GEAR" in buf.value.upper()
+                and _window_exe(hwnd).lower() == "ggst-win64-shipping"):
             found.append(hwnd)
         return True
 

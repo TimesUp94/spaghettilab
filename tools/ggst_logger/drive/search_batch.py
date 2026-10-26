@@ -258,6 +258,11 @@ def go_to_search():
         return
     if nav.score("filter_menu", FILTER_TITLE) < 10:       # filter menu open: set_filters goes on
         return
+    if nav.score("search_end", SEARCH_END) < 10:         # a replay's end menu: back to the list
+        ggst.keys("u", 300)
+        time.sleep(6)
+        nav.wait_for("search_list", box=SEARCH_HEADER, timeout=60)
+        return
     nav.to_main()
     ggst.keys("d d d d d d", 300)
     time.sleep(1.5)
