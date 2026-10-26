@@ -305,7 +305,7 @@ Steps: select -> roi -> scanning -> results -> cutting -> done
 
 Exports the player's saved Strive replays by driving the running game (see `docs/strive-export.md`).
 
-- **Setup:** a warning box (game at the title screen with keyboard controls; the app takes control of the game window; don't use the keyboard meanwhile), which replays (newest N / played on or after a date, with a "today" shortcut / all), output folder (remembered in `localStorage`), and an Advanced section (skip the newest N, list only = `--dry-run`, UI language). Start needs a ticked acknowledgement.
+- **Setup:** a warning box (game at the title screen with keyboard controls; the app sends keys to the game window, which can stay behind other windows; don't click into, type in or minimise the game meanwhile, and leave the PC alone without FFmpeg 8+), which replays (newest N / played on or after a date, with a "today" shortcut / all), output folder (remembered in `localStorage`), and an Advanced section (skip the newest N, list only = `--dry-run`, UI language). Start needs a ticked acknowledgement.
 - **Running:** calls `export_strive_replays` and listens to `strive-export-progress`; shows the current game screen / status, capture and encoder, warnings, and one row per replay (players, match date, `listed` / `recording` / `done` / `partial` / `already exported`). "Stop after this replay" calls `cancel_strive_export(false)`; the button then becomes "Stop now" (`cancel_strive_export(true)`).
 - **Done / error:** summary, "Analyze N videos" runs the existing `analyze_video` on each exported file in turn and opens the dashboard on the result (`onComplete(dbPath)`); "Export more" goes back to setup. After an error the files recorded so far can still be analyzed.
 

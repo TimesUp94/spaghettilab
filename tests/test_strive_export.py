@@ -848,3 +848,24 @@ def test_live_game_posts_keys_unless_foreground(monkeypatch):
     LiveGame(cap=None).press("u")
     LiveGame(cap=None, background=False).press("u")
     assert seen == [("u", True), ("u", False)]
+
+
+def test_find_window_skips_other_apps_named_after_the_game(monkeypatch):
+    from replanal.strive_export import winio
+    titles = {1: "GUILTY GEAR -STRIVE- Sol combos - YouTube", 2: "Guilty Gear -Strive-  "}
+    exes = {1: "chrome", 2: "GGST-Win64-Shipping"}
+
+    class U:
+        def EnumWindows(self, cb, _):
+            for h in titles:
+                cb(h, 0)
+
+        def GetWindowTextW(self, h, buf, n):
+            buf.value = titles[h]
+
+        def IsWindowVisible(self, h):
+            return True
+
+    monkeypatch.setattr(winio, "_u32", lambda: U())
+    monkeypatch.setattr(winio, "_window_exe", lambda h: exes[h])
+    assert winio.find_window() == 2

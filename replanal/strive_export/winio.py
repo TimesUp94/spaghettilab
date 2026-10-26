@@ -102,8 +102,29 @@ def post_scan(hwnd: int, scan: int, up: bool) -> None:
         raise FocusError("could not post a key to the Strive window")
 
 
+def _window_exe(hwnd) -> str:
+    """The file name (no extension) of the process that owns ``hwnd``, or ""."""
+    import ctypes.wintypes as wt
+    pid = wt.DWORD()
+    _u32().GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wt.HANDLE
+    h = k32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return ""
+    try:
+        buf, n = ctypes.create_unicode_buffer(1024), wt.DWORD(1024)
+        if not k32.QueryFullProcessImageNameW(wt.HANDLE(h), 0, buf, ctypes.byref(n)):
+            return ""
+        return buf.value.replace("/", "\\").rsplit("\\", 1)[-1].rsplit(".", 1)[0]
+    finally:
+        k32.CloseHandle(wt.HANDLE(h))
+
+
 def find_window() -> int:
-    """The Strive window handle (visible, title contains GUILTY GEAR), or 0."""
+    """The Strive window handle (visible, title contains GUILTY GEAR, owned by
+    the game's process), or 0. The process check keeps keys out of a browser
+    tab or video player whose title names the game."""
     import ctypes.wintypes as wt
     u = _u32()
     found = []
@@ -112,7 +133,8 @@ def find_window() -> int:
     def cb(hwnd, _):
         buf = ctypes.create_unicode_buffer(256)
         u.GetWindowTextW(hwnd, buf, 256)
-        if u.IsWindowVisible(hwnd) and "GUILTY GEAR" in buf.value.upper():
+        if (u.IsWindowVisible(hwnd) and "GUILTY GEAR" in buf.value.upper()
+                and _window_exe(hwnd).lower() == GAME_EXE.lower()):
             found.append(hwnd)
         return True
 
