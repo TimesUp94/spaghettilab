@@ -460,8 +460,26 @@ def extract_openers(log: dict, hpmax: dict, n_quiet: int) -> tuple[list[dict], d
 
 
 def banner_kind(r: dict) -> str | None:
-    """'counter', 'punish', 'large' (red COUNTER), 'unclear' (a banner word, but not which),
-    'none', or None (no word scores: no video pass)."""
+    """'counter', 'punish', 'large' (red COUNTER), 'reversal', 'unclear' (a banner word, but not
+    which), 'none', or None (no word scores: no video pass). The best score of each word over
+    the hit's frames first; where the per-frame scores were taken (refine_banners) they decide,
+    unless they read no word for a COUNTER / PUNISH."""
+    kind = banner_kind_words(r)
+    if r.get("banner_frames") and kind in ("unclear", "counter", "punish"):
+        frames = banner_kind_frames(r["banner_frames"])
+        if kind == "unclear" or frames != "unclear":
+            return frames
+    return kind
+
+
+def needs_frames(r: dict) -> bool:
+    """Unclear word, or a COUNTER / PUNISH whose box got no new yellow after the hit (the banner
+    was already up: an earlier hit's, in 88 of the 93 such banners found)."""
+    kind = banner_kind_words(r)
+    return kind == "unclear" or (kind in ("counter", "punish") and r.get("counter_banner") is False)
+
+
+def banner_kind_words(r: dict) -> str | None:
     w = r.get("banner_words")
     if not w:
         return None
@@ -478,6 +496,28 @@ def banner_kind(r: dict) -> str | None:
     return "counter" if c > p else "punish"
 
 
+# Common defender states that take a PUNISH (jump start-up, backdash, landing recovery, burst)
+# or a COUNTER (Roman Cancel, Faultless Defense landing) banner; any other common state
+# (walk, dash, stand, crouch, guard) is neutral.
+RECOVERY_ACTS = ("CmnActJumpPre", "CmnActBDash", "CmnActLandingStiff", "CmnActBurst",
+                 "CmnActRomanCancel", "CmnActFaultlessPressureLand")
+
+
+def banner_kind_log(r: dict, normal: int | None) -> str:
+    """Word of a banner still unclear on video, from the log, by the rates among the banners
+    that were read (no throws or trades, 575 replays): a small CH adds 4-9 frames of hitstop
+    (counter in 98% of the openers on an attacking defender with that extra hitstop), and a
+    defender in a neutral state hit with the move's normal hitstop shows no banner (97%)."""
+    if r["is_throw"] or r["trade"] or normal is None:
+        return "unclear"
+    extra = r["hitstop"] - normal
+    if r["defender_attacking"] and 4 <= extra <= 9:
+        return "counter"
+    if not r["defender_attacking"] and r["defender_act"] not in RECOVERY_ACTS and extra == 0:
+        return "none"
+    return "unclear"
+
+
 def mark_counter_hits(rows: list[dict]) -> None:
     """Counter hit = the attacker's HUD shows the yellow "COUNTER" banner (small CH) or the red
     one (large CH), told from the "PUNISH" banner by the word's shape (banner_kind, from the
@@ -487,7 +527,13 @@ def mark_counter_hits(rows: list[dict]) -> None:
     Large CH from the log: per (attacker char, move) the normal hitstop is the most common
     hitstop among hits without a banner (>= 3 samples; else the move's minimum); a hitstop at
     least 10 frames longer is a large CH (5H: 14 normal, 30-31 on large CH). Trades (both
-    players hit on the same frame) are flagged and never counted as CH."""
+    players hit on the same frame) are flagged and never counted as CH.
+
+    The yellow COUNTER turns orange, then red, as it ages: a red COUNTER without the long
+    hitstop is the banner of an earlier counter hit (in 61% of them the same attacker opened
+    with a COUNTER within 90 frames before; 93% of them hit a non-attacking defender) and is
+    read like an unclear word. An unclear word is settled from the log where the rates allow
+    (banner_kind_log); banner_src says what decided: words, frames or log."""
     key = lambda r: (r["attacker_char"], r["move_act"])
     by = collections.defaultdict(list)
     for r in rows:
@@ -504,8 +550,14 @@ def mark_counter_hits(rows: list[dict]) -> None:
         long_stop = (not r["is_throw"] and not r["trade"]
                      and (r["hitstop"] >= normal + 10 if normal is not None else r["hitstop"] >= 25))
         kind = banner_kind(r)
+        src = "words" if kind == banner_kind_words(r) else "frames"
+        if kind == "large" and not long_stop:
+            kind = "unclear"           # red, but no large-CH hitstop: an earlier COUNTER aging to red
+        if kind == "unclear" and banner_kind_log(r, normal) != "unclear":
+            kind, src = banner_kind_log(r, normal), "log"
         r["banner_kind"] = kind
-        r["punish"] = None if kind is None else kind == "punish"
+        r["banner_src"] = None if kind is None else src
+        r["punish"] = None if kind in (None, "unclear", "reversal") else kind == "punish"
         if kind is None:
             large = long_stop
             banner = r.get("counter_banner")
@@ -514,9 +566,9 @@ def mark_counter_hits(rows: list[dict]) -> None:
             else:
                 r["counter_hit"] = bool((banner or large) and not r["trade"])
         else:
-            large = (kind == "large" or (long_stop and kind in ("none", "unclear"))) and not r["trade"]
-            if kind == "unclear" and not large:
-                r["counter_hit"] = None        # a banner, but its word can't be told
+            large = (kind == "large" or (long_stop and kind in ("none", "unclear", "reversal"))) and not r["trade"]
+            if kind in ("unclear", "reversal") and not large:
+                r["counter_hit"] = None        # a banner, but its word can't be told / a COUNTER may follow REVERSAL late
             else:
                 r["counter_hit"] = bool((kind == "counter" or large) and not r["trade"])
         r["counter_hit_large"] = bool(large)
@@ -604,17 +656,20 @@ def yellow_frac(img: np.ndarray, side: int) -> float:
 # hit in recovery, e.g. a whiffed or blocked move, or a blocked burst). A large counter hit
 # shows a big red "COUNTER" instead. The word is told by template matching its mask in a
 # wider box (the text slides in and can stick out of BANNER_BOX); a half-word template covers
-# a word partly hidden behind effects.
+# a word partly hidden behind effects. A third yellow word, "REVERSAL" (the P2 box clips its
+# last letter, so its template is clipped too), shows for a hit from a reversal; a COUNTER
+# can follow it in the same slot.
 KIND_OFFS = tuple(range(8, 49, 4))
 KIND_BOX = {1: (40, 190, 600, 350), 2: (1320, 190, 1880, 350)}
 KIND_THR, KIND_MARGIN = 0.5, 0.1
+BANNER_WORDS = ("counter", "punish", "reversal")
 _TEMPLATES: dict = {}
 
 
 def banner_templates() -> dict:
     import cv2
     if not _TEMPLATES:
-        for word in ("counter", "punish"):
+        for word in BANNER_WORDS:
             t = cv2.imread(str(Path(__file__).with_name(f"banner_{word}.png")), cv2.IMREAD_GRAYSCALE)
             t = t.astype(np.float32) / 255
             h = t.shape[1] // 2
@@ -637,6 +692,71 @@ def banner_word_scores(img: np.ndarray, side: int) -> dict:
             out[pre + word] = 0.0 if m.mean() < 0.02 else max(
                 float(cv2.matchTemplate(m, t, cv2.TM_CCOEFF_NORMED).max()) for t in ts)
     return out
+
+
+# The best score of each word over the hit's frames leaves ~2% of the banners unclear: the two
+# words score alike when the banner is half hidden, its box has a yellow background (sand,
+# sunset), a banner of an earlier hit is still up, or there is no banner and only yellow effects.
+# A banner of an earlier hit still up (aging from yellow to orange) is also read as this hit's
+# COUNTER / PUNISH. For those (needs_frames), the yellow word scores of every 2nd frame from
+# -8 to +60 decide: a frame reads a word when that word scores >= FRAME_THR and beats the
+# other two by FRAME_MARGIN (no counter/punish flip on 240 sampled read banners). This hit's
+# banner is the first word read from +8 to +38 (a sampled banner's first clear frame is in that
+# range); a word already read before the hit is an earlier hit's banner and counts only after
+# its score dipped below FRAME_DIP (a new banner sliding in). REVERSAL can be followed by a
+# COUNTER, so a counter/punish read wins over it. A banner of an earlier hit and nothing new is
+# 'none'; no word read, or both COUNTER and PUNISH, stays 'unclear'.
+REFINE_OFFS = tuple(range(-8, 61, 2))
+WORD_START = (8, 40)
+FRAME_THR, FRAME_MARGIN, FRAME_DIP = 0.7, 0.06, 0.6
+
+
+def frame_word(s: dict) -> str | None:
+    best = max(BANNER_WORDS, key=lambda w: s[w])
+    other = max(s[w] for w in BANNER_WORDS if w != best)
+    return best if s[best] >= FRAME_THR and s[best] - other >= FRAME_MARGIN else None
+
+
+def banner_kind_frames(frames: list) -> str:
+    """Banner kind from the per-frame yellow word scores (list aligned with REFINE_OFFS)."""
+    fr = {o: dict(zip(BANNER_WORDS, s)) for o, s in zip(REFINE_OFFS, frames) if s is not None}
+    earlier = {frame_word(s) for o, s in fr.items() if o < 0} - {None}
+    dipped, first = set(), {}
+    for o in sorted(o for o in fr if o >= 0):
+        s = fr[o]
+        dipped |= {w for w in earlier if s[w] < FRAME_DIP}
+        w = frame_word(s)
+        if w and WORD_START[0] <= o < WORD_START[1] and (w not in earlier or w in dipped):
+            first.setdefault(w, o)
+    hit = first.keys() - {"reversal"}
+    if len(hit) == 1:
+        return hit.pop()
+    if not hit and "reversal" in first:
+        return "reversal"
+    if not first and earlier:
+        return "none"
+    return "unclear"
+
+
+def refine_banners(video: str, rows: list[dict]) -> int:
+    """Per-frame yellow word scores (REFINE_OFFS) for the openers that need them (needs_frames)."""
+    import cv2
+    todo = sorted((r for r in rows if needs_frames(r) and "banner_frames" not in r),
+                  key=lambda r: r["video_frame"])
+    if not todo:
+        return 0
+    cap = cv2.VideoCapture(video)
+    for r in todo:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, r["video_frame"] + REFINE_OFFS[0])
+        frames = []
+        for o in range(REFINE_OFFS[0], REFINE_OFFS[-1] + 1):
+            ok, img = cap.read()
+            if o in REFINE_OFFS:
+                s = banner_word_scores(img, int(r["attacker"][1])) if ok else None
+                frames.append(None if s is None else [round(s[w], 3) for w in BANNER_WORDS])
+        r["banner_frames"] = frames
+    cap.release()
+    return len(todo)
 
 
 def video_pass(video: str, rows: list[dict], stem: str, tile_w=480) -> None:
@@ -838,6 +958,18 @@ def main():
         with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
             for stem, n, dt in ex.map(strips, stale):
                 print(f"  strips {stem}: {n} in {dt:.0f}s")
+
+        def refine(item):
+            e, res, _ = item
+            n = refine_banners(e["video"], res["rows"])
+            if n:
+                (run_dir(res["summary"]["replay"]) / "openers.json").write_text(json.dumps(res, indent=1, default=float))
+            return n
+
+        with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
+            n = sum(ex.map(refine, results))
+        if n:
+            print(f"  per-frame banner scores for {n} opener(s)")
     mark_counter_hits(rows)       # again, with the banner scores of the video pass
     write_outputs(results, rows)
 
@@ -902,6 +1034,7 @@ def write_outputs(results, rows) -> None:
         flags=dict(projectile_likely=sum(r["projectile_likely"] for r in rows), throws=sum(r["is_throw"] for r in rows),
                    supers=sum(r["is_super"] for r in rows), rc_recent=sum(r["rc_recent"] for r in rows),
                    counter_hit=sum(bool(r.get("counter_hit")) for r in rows),
+                   banner_kinds=dict(collections.Counter(str(r.get("banner_kind")) for r in rows).most_common()),
                    after_guard_20f=sum(1 for r in rows if r["frames_since_guard"] is not None and r["frames_since_guard"] <= 20)),
         per_replay=summ,
     )

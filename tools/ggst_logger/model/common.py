@@ -1,4 +1,4 @@
-"""Shared helpers: dataset rows, labels for the three tasks, replay-grouped folds, metrics."""
+"""Shared helpers: dataset rows, task labels, replay-grouped folds, metrics."""
 from __future__ import annotations
 
 import collections
@@ -51,6 +51,18 @@ def label_normal(r):
     return f"{r['button']}/{r['stance']}"
 
 
+def label_hit_kind(r):
+    """Counter hit (small or large), punish or neither (dataset build.mark_counter_hits); None
+    when unknown (banner word unclear, REVERSAL, no video pass). The model frames end at the
+    hit, before the banner shows: this is the situation (defender attacking, recovering or
+    neutral), not the banner."""
+    if r.get("counter_hit"):
+        return "counter"
+    if r.get("punish"):
+        return "punish"
+    return "none" if r.get("counter_hit") is False and r.get("punish") is False else None
+
+
 def label_move(char, min_count=5):
     def f(r, _counts={}):
         if r["char"] != char:
@@ -67,6 +79,8 @@ def collapse_rare(labels, min_count=5, other="(rare)"):
 def task_labels(rows, task):
     if task == "category":
         y = [label_category(r) for r in rows]
+    elif task == "hit_kind":
+        y = [label_hit_kind(r) for r in rows]
     elif task == "normal":
         y = collapse_rare([label_normal(r) for r in rows], 5)
     elif task.startswith("move:"):

@@ -1,7 +1,7 @@
 """Classifiers on cached frozen features (features.py), 5-fold cross-validation grouped by
 replay (no replay in both train and test), out-of-fold predictions pooled for the report.
 
-Tasks: category | normal (button x stance) | move:Asuka | move:Elphelt
+Tasks: category | normal (button x stance) | hit_kind (counter / punish / none) | move:Asuka | move:Elphelt
 Models: majority, damage+distance (gradient boosting), log features (damage, distance, airborne
 flags, hits, hitstop: game-memory values, an upper reference, not visual), and the visual head
 (temporal conv over the 13 frame features of one or both views).
