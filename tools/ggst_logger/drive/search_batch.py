@@ -52,7 +52,10 @@ def read_char_name():
 # Rank options in the filter (index: name in the Italian UI), grouped into tiers.
 TIERS = [("Iron", 1, 3), ("Bronze", 4, 6), ("Silver", 7, 9), ("Gold", 10, 12),
          ("Platinum", 13, 15), ("Diamond", 16, 18), ("Vanquisher", 19, 22)]
-ROW_Y = {1: (290, 330), 2: (345, 385), 3: (398, 438), 6: (555, 595)}  # filter-menu rows
+# Filter-menu rows by name: centre y of the label. The menu gained floor rows
+# ("Piano") in 2026-10, so rows are found by the highlighted (red) label, not counted.
+ROWS_Y = {"filter": 308, "rank_lo": 361, "rank_hi": 414, "floor_lo": 467, "floor_hi": 520,
+          "char1": 573, "char2": 626, "reset": 838, "close": 891}
 # The rank options as the Italian UI reads them; the list wraps around at both ends.
 RANKS = ["Non classificato", "Ferro 1", "Ferro 2", "Ferro 3", "Bronzo 1", "Bronzo 2", "Bronzo 3",
          "Argento", "Argento 2", "Argento 3", "Oro", "Oro 2", "Oro 3", "Platino 1", "Platino 2",
@@ -79,10 +82,34 @@ def set_rank(row, target):
     raise SystemExit(f"could not set rank row {row} to {RANKS[target]}")
 
 
+def highlighted():
+    """Name of the highlighted filter-menu row (red label), None for unnamed rows."""
+    ggst.shot(nav.TMP)
+    im = cv2.imread(nav.TMP)
+    for name, y in ROWS_Y.items():
+        b, g, r = im[y - 15:y + 15, 500:940].reshape(-1, 3).mean(0)
+        if r > 120 and g < 40 and b < 40:
+            return name
+    return None
+
+
+def go_to_row(target):
+    """Move the filter-menu cursor to the named row (up or down by the rows' order)."""
+    order = list(ROWS_Y)
+    for _ in range(16):
+        cur = highlighted()
+        if cur == target:
+            return
+        ggst.keys("w" if cur and order.index(cur) > order.index(target) else "s", 250)
+        time.sleep(0.5)
+    raise SystemExit(f"could not reach the filter row '{target}'")
+
+
 def read_row(row):
     global CHAR_VALUE
     keep = CHAR_VALUE
-    CHAR_VALUE = (960, ROW_Y[row][0], 1410, ROW_Y[row][1])
+    y = ROWS_Y[row]
+    CHAR_VALUE = (960, y - 20, 1410, y + 20)
     try:
         return read_char_name()
     finally:
@@ -93,49 +120,46 @@ def set_filters(step_char, lo, hi, target=None):
     """From the results list: open the filter menu (J); set ranked-match rank range
     [lo, hi] (option indices); optionally step 'Character 1' right; Close so the
     results refresh. Returns (character, rank_lo, rank_hi) as read on screen."""
-    nav.wait_for("search_list", box=SEARCH_HEADER, timeout=30)
-    for _ in range(3):
-        ggst.keys("j", 300)
-        time.sleep(2)
-        if nav.score("filter_menu", FILTER_TITLE) < 10:
-            break
+    if nav.score("filter_menu", FILTER_TITLE) >= 10:      # not already open (resumed run)
+        nav.wait_for("search_list", box=SEARCH_HEADER, timeout=30)
+        for _ in range(3):
+            ggst.keys("j", 300)
+            time.sleep(2)
+            if nav.score("filter_menu", FILTER_TITLE) < 10:
+                break
     nav.wait_for("filter_menu", box=FILTER_TITLE, timeout=10, thr=10)
-    ggst.keys("s", 250)                                   # row 1: search filter
-    time.sleep(0.4)
+    go_to_row("filter")
     for _ in range(5):                                    # make it "ranked match"
-        if "CLASSIF" in read_row(1).upper():
+        if "CLASSIF" in read_row("filter").upper():
             break
         ggst.keys("d", 300)
         time.sleep(0.6)
     else:
         raise SystemExit("could not set the search filter to 'ranked match'")
     # Highest to the top first so the lowest can move freely, then the real range.
-    ggst.keys("s s", 250)
-    time.sleep(0.4)
-    set_rank(3, len(RANKS) - 1)
-    ggst.keys("w", 250)
-    time.sleep(0.4)
-    rank_lo = set_rank(2, lo)
-    ggst.keys("s", 250)
-    time.sleep(0.4)
-    rank_hi = set_rank(3, hi)
-    ggst.keys("s s s", 250)                               # row 6: character 1
-    time.sleep(0.4)
+    go_to_row("rank_hi")
+    set_rank("rank_hi", len(RANKS) - 1)
+    go_to_row("rank_lo")
+    rank_lo = set_rank("rank_lo", lo)
+    go_to_row("rank_hi")
+    rank_hi = set_rank("rank_hi", hi)
+    go_to_row("char1")
     if step_char:
         ggst.keys("d", 300)
         time.sleep(0.8)
-    name = read_row(6)
+    name = read_row("char1")
     if target:                                            # resume: step until it shows target
+        seen = []
         for _ in range(45):
             if norm(name) == norm(target):
                 break
             ggst.keys("d", 300)
             time.sleep(0.8)
-            name = read_row(6)
+            name = read_row("char1")
+            seen.append(name)
         else:
-            raise SystemExit(f"could not find character '{target}' in the filter")
-    ggst.keys("s s s s s s", 200)                         # row 12: close
-    time.sleep(0.5)
+            raise SystemExit(f"could not find character '{target}' in the filter (read: {seen})")
+    go_to_row("close")
     ggst.keys("u", 300)
     time.sleep(1.5)
     if nav.score("filter_confirm", CONFIRM_BOX) < 10:      # "apply the changed filter?" -> Yes
@@ -146,7 +170,9 @@ def set_filters(step_char, lo, hi, target=None):
 
 
 def norm(name):
-    return "".join(ch for ch in (name or "").lower() if ch.isalnum())
+    """Name as compared: letters and digits only, OCR look-alikes folded ('Jack-0')."""
+    s = "".join(ch for ch in (name or "").lower() if ch.isalnum())
+    return s.translate(str.maketrans("015", "ols"))
 
 
 SEARCH_START = (490, 310, 1430, 420)     # first visit: "set search conditions" with "Start search" highlighted
@@ -222,6 +248,8 @@ def restart_game():
 def go_to_search():
     """Fresh game at the title -> Replay room -> Search tab results (no-op if already there)."""
     if nav.score("search_list", SEARCH_HEADER) < 10 and nav.score("search_start", SEARCH_START) >= 12:
+        return
+    if nav.score("filter_menu", FILTER_TITLE) < 10:       # filter menu open: set_filters goes on
         return
     nav.to_main()
     ggst.keys("d d d d d d", 300)

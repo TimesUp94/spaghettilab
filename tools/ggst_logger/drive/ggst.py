@@ -55,28 +55,65 @@ def _send(scan: int, up: bool) -> None:
     user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
     global _sent_tick
     _sent_tick = kernel32.GetTickCount()
+    _sent.append(_sent_tick)
+    del _sent[:-200]
 
 
 kernel32 = ctypes.WinDLL("kernel32")
 kernel32.GetTickCount.restype = wt.DWORD
 _sent_tick = 0
-USER_QUIET_S = 60       # someone else's keyboard/mouse input pauses the driver this long
+_sent = []             # GetTickCount of our recent SendInput calls
+USER_QUIET_S = 60       # look this far back for someone else's keyboard/mouse input
+USER_EVENTS = 3         # this many separate inputs in that time = someone is at the PC
+# A lone input now and then is not a person: some program on this PC sends one exactly
+# every 50 s (2026-10-26), which a plain "no input for 60 s" check never gets past.
 
 
 class _LASTINPUTINFO(ctypes.Structure):
     _fields_ = [("cbSize", wt.UINT), ("dwTime", wt.DWORD)]
 
 
-def wait_user_idle() -> None:
-    """Wait while someone else is using the PC: input newer than our own last key press
-    (SendInput also counts as input) within USER_QUIET_S."""
-    said = False
+_inputs = []            # GetTickCount of each input change seen that was not ours
+_watch_t0 = None
+
+
+def _near_ours(tick: int) -> bool:
+    """Input stamped within a second of one of our SendInput calls (either side: the
+    event is stamped before _send records the time, and the watcher may see it late)."""
+    for t in reversed(_sent):
+        d = (tick - t) & 0xFFFFFFFF
+        if d <= 1000 or d >= 0xFFFFFFFF - 1000:
+            return True
+    return False
+
+
+def _watch() -> None:
+    last = None
     while True:
         li = _LASTINPUTINFO(ctypes.sizeof(_LASTINPUTINFO), 0)
         user32.GetLastInputInfo(ctypes.byref(li))
+        # SendInput also counts as input: skip changes within a second of our own keys
+        if li.dwTime != last and last is not None and not _near_ours(li.dwTime):
+            _inputs.append(li.dwTime)
+            del _inputs[:-50]
+        last = li.dwTime
+        time.sleep(0.1)
+
+
+def wait_user_idle() -> None:
+    """Wait while someone else is using the PC: USER_EVENTS separate inputs (not ours)
+    within USER_QUIET_S. Watches input in a thread; the first call watches 10 s first."""
+    global _watch_t0
+    if _watch_t0 is None:
+        import threading
+        threading.Thread(target=_watch, daemon=True).start()
+        _watch_t0 = time.time()
+    time.sleep(max(0.0, _watch_t0 + 10 - time.time()))
+    said = False
+    while True:
         now = kernel32.GetTickCount()
-        theirs = (li.dwTime - _sent_tick) & 0xFFFFFFFF > 1000 and (li.dwTime - _sent_tick) & 0xFFFFFFFF < 0x80000000
-        if not theirs or (now - li.dwTime) & 0xFFFFFFFF >= USER_QUIET_S * 1000:
+        recent = [t for t in _inputs if (now - t) & 0xFFFFFFFF < USER_QUIET_S * 1000]
+        if len(recent) < USER_EVENTS:
             return
         if not said:
             print("  someone is using the PC; waiting for them to stop", flush=True)
