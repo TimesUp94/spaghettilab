@@ -146,7 +146,7 @@ def _add(char, table):
 
 
 _add("Asuka", {
-    # which spell was cast is not in the action name (see SPELL_NOTE)
+    # which spell was cast is not in the action name: the spell's object is (ASUKA_SPELLS)
     "Magic": ("spell", "spell (236X)", SPECIAL, "proj"),
     "Magic_air": ("j.spell", "spell (j.236X)", SPECIAL, "proj"),
     "Draw_or_Discard": ("214X", "Draw/Discard", OTHER, "nonattack"),
@@ -703,10 +703,46 @@ _add("Robo-Ky", {  # ABS_Special_01-06 = Dustloop order; 02/06 have air versions
     "ABS_Special_06_Air": ("j.236H", "Air Beautiful S-KY Today", SPECIAL, "inferred"),
 })
 
-SPELL_NOTE = ("Asuka's spell identity is not in p*_act (always Magic / Magic_air). Candidates for "
-              "the logger: the spell projectile object's own action name (spawned entities have "
-              "their own state names, e.g. the spell's internal name), or Asuka's hand/deck "
-              "slots in her player struct (the cast slot index at the Magic frame).")
+SPELL_NOTE = ("Asuka's spell identity is not in p*_act (always Magic / Magic_air, cast animation "
+              "ask400/401 or ask402/403 in p*_sprite, shared by several spells). The spell's pool "
+              "object is: AttackMagic_NN (_start appears 2 frames into the cast) -> ASUKA_SPELLS.")
+
+# Asuka's attack spells: pool object AttackMagic_NN -> (name, flags). The numbers follow the
+# order of the attack spells on Dustloop's frame data; checked on the research logs (ggst_proj,
+# 44-46 and 2002) by the frame the object first appears against Dustloop's startup (_start at
+# cast +2; the attack object on the startup frame) and by its behaviour:
+#   01 attack at +10 (startup 11), one fast object (25 px/f)
+#   02 +20 (21), fast then nearly still (1.2 px/f)
+#   03 three objects at +15/+20/+25 (16, 21, 26), straight / up / down: MS Processing's order
+#   04 +11 (12), 1 frame just ahead of Asuka (effect ASK_magic1_near), wall splat in the corner
+#   06 +20 (21), slow (1.2-2.5 px/f), out ~45-60 frames
+#   08 _start at the opponent's x, hits at +18 (19), ground bounce: Accipiter's homing overhead
+#   10 +13 (14), AttackMagic_10_TimeCount always out (the bookmark level timer), one extra
+#      cube 10 frames apart per level (_start_ex)
+# inferred: 05 main object at +30 (startup 31), seen once, never hit; 07 (ground, _start
+# only, ends at +16) and 11 (_start only) by the numbering alone. Not seen: 09 (Aquila Metron
+# by the order). Generic (left as 'spell'): AttackMagic_Empty (44 frames, still, 450 px ahead,
+# also after another spell in the same cast), UniqueMagic_01/02 (cast sprite ask405).
+ASUKA_SPELLS = {
+    "01": ("Howling Metron", "dustloop"),
+    "02": ("Delayed Howling Metron", "dustloop"),
+    "03": ("Howling Metron MS Processing", "dustloop"),
+    "04": ("Metron Screamer 808", "dustloop"),
+    "05": ("Metron Arpeggio", "inferred"),
+    "06": ("Delayed Tardus Metron", "dustloop"),
+    "07": ("Terra Metron", "inferred"),
+    "08": ("Accipiter Metron", "dustloop"),
+    "10": ("Bit Shift Metron", "dustloop"),
+    "11": ("RMS Boost Metron", "inferred"),
+}
+_SPELL_OBJ = re.compile(r"AttackMagic_(\d\d)")
+
+
+def spell_info(obj) -> tuple[str, set] | None:
+    """(spell name, flags) for one of Asuka's spell objects (AttackMagic_03_Main, ..._08_col)."""
+    m = _SPELL_OBJ.match(obj or "")
+    sp = ASUKA_SPELLS.get(m.group(1)) if m else None
+    return (sp[0], set(sp[1].split())) if sp else None
 
 COMMON = {
     "CmnActBurst": ("Burst", "Psych Burst", BURST, set()),
@@ -805,10 +841,17 @@ def classify(row: dict) -> dict:
                     if (m := move_info(char, c)) and "command" in m[3]), None)
         cands = ([cmd] if cmd else []) + [spawn] + list(row.get("hit_object_prior_acts") or [])
         spawn = next((c for c in cands if (m := move_info(char, c)) and "nonattack" not in m[3]), spawn)
+        # Asuka's spell object names the spell; the cast is the newest Magic before it
+        spell = spell_info(row.get("hit_object")) if char == "Asuka" else None
+        if spell:
+            spawn = next((c for c in cands if c in ("Magic", "Magic_air")), "Magic")
         smi = move_info(char, spawn)
         if smi:
             mi, act, src = smi, spawn, "object"
             nota, name, cat, flags = smi
+            if spell:
+                name, flags = spell[0], flags | spell[1]
+                nota = ("j." if spawn == "Magic_air" else "") + name
             # a special's object is a projectile even while its move lasts (Venom's struck
             # ball, Dizzy's chestnut); a normal's detached hitbox (j.D) only once it is over
             if cat == SPECIAL or (spawn != row.get("attacker_act") and cat not in (SUPER, BURST, THROW)):
@@ -863,7 +906,8 @@ if __name__ == "__main__":       # write moves.json: the mapping table + coverag
            "common": {k: list(v[:3]) for k, v in COMMON.items()},
            "moves": {ch: {a: {"notation": v[0], "name": v[1], "category": v[2], "flags": sorted(v[3])}
                           for a, v in t.items()} for ch, t in M.items()},
-           "asuka_spell_note": SPELL_NOTE}
+           "asuka_spell_note": SPELL_NOTE,
+           "asuka_spells": {"AttackMagic_" + k: {"name": v[0], "flags": v[1].split()} for k, v in ASUKA_SPELLS.items()}}
     pq_path = Path(sys.argv[1]) if len(sys.argv) > 1 else None
     if pq_path:
         import pyarrow.parquet as pq

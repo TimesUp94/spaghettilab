@@ -2754,6 +2754,7 @@
     "name": "Pierce",
     "category": "special",
     "flags": [
+     "command",
      "inferred",
      "proj"
     ]
@@ -2763,6 +2764,7 @@
     "name": "That's a lot",
     "category": "special",
     "flags": [
+     "command",
      "inferred",
      "proj"
     ]
@@ -2772,6 +2774,7 @@
     "name": "Leap",
     "category": "special",
     "flags": [
+     "command",
      "inferred",
      "proj"
     ]
@@ -2781,6 +2784,7 @@
     "name": "Oppose",
     "category": "special",
     "flags": [
+     "command",
      "inferred",
      "proj"
     ]
@@ -2790,6 +2794,7 @@
     "name": "Eddie command (unresolved P/K/S/H)",
     "category": "special",
     "flags": [
+     "command",
      "inferred",
      "proj"
     ]
@@ -2908,6 +2913,7 @@
     "name": "Throw Servant",
     "category": "special",
     "flags": [
+     "command",
      "inferred",
      "proj"
     ]
@@ -2917,6 +2923,7 @@
     "name": "Air Throw Servant",
     "category": "special",
     "flags": [
+     "command",
      "inferred",
      "proj"
     ]
@@ -2926,6 +2933,7 @@
     "name": "Attack Command",
     "category": "special",
     "flags": [
+     "command",
      "inferred",
      "proj"
     ]
@@ -2935,6 +2943,7 @@
     "name": "Air Attack Command",
     "category": "special",
     "flags": [
+     "command",
      "inferred",
      "proj"
     ]
@@ -2944,6 +2953,7 @@
     "name": "Defend Command",
     "category": "special",
     "flags": [
+     "command",
      "inferred",
      "proj"
     ]
@@ -2953,6 +2963,7 @@
     "name": "Countdown",
     "category": "special",
     "flags": [
+     "command",
      "inferred",
      "proj"
     ]
@@ -2962,6 +2973,7 @@
     "name": "Servant Shoot",
     "category": "special",
     "flags": [
+     "command",
      "inferred",
      "proj"
     ]
@@ -3023,6 +3035,7 @@
     "name": "Attack Command (held Servant)",
     "category": "special",
     "flags": [
+     "command",
      "inferred",
      "proj"
     ]
@@ -3032,6 +3045,7 @@
     "name": "Servant Shoot (held Servant)",
     "category": "special",
     "flags": [
+     "command",
      "inferred",
      "proj"
     ]
@@ -3196,6 +3210,7 @@
     "name": "Unholy Diver",
     "category": "special",
     "flags": [
+     "command",
      "inferred",
      "proj"
     ]
@@ -4394,5 +4409,67 @@
    }
   }
  },
- "asuka_spell_note": "Asuka's spell identity is not in p*_act (always Magic / Magic_air). Candidates for the logger: the spell projectile object's own action name (spawned entities have their own state names, e.g. the spell's internal name), or Asuka's hand/deck slots in her player struct (the cast slot index at the Magic frame)."
+ "asuka_spell_note": "Asuka's spell identity is not in p*_act (always Magic / Magic_air, cast animation ask400/401 or ask402/403 in p*_sprite, shared by several spells). The spell's pool object is: AttackMagic_NN (_start appears 2 frames into the cast) -> ASUKA_SPELLS.",
+ "asuka_spells": {
+  "AttackMagic_01": {
+   "name": "Howling Metron",
+   "flags": [
+    "dustloop"
+   ]
+  },
+  "AttackMagic_02": {
+   "name": "Delayed Howling Metron",
+   "flags": [
+    "dustloop"
+   ]
+  },
+  "AttackMagic_03": {
+   "name": "Howling Metron MS Processing",
+   "flags": [
+    "dustloop"
+   ]
+  },
+  "AttackMagic_04": {
+   "name": "Metron Screamer 808",
+   "flags": [
+    "dustloop"
+   ]
+  },
+  "AttackMagic_05": {
+   "name": "Metron Arpeggio",
+   "flags": [
+    "inferred"
+   ]
+  },
+  "AttackMagic_06": {
+   "name": "Delayed Tardus Metron",
+   "flags": [
+    "dustloop"
+   ]
+  },
+  "AttackMagic_07": {
+   "name": "Terra Metron",
+   "flags": [
+    "inferred"
+   ]
+  },
+  "AttackMagic_08": {
+   "name": "Accipiter Metron",
+   "flags": [
+    "dustloop"
+   ]
+  },
+  "AttackMagic_10": {
+   "name": "Bit Shift Metron",
+   "flags": [
+    "dustloop"
+   ]
+  },
+  "AttackMagic_11": {
+   "name": "RMS Boost Metron",
+   "flags": [
+    "inferred"
+   ]
+  }
+ }
 }
