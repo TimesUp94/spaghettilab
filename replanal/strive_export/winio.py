@@ -1,9 +1,12 @@
 """Keyboard input to the Strive window and its geometry (Windows only).
 
-Keys are sent with SendInput as hardware scan codes, which the game reads
-whatever the keyboard layout. Input only goes out while the Strive window is
-the foreground window: :func:`press` brings it forward and refuses to type
-into anything else.
+Keys are hardware scan codes, which the game reads whatever the keyboard
+layout. By default :func:`press` posts them to the Strive window as
+WM_KEYDOWN/WM_KEYUP: the game takes them while it is in the background, and
+they can only reach its window, so the PC stays usable during an export. With
+``background=False`` it uses SendInput instead, which types into whatever
+window is in front: it brings Strive forward first and refuses to type into
+anything else.
 
 Importing this module is safe on any OS; calling into it off Windows raises.
 """
@@ -28,6 +31,7 @@ SCAN = {
 }
 
 INPUT_KEYBOARD, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_EXTENDEDKEY = 1, 2, 8, 1
+WM_KEYDOWN, WM_KEYUP, MAPVK_VSC_TO_VK_EX = 0x0100, 0x0101, 3
 ALT = 0x38
 
 
@@ -67,6 +71,9 @@ def _u32():
             _fields_ = [("type", wt.DWORD), ("u", _U)]
 
         _structs = (KEYBDINPUT, INPUT)
+        # LPARAM is pointer-sized: a key-up's bits 30-31 don't fit a C int.
+        _user32.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+        _user32.PostMessageW.restype = wt.BOOL
     return _user32
 
 
@@ -81,8 +88,43 @@ def send_scan(scan: int, up: bool) -> None:
     u.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
 
 
+def key_lparam(scan: int, up: bool) -> int:
+    """WM_KEYDOWN/WM_KEYUP lParam: repeat count 1, the scan code, the extended
+    flag for E0 keys, and for a key-up the previous-state and transition bits."""
+    return 1 | (scan & 0xFF) << 16 | (1 << 24 if scan > 0xFF else 0) | (3 << 30 if up else 0)
+
+
+def post_scan(hwnd: int, scan: int, up: bool) -> None:
+    """A key message to the game window only: it never reaches the app in front."""
+    u = _u32()
+    vk = u.MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX)
+    if not u.PostMessageW(hwnd, WM_KEYUP if up else WM_KEYDOWN, vk, key_lparam(scan, up)):
+        raise FocusError("could not post a key to the Strive window")
+
+
+def _window_exe(hwnd) -> str:
+    """The file name (no extension) of the process that owns ``hwnd``, or ""."""
+    import ctypes.wintypes as wt
+    pid = wt.DWORD()
+    _u32().GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = wt.HANDLE
+    h = k32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return ""
+    try:
+        buf, n = ctypes.create_unicode_buffer(1024), wt.DWORD(1024)
+        if not k32.QueryFullProcessImageNameW(wt.HANDLE(h), 0, buf, ctypes.byref(n)):
+            return ""
+        return buf.value.replace("/", "\\").rsplit("\\", 1)[-1].rsplit(".", 1)[0]
+    finally:
+        k32.CloseHandle(wt.HANDLE(h))
+
+
 def find_window() -> int:
-    """The Strive window handle (visible, title contains GUILTY GEAR), or 0."""
+    """The Strive window handle (visible, title contains GUILTY GEAR, owned by
+    the game's process), or 0. The process check keeps keys out of a browser
+    tab or video player whose title names the game."""
     import ctypes.wintypes as wt
     u = _u32()
     found = []
@@ -91,7 +133,8 @@ def find_window() -> int:
     def cb(hwnd, _):
         buf = ctypes.create_unicode_buffer(256)
         u.GetWindowTextW(hwnd, buf, 256)
-        if u.IsWindowVisible(hwnd) and "GUILTY GEAR" in buf.value.upper():
+        if (u.IsWindowVisible(hwnd) and "GUILTY GEAR" in buf.value.upper()
+                and _window_exe(hwnd).lower() == GAME_EXE.lower()):
             found.append(hwnd)
         return True
 
@@ -121,19 +164,31 @@ def focus(verify: bool = False, tries: int = 3) -> int:
     return hwnd
 
 
-def press(seq: str, gap_ms: int = 150, verify_focus: bool = False) -> None:
-    """Press keys in order: "u", "s s s", "a+s:100" (hold a and s for 100 ms)."""
-    focus(verify=verify_focus)
+def press(seq: str, gap_ms: int = 150, verify_focus: bool = False,
+          background: bool = True) -> None:
+    """Press keys in order: "u", "s s s", "a+s:100" (hold a and s for 100 ms).
+
+    ``background``: post them to the Strive window (it may stay behind other
+    windows). Otherwise bring it forward and use SendInput; with
+    ``verify_focus``, refuse to type when it is not the foreground window."""
+    if background:
+        hwnd = find_window()
+        if not hwnd:
+            raise FocusError("Strive window not found: is the game running?")
+        down, up = (lambda c: post_scan(hwnd, c, False)), (lambda c: post_scan(hwnd, c, True))
+    else:
+        focus(verify=verify_focus)
+        down, up = (lambda c: send_scan(c, False)), (lambda c: send_scan(c, True))
     for tok in seq.split():
         name, _, ms = tok.partition(":")
         codes = [SCAN[k] for k in name.split("+")]
-        if verify_focus and _u32().GetForegroundWindow() != find_window():
+        if not background and verify_focus and _u32().GetForegroundWindow() != find_window():
             raise FocusError("the Strive window lost focus; not sending keys")
         for c in codes:
-            send_scan(c, False)
+            down(c)
         time.sleep(int(ms or 60) / 1000)
         for c in reversed(codes):
-            send_scan(c, True)
+            up(c)
         time.sleep(gap_ms / 1000)
 
 

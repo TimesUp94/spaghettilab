@@ -766,3 +766,106 @@ def test_cli_fails_clearly_off_windows(monkeypatch, capsys):
     line = capsys.readouterr().out.strip().splitlines()[-1]
     msg = json.loads(line)
     assert msg["event"] == "error" and "Windows only" in msg["message"]
+
+
+# ── key input ────────────────────────────────────────────────────────────────
+
+class FakeUser32:
+    """Records what winio asks of user32; nothing reaches a real window."""
+
+    def __init__(self, fg=0):
+        self.calls, self.fg = [], fg
+
+    def MapVirtualKeyW(self, scan, kind):
+        assert kind == 3
+        return {0x16: 0x55, 0x1F: 0x53, 0xE048: 0x26}[scan]   # U, S, Up
+
+    def PostMessageW(self, hwnd, msg, vk, lp):
+        self.calls.append(("post", hwnd, msg, vk, lp))
+        return 1
+
+    def SendInput(self, *a):
+        self.calls.append(("sendinput",))
+
+    def SetForegroundWindow(self, hwnd):
+        self.calls.append(("setfg", hwnd))
+
+    def GetForegroundWindow(self):
+        return self.fg
+
+    def IsIconic(self, hwnd):
+        return False
+
+
+def _fake_winio(monkeypatch, fg=0):
+    from replanal.strive_export import winio
+    u = FakeUser32(fg)
+    monkeypatch.setattr(winio, "_u32", lambda: u)
+    monkeypatch.setattr(winio, "find_window", lambda: 42)
+    monkeypatch.setattr(winio.time, "sleep", lambda s: None)
+    return winio, u
+
+
+def test_background_keys_are_posted_to_the_game_window_only(monkeypatch):
+    winio, u = _fake_winio(monkeypatch, fg=7)   # another app is in front
+    winio.press("u s:100 up", verify_focus=True)
+    assert all(c[0] == "post" and c[1] == 42 for c in u.calls), u.calls   # no SendInput, no focus
+    msgs = [(m, vk, lp) for _, _, m, vk, lp in u.calls]
+    assert msgs == [
+        (0x100, 0x55, 0x00160001), (0x101, 0x55, 0xC0160001),
+        (0x100, 0x53, 0x001F0001), (0x101, 0x53, 0xC01F0001),
+        (0x100, 0x26, 0x01480001), (0x101, 0x26, 0xC1480001),   # extended: bit 24
+    ]
+
+
+def test_background_keys_need_the_game_window(monkeypatch):
+    winio, u = _fake_winio(monkeypatch)
+    monkeypatch.setattr(winio, "find_window", lambda: 0)
+    with pytest.raises(winio.FocusError):
+        winio.press("u")
+    assert u.calls == []
+
+
+def test_foreground_keys_refuse_another_window_in_front(monkeypatch):
+    winio, u = _fake_winio(monkeypatch, fg=7)
+    monkeypatch.setattr(winio, "send_scan", lambda c, up: u.calls.append(("scan", c, up)))
+    with pytest.raises(winio.FocusError):
+        winio.press("u", verify_focus=True, background=False)
+    keys = lambda: [c for c in u.calls if c[0] == "post" or (c[0] == "scan" and c[1] != winio.ALT)]
+    assert keys() == []          # only focus()'s Alt taps went out
+    u.fg = 42
+    winio.press("u", verify_focus=True, background=False)
+    assert keys() == [("scan", 0x16, False), ("scan", 0x16, True)]
+
+
+def test_live_game_posts_keys_unless_foreground(monkeypatch):
+    from replanal.strive_export.__main__ import LiveGame, parse_args
+    from replanal.strive_export import winio
+    seen = []
+    monkeypatch.setattr(winio, "press", lambda key, **kw: seen.append((key, kw["background"])))
+    assert parse_args(["--out", "x", "--count", "1"]).foreground is False
+    assert parse_args(["--out", "x", "--count", "1", "--foreground"]).foreground is True
+    LiveGame(cap=None).press("u")
+    LiveGame(cap=None, background=False).press("u")
+    assert seen == [("u", True), ("u", False)]
+
+
+def test_find_window_skips_other_apps_named_after_the_game(monkeypatch):
+    from replanal.strive_export import winio
+    titles = {1: "GUILTY GEAR -STRIVE- Sol combos - YouTube", 2: "Guilty Gear -Strive-  "}
+    exes = {1: "chrome", 2: "GGST-Win64-Shipping"}
+
+    class U:
+        def EnumWindows(self, cb, _):
+            for h in titles:
+                cb(h, 0)
+
+        def GetWindowTextW(self, h, buf, n):
+            buf.value = titles[h]
+
+        def IsWindowVisible(self, h):
+            return True
+
+    monkeypatch.setattr(winio, "_u32", lambda: U())
+    monkeypatch.setattr(winio, "_window_exe", lambda h: exes[h])
+    assert winio.find_window() == 2

@@ -7,8 +7,9 @@
     python -m replanal.strive_export classify shot.png ...
 
 Start with the game running at the title screen (or main menu), keyboard
-controls. The exporter takes over the game window: don't use the keyboard
-while it runs. See docs/strive-export.md.
+controls. Keys are posted to the game window, which may stay in the
+background (--foreground: bring it to the front and type with SendInput; then
+don't use the keyboard while it runs). See docs/strive-export.md.
 """
 from __future__ import annotations
 
@@ -87,6 +88,9 @@ def build_parser() -> argparse.ArgumentParser:
     ex.add_argument("--fps", type=int, default=60)
     ex.add_argument("--encoder", choices=["h264_nvenc", "h264_mf", "libx264"], help="try this encoder first")
     ex.add_argument("--max-minutes", type=float, default=15, help="longest replay to record")
+    ex.add_argument("--foreground", action="store_true",
+                    help="bring the game to the front and type with SendInput instead of posting "
+                         "keys to its window in the background")
     _common(ex)
 
     cal = sub.add_parser("calibrate", help="capture reference screens for another UI language")
@@ -130,13 +134,15 @@ def _capture(args, need_encoder: bool, emit, fps: int = 60, prefer=None):
 
 
 class LiveGame:
-    """The real game: FFmpeg captures plus scan-code key presses."""
+    """The real game: FFmpeg captures plus scan-code key presses, posted to
+    its window (``background``) or typed into it in front."""
 
-    def __init__(self, cap, max_seconds: int = 930):
+    def __init__(self, cap, max_seconds: int = 930, background: bool = True):
         from . import winio
         self.cap = cap
         self.winio = winio
         self.max_seconds = max_seconds
+        self.background = background
 
     def grab(self):
         if self.cap.method == "ddagrab":
@@ -149,7 +155,7 @@ class LiveGame:
     def press(self, key: str) -> None:
         from .exporter import ExportError
         try:
-            self.winio.press(key, gap_ms=150, verify_focus=True)
+            self.winio.press(key, gap_ms=150, verify_focus=True, background=self.background)
         except self.winio.FocusError as e:
             raise ExportError(f"{e}. Not sending keys; stopping.") from e
 
@@ -208,7 +214,7 @@ def cmd_export(args, emit) -> int:
         raise RuntimeError("--since needs OCR; drop --no-ocr")
 
     cap = _capture(args, need_encoder=not args.dry_run, emit=emit, fps=args.fps, prefer=args.encoder)
-    game = LiveGame(cap, max_seconds=int(args.max_minutes * 60) + 30)
+    game = LiveGame(cap, max_seconds=int(args.max_minutes * 60) + 30, background=not args.foreground)
     out = os.path.abspath(args.out)
     opts = Options(out_dir=out, count=None if args.all else args.count, since=since, start=args.start,
                    dry_run=args.dry_run, skip_existing=not args.overwrite,
@@ -220,7 +226,7 @@ def cmd_export(args, emit) -> int:
         _watch_stdin(cancel, emit)
     _watch_ctrl_c(cancel, emit)
     emit("start", out=out, count=opts.count, since=since.isoformat() if since else None,
-         start=args.start, dry_run=args.dry_run)
+         start=args.start, dry_run=args.dry_run, input="foreground" if args.foreground else "background")
     Exporter(game, classifier, reader, opts, emit=emit, cancel=cancel).run()
     return 0
 

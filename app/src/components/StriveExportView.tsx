@@ -271,12 +271,14 @@ export function StriveExportView({ onComplete, onCancel }: Props) {
                     menu), set to <b>keyboard controls</b> (U confirm, W A S D move, K / L switch tabs).
                   </li>
                   <li>
-                    Spaghetti Lab <b>takes control of the game window</b>: it brings it to the front, presses
-                    keys, opens Collection &gt; Replay &gt; Saved replays and plays each replay while recording it.
+                    Spaghetti Lab <b>drives the game window</b>: it sends keys to it, opens Collection &gt; Replay
+                    &gt; Saved replays and plays each replay while recording it. The game can stay behind other
+                    windows.
                   </li>
                   <li>
-                    <b>Don't use the keyboard or mouse</b> until the export finishes. Replays record in real time
-                    (about 3 minutes each).
+                    You can keep using the PC, but <b>don't click into the game, type in it or minimise it</b>{" "}
+                    until the export finishes. Replays record in real time (about 3 minutes each). Without FFmpeg
+                    8+ (window capture) the game has to stay in front, so leave the PC alone then.
                   </li>
                   <li>
                     It only ever confirms "View replay" and "Back to the replay list"; anything it doesn't
@@ -386,7 +388,7 @@ export function StriveExportView({ onComplete, onCancel }: Props) {
                   onChange={(e) => setAcknowledged(e.target.checked)}
                   className="accent-accent-purple mt-0.5"
                 />
-                The game is at the title screen with keyboard controls, and I won't use the keyboard while it
+                The game is at the title screen with keyboard controls, and I won't use the game while it
                 exports.
               </label>
 
@@ -414,7 +416,7 @@ export function StriveExportView({ onComplete, onCancel }: Props) {
                       ? "Stopping after the current replay..."
                       : stopping === "hard"
                         ? "Stopping..."
-                        : "Exporting - don't touch the keyboard"}
+                        : "Exporting - don't use the game window"}
                   </div>
                   <div className="text-[11px] text-text-muted truncate">{status}</div>
                   {captureInfo && <div className="text-[10px] text-text-muted">{captureInfo}</div>}
