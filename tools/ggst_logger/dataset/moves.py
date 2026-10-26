@@ -777,6 +777,11 @@ def notation(act: str, char: str = "") -> str:
     return act
 
 
+# Objects whose move the attacker's action doesn't show: Happy Chaos fires during Roll
+# and while moving in At the Ready (Dustloop), his action staying Roll / dash.
+OBJECT_MOVES = {("Happy Chaos", "ShootingObj"): "HoldGunAtk"}
+
+
 def classify(row: dict) -> dict:
     """Clean move fields for one opener row (build.py extract_openers + attacker_char).
 
@@ -789,7 +794,7 @@ def classify(row: dict) -> dict:
     act = row["move_act"]
     mi = move_info(char, act)
     src = "action"
-    spawn = row.get("hit_object_spawn_act")
+    spawn = OBJECT_MOVES.get((char, row.get("hit_object"))) or row.get("hit_object_spawn_act")
     if spawn:
         # logged hit source (logger p*_hitby): a pool object of the attacker hit, made by
         # `spawn`; a projectile when the attacker is no longer in that move
