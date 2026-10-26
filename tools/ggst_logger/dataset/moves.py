@@ -786,7 +786,8 @@ def classify(row: dict) -> dict:
     """Clean move fields for one opener row (build.py extract_openers + attacker_char).
 
     With the logged hit source (hit_logged): an object hit takes the move that made the object
-    (category 'projectile' once the attacker has moved on), a direct hit the current action.
+    (category 'projectile' once the attacker has moved on), a direct hit the current action
+    unless that is not an attack.
     Older logs: the hitting move is the attacker's current action unless that is not an attack
     (moving, guarding, Asuka drawing cards, Leo backturn walk ...): then a projectile/object
     from the attacker's last attack hit, and the move is that attack (category 'projectile')."""
@@ -811,9 +812,9 @@ def classify(row: dict) -> dict:
             if spawn != row.get("attacker_act") and cat not in (SUPER, BURST, THROW):
                 cat = PROJ
             return _fields(char, act, src, (nota, name, cat, flags))
-    if row.get("hit_logged"):
-        mi = mi or ("", act, OTHER, {"unmapped"})   # logged direct hit: the current action is the move
-    elif (mi is None or "nonattack" in mi[3]) and act not in ("CmnActBurst",):
+    # a direct hit from a non-attack (dash, crouch-to-stand) is still credited to the last
+    # attack: the hit-by field is set on the HP-drop frame, which can trail the move
+    if (mi is None or "nonattack" in mi[3]) and act not in ("CmnActBurst",):
         la = row.get("last_real_attack_act") or row.get("last_attack_act") or ""
         lmi = move_info(char, la) if la else None
         if lmi and "nonattack" not in lmi[3]:
