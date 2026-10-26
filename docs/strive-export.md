@@ -4,13 +4,13 @@
 
 It needs no game mod. The research prototype in `tools/ggst_logger/drive/` (which uses the logger mod to know when a replay starts) is separate and unchanged.
 
-Windows only: it uses SendInput for keys and Windows capture APIs. Elsewhere it fails with a clear message.
+Windows only: it uses Windows key messages and capture APIs. Elsewhere it fails with a clear message.
 
 ## Usage
 
 ```bash
 # Game running at the title screen (or main menu), keyboard controls
-# (U confirm, W A S D move, K / L switch tabs). Don't touch the keyboard while it runs.
+# (U confirm, W A S D move, K / L switch tabs). The game can stay in the background.
 python -m replanal.strive_export --out D:\strive --count 10       # the 10 newest replays
 python -m replanal.strive_export --out D:\strive --since today    # today's replays
 python -m replanal.strive_export --out D:\strive --since 2026-10-20
@@ -23,7 +23,7 @@ python -m replanal.strive_export classify shot.png ...   # classify saved screen
 python -m replanal.strive_export calibrate --lang en     # record reference screens for another UI language
 ```
 
-Other `export` options: `--json-progress` (machine-readable events, see below), `--no-ocr`, `--overwrite`, `--date-order DMY|MDY|YMD`, `--fps` (default 60), `--encoder`, `--max-minutes` (default 15), `--lang`, `--refs-dir`, `--ffmpeg`.
+Other `export` options: `--json-progress` (machine-readable events, see below), `--no-ocr`, `--overwrite`, `--date-order DMY|MDY|YMD`, `--fps` (default 60), `--encoder`, `--max-minutes` (default 15), `--foreground` (see [Key input](#key-input)), `--lang`, `--refs-dir`, `--ffmpeg`.
 
 Ctrl+C once stops after the replay being recorded (back on the list); twice stops at once, finalising the current file.
 
@@ -64,7 +64,14 @@ A key is pressed only right after the screen was recognised, and only a key on t
 | end-of-replay menu | `U` only with item 0 ("Back to the replay list") highlighted and 3 items |
 | anything else | nothing |
 
-Ranked matchmaking (the main menu's first tab, where `U` starts matchmaking) and "Delete replay" (item 3 of the entry menu) are therefore never confirmed. The cursor is never moved inside the entry menu. If an entry menu is already open when the export starts, it stops and asks the user to close it. Keys go out only while the Strive window is the foreground window (`winio.press(verify_focus=True)`); if it loses focus, the export stops.
+Ranked matchmaking (the main menu's first tab, where `U` starts matchmaking) and "Delete replay" (item 3 of the entry menu) are therefore never confirmed. The cursor is never moved inside the entry menu. If an entry menu is already open when the export starts, it stops and asks the user to close it. The allow-list is checked before every key whichever way it is sent (below).
+
+### Key input
+
+Keys are hardware scan codes (`winio.SCAN`), so the keyboard layout doesn't matter.
+
+- **Background (default):** each key is posted to the Strive window as `WM_KEYDOWN`/`WM_KEYUP` (`winio.post_scan`; virtual key from `MapVirtualKeyW`, scan code and extended flag in `lParam`). Strive takes them while another window is in front, and plays replays at full speed there (checked with the research driver, commit 54c22bd: a 6006-frame replay recorded unfocused gave 5992 video frames). The keys can only reach the game window, so the PC stays usable during an export: use other apps, but don't click into the game or type in it, and don't minimise it (a minimised window isn't rendered or captured). With screen capture (`ddagrab`, below) the window is still brought to the front before each screenshot, so the PC is not usable then.
+- **Foreground (`--foreground`):** the old path. Strive is brought to the front (an Alt tap, then `SetForegroundWindow`) and keys are typed with SendInput. They go out only while the Strive window is the foreground window (`winio.press(verify_focus=True)`); if it loses focus, the export stops. Use it if the background keys are ignored (a game update, or a mod that reads input differently). Don't use the keyboard while it runs.
 
 ## Screen recognition and UI language
 
@@ -122,7 +129,7 @@ One JSON object per stdout line, each with an `event` field:
 | event | fields |
 |---|---|
 | `ffmpeg` | `path, version, capture, encoder` |
-| `start` | `out, count, since, start, dry_run` |
+| `start` | `out, count, since, start, dry_run, input` (`background` or `foreground`) |
 | `screen` | `screen, detail, lang` (only when it changes) |
 | `status` / `warning` / `error` | `message` |
 | `list` | `total` (the "100 / 100" counter, when read) |
@@ -143,6 +150,7 @@ With `--json-progress` the exporter reads stdin. A `cancel` line stops it after 
 - **Perturbations:** brightness, noise, JPEG, 720p and 1440p windows, blur.
 - **Language independence:** labels repainted with other words are still recognised with `auto`, and rejected with `--lang it`.
 - **Highlight on a different item:** the entry menu's highlight moved to "Delete" is never confirmed.
+- **Key input** on a fake user32: background keys are only posted to the game window (no SendInput, no focus change; `lParam` bits checked), the foreground path refuses to type while another window is in front, and `--foreground` switches `LiveGame` between them.
 - **Parsing:** dates, times, names and the counter.
 - **FFmpeg and encoder selection**, with a mocked FFmpeg.
 - **The state machine on a simulated game:** a full export, the attract video, swallowed presses, dry run, wrap and end of the list, `--since`, `--start` with skip-existing, starting on the list, soft and hard cancel, and the manifest merge.
