@@ -149,6 +149,7 @@ def set_filters(step_char, lo, hi, target=None):
         time.sleep(0.8)
     name = read_row("char1")
     if target:                                            # resume: step until it shows target
+        target = FILTER_NAMES.get(target, target)
         seen = []
         for _ in range(45):
             if norm(name) == norm(target):
@@ -167,6 +168,10 @@ def set_filters(step_char, lo, hi, target=None):
     time.sleep(8)
     nav.wait_for("search_list", box=SEARCH_HEADER, timeout=60)
     return name, rank_lo, rank_hi
+
+
+# The filter's spelling where it differs from the character's usual name.
+FILTER_NAMES = {"Happy Chaos": "Chaos"}
 
 
 def norm(name):
