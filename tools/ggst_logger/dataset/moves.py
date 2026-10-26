@@ -809,7 +809,9 @@ def classify(row: dict) -> dict:
         if smi:
             mi, act, src = smi, spawn, "object"
             nota, name, cat, flags = smi
-            if spawn != row.get("attacker_act") and cat not in (SUPER, BURST, THROW):
+            # a special's object is a projectile even while its move lasts (Venom's struck
+            # ball, Dizzy's chestnut); a normal's detached hitbox (j.D) only once it is over
+            if cat == SPECIAL or (spawn != row.get("attacker_act") and cat not in (SUPER, BURST, THROW)):
                 cat = PROJ
             return _fields(char, act, src, (nota, name, cat, flags))
     # a direct hit from a non-attack (dash, crouch-to-stand) is still credited to the last
