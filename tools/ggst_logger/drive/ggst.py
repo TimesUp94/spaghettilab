@@ -2,8 +2,10 @@
 
 Usage: python ggst.py shot <out.png>
        python ggst.py keys "<key>[:ms] <key>[:ms] ..." [gap_ms]
-Keys are scan-code names (see SCAN); input goes to the Strive window, which is
-brought to the foreground first. Screenshots use FFmpeg's gfxcapture, so they
+Keys are scan-code names (see SCAN). By default they are posted to the Strive window
+as WM_KEYDOWN/WM_KEYUP, which the game takes while in the background, so the PC stays
+usable; GGST_FOREGROUND=1 brings it to the front and uses SendInput instead (waiting
+while someone else is using the PC). Screenshots use FFmpeg's gfxcapture, so they
 work while the window is covered.
 """
 import ctypes
@@ -152,8 +154,34 @@ def focus() -> None:
     raise SystemExit("could not bring the Strive window to the front; no keys sent")
 
 
+FOREGROUND = os.environ.get("GGST_FOREGROUND") == "1"
+WM_KEYDOWN, WM_KEYUP, MAPVK_VSC_TO_VK_EX = 0x0100, 0x0101, 3
+
+
+def _post(hwnd: int, scan: int, up: bool) -> None:
+    """Key message to the game window only: never reaches the app someone is using."""
+    vk = user32.MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX)
+    lp = 1 | (scan & 0xFF) << 16 | (1 << 24 if scan > 0xFF else 0) | (3 << 30 if up else 0)
+    if not user32.PostMessageW(hwnd, WM_KEYUP if up else WM_KEYDOWN, vk, lp):
+        raise SystemExit("could not post a key to the Strive window")
+
+
 def keys(seq: str, gap_ms: int = 150) -> None:
     """Press keys in order. 'a+s:100' holds a and s together for 100 ms."""
+    if not FOREGROUND:
+        hwnd = find_window()
+        if not hwnd:
+            raise SystemExit("Strive window not found")
+        for tok in seq.split():
+            name, _, ms = tok.partition(":")
+            codes = [SCAN[k] for k in name.split("+")]
+            for c in codes:
+                _post(hwnd, c, False)
+            time.sleep(int(ms or 60) / 1000)
+            for c in reversed(codes):
+                _post(hwnd, c, True)
+            time.sleep(gap_ms / 1000)
+        return
     wait_user_idle()
     focus()
     hwnd = find_window()
