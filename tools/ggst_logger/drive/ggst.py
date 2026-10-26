@@ -221,9 +221,10 @@ def place_window() -> None:
 
 
 def shot(out: str) -> None:
+    # A hung capture would stall the caller's screen checks: time it out (callers retry).
     subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-filter_complex",
                     "gfxcapture=window_exe=GGST-Win64-Shipping:capture_cursor=0,hwdownload,format=bgra",
-                    "-frames:v", "1", out], check=True)
+                    "-frames:v", "1", out], check=True, timeout=30)
 
 
 if __name__ == "__main__":

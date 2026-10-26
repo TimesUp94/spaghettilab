@@ -1,9 +1,10 @@
 """Record Strive's saved replays one after another, with the logger mod running.
 
 For each replay: open it from Replay -> Saved, record the Strive window with
-FFmpeg while the mod writes its per-frame CSV, stop when the CSV stops growing,
-then move to the next entry. Every screen is checked against a reference
-screenshot before a key is pressed (the replay menu also offers "Delete").
+FFmpeg while the mod writes its per-frame CSV, stop when the end-of-replay menu
+shows (or the log says the match is long over), then move to the next entry.
+Every screen is checked against a reference screenshot before a key is pressed
+(the replay menu also offers "Delete").
 
 Usage: python batch.py [--start N] [--count N]
 Writes $GGST_DATA/ggst_rec/manifest.jsonl (one line per replay).
@@ -28,6 +29,14 @@ LIST_HEADER = (90, 200, 1830, 290)        # "Replay salvato" title row + tab ico
 VIEW_ITEM = (480, 440, 1410, 490)         # "Visualizza replay" highlighted
 END_MENU = (480, 390, 1440, 680)          # end-of-replay menu, "Torna all'elenco" highlighted
 
+# The end menu normally shows 7-27 s after a player's CmnActMatchWin (149 logged
+# replays); replay 2002 sat under it for 7.5 min because the live screen check never
+# matched (the recording shows the menu from 15 s on). Stop that long after the win.
+MATCH_OVER_S = 60
+# Longest real replay: 26090 frames (7.3 min, 4 rounds with time-outs) of 596 recorded
+# (median 8314, p99 14188). Nothing ranked runs past 10 min.
+MAX_RECORD_S = 600
+
 
 def to_saved_list():
     nav.to_main()
@@ -50,6 +59,30 @@ def to_saved_list():
 def newest_csv():
     files = glob.glob(os.path.join(LOGS, "inputs_*.csv"))
     return max(files, key=os.path.getmtime) if files else None
+
+
+class LogTail:
+    """Follows the logger's CSV as it grows: has a player gone into the match-win
+    action yet (the match is over, only the outro is left)?"""
+
+    def __init__(self, path):
+        self.f = open(path, newline="")
+        self.buf = ""
+        self.acts = None
+        self.match_over = False
+
+    def poll(self):
+        if self.match_over:
+            return self
+        self.buf += self.f.read()
+        *lines, self.buf = self.buf.split("\n")   # a half-written last line waits
+        for line in lines:
+            cols = line.rstrip("\r").split(",")
+            if self.acts is None:
+                self.acts = [cols.index("p1_act"), cols.index("p2_act")]
+            elif any(len(cols) > i and cols[i] == "CmnActMatchWin" for i in self.acts):
+                self.match_over = True
+        return self
 
 
 def record_one(index, list_ref="saved_list", menu_ref="replay_menu", menu_box=VIEW_ITEM, extra=None,
@@ -80,22 +113,43 @@ def record_one(index, list_ref="saved_list", menu_ref="replay_menu", menu_box=VI
         [ggst.FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-filter_complex",
          "gfxcapture=window_exe=GGST-Win64-Shipping:capture_cursor=0:max_framerate=60,"
          "hwdownload,format=bgra,scale=1920:1080,fps=60,format=nv12",
-         "-t", "900", "-c:v", "h264_mf", "-hw_encoding", "1", "-b:v", "30M", video],
+         "-t", str(MAX_RECORD_S + 60), "-c:v", "h264_mf", "-hw_encoding", "1", "-b:v", "30M", video],
         stdin=subprocess.PIPE)
     print(f"[{index}] recording {os.path.basename(video)}")
 
     # The game frame keeps counting under the end-of-replay menu, so the log never
-    # stops by itself: watch the screen for that menu instead.
+    # stops by itself: watch the screen for that menu instead, and give up on it a
+    # while after the log shows the match won, or after MAX_RECORD_S. Only the
+    # recording stops here; the caller still waits for the menu before any key.
     t0 = time.time()
-    while nav.score(end_ref, end_box) >= 10:
-        if time.time() - t0 > 900:
+    log = LogTail(csv)
+    won_at = None
+    stop = "menu"
+    said = False
+    while True:
+        s = nav.score(end_ref, end_box)
+        if s < 10:
+            break
+        if s >= 255 and not said:
+            print(f"[{index}]   screen capture failing")
+            said = True
+        if won_at is None and log.poll().match_over:
+            won_at = time.time()
+        if won_at is not None and time.time() - won_at > MATCH_OVER_S:
+            stop = "match over"
+            break
+        if time.time() - t0 > MAX_RECORD_S:
+            stop = "max duration"
             break
         time.sleep(2)
     ff.communicate(b"q", timeout=30)
+    log.f.close()
+    if stop != "menu":
+        print(f"[{index}] stopped: {stop}, end menu not seen (last diff {s:.1f})")
     rows = sum(1 for _ in open(csv)) - 1
     print(f"[{index}] done: {rows} frames")
     with open(MANIFEST, "a") as f:
-        f.write(json.dumps({"index": index, "csv": csv, "video": video, "frames": rows,
+        f.write(json.dumps({"index": index, "csv": csv, "video": video, "frames": rows, "stop": stop,
                             "recorded_at": time.strftime("%Y-%m-%d %H:%M:%S"), **(extra or {})}) + "\n")
 
 
