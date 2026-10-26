@@ -3,7 +3,8 @@
 For every special / super / command-normal action start in the logs, read the attacker's
 inputs just before it (p*_rec, screen-relative, turned into numpad notation with p*_face)
 and find the motion + button that started it: the latest button press up to 8 frames
-before the action, and the longest motion in the 24 frames before that press. Per
+before the action, and the longest motion in the 24 frames before that press (or finished
+up to 3 frames after it, before the action starts: the press is buffered). Per
 (character, action) the most common reading is compared with the table's notation.
 
     .venv/Scripts/python.exe tools/ggst_logger/dataset/verify_inputs.py [--char Giovanna] [--all]
@@ -35,6 +36,8 @@ U, D, L, R = 0x1, 0x2, 0x4, 0x8
 BUTTONS = [(0x10, "P"), (0x20, "K"), (0x40, "S"), (0x80, "H"), (0x100, "D")]
 PRESS_BEFORE = 8       # the action starts this many frames after the press at most (buffered)
 MOTION_WINDOW = 24     # frames before the press searched for the motion
+AFTER_PRESS = 3        # a buffered press still takes a motion finished this many frames later
+                       # (air 69874H is mostly pressed on the 7, the 4 a frame after)
 CHARGE = 30            # frames a charge direction must be held for [4]6 / [2]8
 CHARGE_WINDOW = 90     # ...within this many frames before the release
 # longest first: a 632146 also contains 214, a 41236 a 236. The 5-direction half circles
@@ -85,6 +88,10 @@ def read_command(rec: list[int], face: list[int], t: int) -> list[str] | None:
         if k < len(held) - 1 and sum(c in ch for c in held[:k + 1]) >= CHARGE:
             out.append(name + btn)
     out.append(dirs[-1].replace("5", "") + btn)
+    # motions finished only after the (buffered) press come last: they back a table entry
+    # but never change the top reading
+    late = dirs + [numpad(rec[i], face[i]) for i in range(b + 1, min(t, b + AFTER_PRESS) + 1)]
+    out += [m + btn for m in MOTIONS if m + btn not in out and has_motion(late, m)]
     return out
 
 
