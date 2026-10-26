@@ -14,7 +14,8 @@ For every complete entry of the batch manifest (tools/ggst_logger/drive/batch.py
    per-replay summaries (summary.csv / summary.json).
 
 Per-replay results are cached in runs/<stem>/openers.json and alignment.json; a rerun only
-processes new manifest entries (use --force to redo the analysis, --force-cv to rerun the
+processes new manifest entries (use --force to redo the analysis, keeping the video-pass
+results of openers found again at the same frame; --force-cv to rerun the
 CV pipeline too).
 
 Usage (from the repo root, project venv):
@@ -870,6 +871,19 @@ def process_replay(entry: dict, args) -> dict:
     return res
 
 
+# Written by the video pass / refine_banners; they depend only on the opener's video frame and
+# side, so --force keeps them for an opener found again at the same frame (no new decode).
+VIDEO_FIELDS = ("strip", "counter_banner_score", "counter_banner", "banner_words", "banner_frames")
+
+
+def carry_video_fields(old_rows: list[dict], rows: list[dict]) -> None:
+    prev = {(r["log_row"], r["attacker"], r["video_frame"]): r for r in old_rows}
+    for r in rows:
+        o = prev.get((r["log_row"], r["attacker"], r["video_frame"]))
+        if o is not None:
+            r.update({k: o[k] for k in VIDEO_FIELDS if k in o})
+
+
 def relabel(entry: dict, res: dict) -> None:
     """Characters (logger sprite codes, char column, else action-name inference) and clean move / category
     (moves.classify) for a processed replay, cached or fresh: naming changes need no --force."""
@@ -941,8 +955,12 @@ def main():
         if not cv_done(stem):
             print(f"  {stem}: no CV output, skipped")
             continue
-        fresh = args.force or not (run_dir(stem) / "openers.json").exists()
+        cache = run_dir(stem) / "openers.json"
+        old = json.loads(cache.read_text()) if args.force and cache.exists() else None
         res = process_replay(e, args)
+        if old is not None:
+            carry_video_fields(old["rows"], res["rows"])
+        fresh = not cache.exists() or any("strip" not in r for r in res["rows"])
         relabel(e, res)
         results.append((e, res, fresh))
 
