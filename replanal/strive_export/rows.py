@@ -18,6 +18,8 @@ import numpy as np
 
 _DATE_RE = re.compile(r"(?<!\d)(\d{1,4})\s?[/.\-]\s?(\d{1,2})\s?[/.\-]\s?(\d{2,4})(?!\d)")
 _TIME_RE = re.compile(r"(?<!\d)(\d{1,2})\s?[:.,;]\s?(\d{2})\s?[:.,;]\s?(\d{2})(?!\d)")
+# OCR of a small (upscaled) window can drop both separators: "00.55.38" read as "005538"
+_TIME_BARE_RE = re.compile(r"(?<![\d.,])(\d{2})(\d{2})(\d{2})(?![\d.,])")
 
 
 @dataclass
@@ -76,10 +78,11 @@ def parse_date(text: str, order: str = "DMY") -> tuple[dt.date | None, bool]:
 
 
 def parse_time(text: str) -> dt.time | None:
-    for m in _TIME_RE.finditer(text):
-        h, mi, s = (int(g) for g in m.groups())
-        if h < 24 and mi < 60 and s < 60:
-            return dt.time(h, mi, s)
+    for rx in (_TIME_RE, _TIME_BARE_RE):
+        for m in rx.finditer(text):
+            h, mi, s = (int(g) for g in m.groups())
+            if h < 24 and mi < 60 and s < 60:
+                return dt.time(h, mi, s)
     return None
 
 

@@ -254,6 +254,8 @@ def test_parse_date(text, order, want, amb):
     ("D Data dell'incontro: 20/10/2026 00.23.27 Ver. 5.03", (dt.date(2026, 10, 20), dt.time(0, 23, 27))),
     ("Data dell'incontro: 20/10/2026 21 .55.52 Ver5,03", (dt.date(2026, 10, 20), dt.time(21, 55, 52))),
     ("20/10/2026 22,06.58", (dt.date(2026, 10, 20), dt.time(22, 6, 58))),
+    ("PCData dell incontro: 27/10/2026 005538 Ver5.03", (dt.date(2026, 10, 27), dt.time(0, 55, 38))),
+    ("27/10/2026 Ver 503000", (dt.date(2026, 10, 27), None)),   # six digits but not a time of day
     ("nothing here", (None, None)),
 ])
 def test_parse_row_text(text, want):
