@@ -20,7 +20,7 @@ jobs:
           - platform: macos-latest
             target: aarch64-apple-darwin
             bundles: dmg
-          - platform: macos-13
+          - platform: macos-15-intel
             target: x86_64-apple-darwin
             bundles: dmg
           - platform: ubuntu-22.04
