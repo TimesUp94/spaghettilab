@@ -128,19 +128,19 @@ export function QuestionnairePanel({ open, onClose, dbPath, replayId, readOnly =
             />
 
             <aside
-                className="fixed right-0 top-0 h-full w-full sm:w-[420px] z-[60] bg-gray-900 border-l border-gray-700 shadow-2xl flex flex-col"
+                className="fixed right-0 top-0 h-full w-full sm:w-[420px] z-[60] bg-surface-1 border-l border-surface-4 shadow-2xl flex flex-col"
                 role="dialog"
                 aria-label="Review Questionnaire"
             >
-                <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-gray-700 bg-gray-900/95">
+                <div className="flex items-center justify-between gap-3 px-4 py-3 border-b border-surface-4 bg-surface-1/95">
                     <div className="flex items-center gap-2 min-w-0">
-                        <ClipboardList className="w-4 h-4 text-yellow-400 shrink-0" />
+                        <ClipboardList className="w-4 h-4 text-accent-purple shrink-0" />
                         <h2 className="text-sm font-semibold text-white truncate">Review Questionnaire</h2>
                     </div>
                     <button
                         onClick={onClose}
                         title="Close"
-                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-gray-800 hover:bg-gray-700 border border-gray-600 text-gray-200 hover:text-white text-xs font-medium transition-colors shrink-0"
+                        className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md bg-surface-2 hover:bg-surface-3 border border-surface-4 text-text-primary hover:text-white text-xs font-medium transition-colors shrink-0"
                     >
                         <X className="w-3.5 h-3.5" />
                         <span>Close</span>
@@ -148,15 +148,15 @@ export function QuestionnairePanel({ open, onClose, dbPath, replayId, readOnly =
                 </div>
 
                 {/* Template selector */}
-                <div className="px-4 py-3 border-b border-gray-700 bg-gray-800/50">
-                    <label className="block text-xs font-semibold text-gray-400 mb-1.5 uppercase tracking-wider">
+                <div className="px-4 py-3 border-b border-surface-4 bg-surface-2/50">
+                    <label className="block text-xs font-semibold text-text-secondary mb-1.5 uppercase tracking-wider">
                         Game
                     </label>
                     <select
                         value={selectedTemplateId}
                         onChange={(e) => handleTemplateChange(e.target.value)}
                         disabled={readOnly}
-                        className="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:border-yellow-500 focus:ring-1 focus:ring-yellow-500 disabled:opacity-60 disabled:cursor-not-allowed"
+                        className="w-full bg-surface-1 border border-surface-4 rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:border-accent-purple focus:ring-1 focus:ring-accent-purple disabled:opacity-60 disabled:cursor-not-allowed"
                     >
                         {QUESTIONNAIRE_TEMPLATES.map((tpl) => (
                             <option key={tpl.id} value={tpl.id}>{tpl.label}</option>
@@ -180,21 +180,21 @@ export function QuestionnairePanel({ open, onClose, dbPath, replayId, readOnly =
                     ))}
                 </div>
 
-                <div className="border-t border-gray-700 bg-gray-900/95 px-4 py-2 flex items-center gap-2 text-xs">
+                <div className="border-t border-surface-4 bg-surface-1/95 px-4 py-2 flex items-center gap-2 text-xs">
                     {saveState === "saving" && (
                         <>
-                            <Loader2 className="w-3.5 h-3.5 animate-spin text-yellow-400" />
-                            <span className="text-gray-400">Saving...</span>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-accent-purple" />
+                            <span className="text-text-secondary">Saving...</span>
                         </>
                     )}
                     {saveState === "saved" && (
                         <>
                             <Check className="w-3.5 h-3.5 text-green-400" />
-                            <span className="text-gray-400">Saved</span>
+                            <span className="text-text-secondary">Saved</span>
                         </>
                     )}
                     {saveState === "idle" && (
-                        <span className="text-gray-500 italic">
+                        <span className="text-text-muted italic">
                             {readOnly ? "Read-only view" : "Answers save automatically"}
                         </span>
                     )}
@@ -217,13 +217,13 @@ interface SectionProps {
 
 const SectionView = memo(function SectionView({ section, collapsed, onToggle, getValue, onChange, onBlur, onKeyDown, readOnly }: SectionProps) {
     return (
-        <section className="bg-gray-800/60 border border-gray-700 rounded-lg overflow-hidden">
+        <section className="bg-surface-2/60 border border-surface-4 rounded-lg overflow-hidden">
             <button
                 onClick={onToggle}
-                className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-gray-700/50 transition-colors"
+                className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-surface-3/50 transition-colors"
             >
-                <span className="text-xs font-bold text-yellow-400 uppercase tracking-wider">{section.title}</span>
-                {collapsed ? <ChevronRight className="w-4 h-4 text-gray-400" /> : <ChevronDown className="w-4 h-4 text-gray-400" />}
+                <span className="text-xs font-bold text-accent-purple uppercase tracking-wider">{section.title}</span>
+                {collapsed ? <ChevronRight className="w-4 h-4 text-text-secondary" /> : <ChevronDown className="w-4 h-4 text-text-secondary" />}
             </button>
             {!collapsed && (
                 <div className="px-3 pb-3 pt-1 space-y-3">
@@ -257,10 +257,10 @@ const QuestionRow = memo(function QuestionRow({ question, value, onChange, onBlu
     const rows = question.rows || 2;
     return (
         <div>
-            <label className="block text-xs text-gray-300 leading-snug mb-1.5 whitespace-pre-line">{question.label}</label>
+            <label className="block text-xs text-text-primary leading-snug mb-1.5 whitespace-pre-line">{question.label}</label>
             {readOnly ? (
-                <p className="text-sm text-gray-200 whitespace-pre-wrap min-h-[1.5rem]">
-                    {value || <span className="text-gray-500 italic">—</span>}
+                <p className="text-sm text-text-primary whitespace-pre-wrap min-h-[1.5rem]">
+                    {value || <span className="text-text-muted italic">—</span>}
                 </p>
             ) : (
                 <textarea
@@ -270,7 +270,7 @@ const QuestionRow = memo(function QuestionRow({ question, value, onChange, onBlu
                     onKeyDown={onKeyDown}
                     rows={rows}
                     placeholder={question.placeholder || ""}
-                    className="w-full bg-gray-900 border border-gray-600 rounded px-2 py-1.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-yellow-500 focus:ring-1 focus:ring-yellow-500 resize-y"
+                    className="w-full bg-surface-1 border border-surface-4 rounded px-2 py-1.5 text-sm text-white placeholder-text-muted focus:outline-none focus:border-accent-purple focus:ring-1 focus:ring-accent-purple resize-y"
                 />
             )}
         </div>

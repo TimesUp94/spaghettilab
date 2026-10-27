@@ -1,5 +1,7 @@
 import { useState, useCallback } from "react";
-import { ClipboardList } from "lucide-react";
+import { ClipboardList, ArrowLeft, Save } from "lucide-react";
+import { Button, IconButton } from "./ui";
+import { useMediaQuery } from "../lib/useMediaQuery";
 import { save } from "@tauri-apps/plugin-dialog";
 import type { Replay, Note, Drawing, SpagzSession } from "../types";
 import type { VideoSourceType } from "../lib/videoSourceDetect";
@@ -121,83 +123,79 @@ export function AnnotateView({
     await exportSpagz(dbPath, replay.replay_id, path);
   }, [dbPath, replay.replay_id]);
 
+  const wide = useMediaQuery("(min-width: 1024px)");
+
   const handleSeek = useCallback((ms: number) => {
     setSeekToMs(ms);
   }, []);
 
+  const video = (
+    <VideoPlayer
+      fill={wide}
+      src={videoSrc}
+      srcType={srcType}
+      embedId={embedId}
+      seekToMs={seekToMs}
+      onSeeked={() => setSeekToMs(null)}
+      durationMs={replay.duration_ms}
+      rounds={[]}
+      damageEvents={[]}
+      selectedMatch={null}
+      onClearSelection={() => {}}
+      onLocateVideo={onLocateVideo}
+      onTimeUpdate={setCurrentTimeMs}
+      notes={notes}
+      drawings={drawings}
+      onSaveDrawing={handleSaveDrawing}
+      onDeleteDrawing={handleDeleteDrawing}
+    />
+  );
+  const notesPanel = (
+    <NotesPanel
+      notes={notes}
+      drawings={drawings}
+      currentTimeMs={currentTimeMs}
+      onAdd={handleAddNote}
+      onUpdate={handleUpdateNote}
+      onDelete={handleDeleteNote}
+      onDeleteDrawing={handleDeleteDrawing}
+      onSeek={handleSeek}
+    />
+  );
+
   return (
-    <div className="h-full flex flex-col">
-      {/* Header */}
-      <div className="flex items-center gap-3 px-4 py-2 bg-surface-1 border-b border-surface-4/30 shrink-0">
-        <button
-          onClick={onBack}
-          className="btn-ghost !px-2 !py-1 text-xs"
-        >
-          &larr; Back
-        </button>
+    <div className="h-full flex flex-col min-h-0">
+      <header className="h-14 shrink-0 flex items-center gap-2 px-3 border-b border-surface-4/60 bg-surface-1">
+        <IconButton icon={ArrowLeft} label="Back to the library" onClick={onBack} />
         <div className="flex-1 min-w-0">
-          <span className="text-sm font-medium text-text-primary truncate block">
-            {replay.replay_id}
-          </span>
+          <div className="text-sm font-semibold truncate">{replay.replay_id}</div>
+          <div className="text-[11px] text-text-muted">Notes and drawings</div>
         </div>
-        <button
+        <Button
+          size="sm"
+          variant={questionnaireOpen ? "primary" : "secondary"}
+          icon={ClipboardList}
           onClick={() => setQuestionnaireOpen((o) => !o)}
-          title="Open review questionnaire"
-          className={`!py-1.5 !px-3 !text-xs rounded inline-flex items-center gap-1.5 ${
-            questionnaireOpen
-              ? "bg-yellow-500 text-gray-900 hover:bg-yellow-400"
-              : "bg-gray-700 text-gray-200 hover:bg-gray-600"
-          }`}
+          title="Open the review checklist"
         >
-          <ClipboardList className="w-3.5 h-3.5" />
           Checklist
-        </button>
-        <button
-          onClick={handleExportSpagz}
-          className="btn-primary !py-1.5 !px-3 !text-xs"
-        >
-          Save as .spagz
-        </button>
-      </div>
+        </Button>
+        <Button size="sm" variant="primary" icon={Save} onClick={handleExportSpagz}>
+          <span className="hidden sm:inline">Save as .spagz</span>
+        </Button>
+      </header>
 
-      {/* Main content */}
-      <div className="flex-1 flex gap-4 p-4 overflow-hidden">
-        {/* Video player */}
-        <div className="flex-1 min-w-0">
-          <VideoPlayer
-            src={videoSrc}
-            srcType={srcType}
-            embedId={embedId}
-            seekToMs={seekToMs}
-            onSeeked={() => setSeekToMs(null)}
-            durationMs={replay.duration_ms}
-            rounds={[]}
-            damageEvents={[]}
-            selectedMatch={null}
-            onClearSelection={() => {}}
-            onLocateVideo={onLocateVideo}
-            onTimeUpdate={setCurrentTimeMs}
-            notes={notes}
-            drawings={drawings}
-            onSaveDrawing={handleSaveDrawing}
-            onDeleteDrawing={handleDeleteDrawing}
-          />
+      {wide ? (
+        <div className="flex-1 min-h-0 grid grid-cols-[minmax(0,1fr)_minmax(320px,28%)]">
+          <section className="min-h-0 p-3">{video}</section>
+          <aside className="min-h-0 overflow-y-auto border-l border-surface-4/60 bg-surface-1/50 p-3">{notesPanel}</aside>
         </div>
-
-        {/* Notes panel */}
-        <div className="w-[320px] shrink-0 overflow-y-auto">
-          <NotesPanel
-            notes={notes}
-            drawings={drawings}
-            currentTimeMs={currentTimeMs}
-            onAdd={handleAddNote}
-            onUpdate={handleUpdateNote}
-            onDelete={handleDeleteNote}
-            onDeleteDrawing={handleDeleteDrawing}
-            onSeek={handleSeek}
-          />
+      ) : (
+        <div className="flex-1 min-h-0 overflow-y-auto">
+          <section className="p-3">{video}</section>
+          <section className="border-t border-surface-4/60 p-3">{notesPanel}</section>
         </div>
-      </div>
+      )}
 
       {/* Review questionnaire — slides in from the right */}
       <QuestionnairePanel

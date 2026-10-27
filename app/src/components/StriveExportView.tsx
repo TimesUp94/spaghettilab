@@ -1,3 +1,4 @@
+import { ArrowLeft } from "lucide-react";
 import { useState, useCallback, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
@@ -246,19 +247,14 @@ export function StriveExportView({ onComplete, onCancel }: Props) {
   const recordedCount = rows.filter((r) => r.status === "recorded" || r.status === "partial").length;
 
   return (
-    <div className="h-screen flex items-center justify-center bg-surface-0 p-4">
-      <div className="w-full max-w-[640px] max-h-[95vh] flex flex-col bg-surface-2 rounded-xl border border-surface-4/50 shadow-2xl">
-        {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-surface-4/30 shrink-0">
-          <h3 className="text-sm font-semibold text-text-primary">Export Strive Replays</h3>
-          <button
-            onClick={onCancel}
-            disabled={running}
-            className="text-text-muted hover:text-text-primary cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
-          >
-            x
-          </button>
-        </div>
+    <div className="h-full overflow-y-auto p-4 sm:p-8">
+      <div className="w-full max-w-2xl mx-auto">
+        <button onClick={onCancel} disabled={running} className="inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary mb-4 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">
+          <ArrowLeft size={15} /> Library
+        </button>
+        <h1 className="text-2xl font-semibold tracking-tight">Export Strive replays</h1>
+        <p className="text-sm text-text-secondary mt-1 mb-6">Plays your saved replays in Guilty Gear Strive and records each one, then analyses them for you.</p>
+        <div className="bg-surface-2 rounded-xl border border-surface-4/70 flex flex-col">
 
         <div className="p-6 space-y-4 overflow-y-auto">
           {phase === "setup" && (
@@ -528,6 +524,7 @@ export function StriveExportView({ onComplete, onCancel }: Props) {
           )}
         </div>
       </div>
+    </div>
     </div>
   );
 }

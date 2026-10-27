@@ -95,7 +95,7 @@ Video (1080p @30fps)
 - Spawning Python subprocesses for analysis and VOD splitting (`require_python()`: `SPAGHETTI_LAB_PYTHON`, the project `.venv`, `<local app data>/SpaghettiLab/venv`, then `py -3` on Windows / Homebrew and python.org `python3` on macOS, then PATH; the first that imports cv2) and ffmpeg (`ffmpeg_bin()`: `SPAGHETTI_FFMPEG`, PATH plus `/opt/homebrew/bin` and `/usr/local/bin`, the Python's `imageio_ffmpeg`, bundled copy incl. the macOS bundle's `Contents/Resources`). Only successes are cached, so installing a missing tool needs no restart
 - .spag file export/import (ZIP containing SQLite snapshot)
 
-**React (`app/src/`):** Tauri v2 frontend with React 18 + TypeScript + Tailwind + Recharts. `App.tsx` is the main component managing all state. `api.ts` wraps Tauri `invoke()` calls. Components in `app/src/components/`.
+**React (`app/src/`):** Tauri v2 frontend with React 18 + TypeScript + Tailwind + lucide icons. `App.tsx` holds the state and picks the view (library home, review, analyse, annotate, split, Strive) next to the left rail; the views are in `app/src/views/` and `app/src/components/`, shared UI in `components/ui.tsx`. The review screen fits the 16:9 video into the space beside the results panel (stacked under 1024 px) with one SVG timeline (`ReviewTimeline`) under it. `api.ts` wraps Tauri `invoke()` calls.
 
 ### Key Concepts
 

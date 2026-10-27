@@ -5,6 +5,9 @@
 @tailwind utilities;
 
 @layer base {
+  html, body, #root {
+    height: 100%;
+  }
   * {
     @apply border-surface-4;
   }
@@ -32,13 +35,15 @@
     @apply bg-surface-2 rounded-lg p-4 border border-surface-4/50;
   }
   .btn-primary {
-    @apply px-4 py-2 bg-accent-purple/20 text-accent-purple border border-accent-purple/30
-           rounded-lg hover:bg-accent-purple/30 transition-all duration-200
-           font-medium text-sm cursor-pointer;
+    @apply inline-flex items-center justify-center gap-2 h-9 px-3.5 bg-accent-purple text-surface-0
+           rounded-lg hover:bg-accent-purple/90 transition-colors duration-150
+           font-semibold text-sm cursor-pointer
+           disabled:opacity-40 disabled:cursor-not-allowed;
   }
   .btn-ghost {
-    @apply px-3 py-1.5 text-text-secondary hover:text-text-primary hover:bg-surface-3
-           rounded-md transition-all duration-200 text-sm cursor-pointer;
+    @apply inline-flex items-center justify-center gap-2 px-3 py-1.5 text-text-secondary hover:text-text-primary hover:bg-surface-3
+           rounded-lg transition-colors duration-150 text-sm cursor-pointer
+           disabled:opacity-40 disabled:cursor-not-allowed;
   }
   .tab-btn {
     @apply px-4 py-2 text-sm font-medium text-text-secondary
@@ -54,6 +59,15 @@
   }
   .timeline-marker {
     @apply absolute top-0 bottom-0 w-0.5 opacity-60;
+  }
+}
+
+@layer utilities {
+  .no-scrollbar {
+    scrollbar-width: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
   }
 }
 

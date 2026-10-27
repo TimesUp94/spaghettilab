@@ -1,12 +1,14 @@
-import { useState, useCallback, useMemo, useEffect, useRef } from "react";
+import { useState, useCallback, useMemo, useEffect } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { AlertTriangle, X } from "lucide-react";
 import type {
   Replay,
   FrameDataPoint,
   DamageEvent,
   RoundResult,
-  Match,
   MatchStats,
   Highlight,
   Note,
@@ -14,7 +16,6 @@ import type {
   SpagSession,
   SpagzSession,
   VideoMode,
-  ActiveTab,
 } from "./types";
 import {
   getReplays,
@@ -41,109 +42,28 @@ import {
   exportSpagz,
   openSpagz,
   saveSpagz,
-  createQuickSession,
 } from "./api";
-import { convertFileSrc } from "@tauri-apps/api/core";
-import { Sidebar } from "./components/Sidebar";
-import { VideoPlayer } from "./components/VideoPlayer";
-import { HealthTimeline } from "./components/HealthTimeline";
-import { MatchOverview } from "./components/MatchOverview";
-import { RoundBreakdown } from "./components/RoundBreakdown";
-import { MatchList } from "./components/MatchList";
-import { HighlightsPanel } from "./components/Highlights";
-import { DamageLog } from "./components/DamageLog";
-import { WelcomeScreen } from "./components/WelcomeScreen";
 import { ExportModal } from "./components/ExportModal";
 import { AnalysisProgress } from "./components/AnalysisProgress";
 import { SplitVodView } from "./components/SplitVodView";
 import { StriveExportView } from "./components/StriveExportView";
-import { NotesPanel } from "./components/NotesPanel";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { SpagzVideoModal } from "./components/SpagzVideoModal";
 import { AnnotateSetup } from "./components/AnnotateSetup";
 import { AnnotateView } from "./components/AnnotateView";
+import { AppRail, type RailTarget } from "./components/shell/AppRail";
+import { Spinner } from "./components/ui";
+import { LibraryView } from "./views/LibraryView";
+import { ReviewView } from "./views/ReviewView";
 import { detectVideoSource, type VideoSourceType } from "./lib/videoSourceDetect";
+import { groupRoundsIntoMatches, statsForMatch } from "./lib/matches";
 
-/** Group rounds into matches (first-to-2 round wins). */
-function groupRoundsIntoMatches(rounds: RoundResult[]): Match[] {
-  const matches: Match[] = [];
-  let currentRounds: RoundResult[] = [];
-  let p1Wins = 0;
-  let p2Wins = 0;
+type AppView = "library" | "review" | "analyze" | "split" | "strive" | "annotate";
 
-  const flushMatch = () => {
-    if (currentRounds.length > 0) {
-      matches.push({
-        match_index: matches.length,
-        rounds: currentRounds,
-        winner: p1Wins >= 2 ? "P1" : p2Wins >= 2 ? "P2" : p1Wins > p2Wins ? "P1" : p2Wins > p1Wins ? "P2" : "??",
-        p1_rounds_won: p1Wins,
-        p2_rounds_won: p2Wins,
-        start_ms: currentRounds[0].round_start_ms,
-        end_ms: currentRounds[currentRounds.length - 1].round_end_ms,
-      });
-      currentRounds = [];
-      p1Wins = 0;
-      p2Wins = 0;
-    }
-  };
-
-  for (const round of rounds) {
-    // Force new match if backend detected a match boundary (timer=99, both 0 wins)
-    if (round.is_match_start && currentRounds.length > 0) {
-      flushMatch();
-    }
-
-    currentRounds.push(round);
-    if (round.winner === "P1") p1Wins++;
-    else if (round.winner === "P2") p2Wins++;
-
-    if (p1Wins >= 2 || p2Wins >= 2) {
-      flushMatch();
-    }
-  }
-
-  // Remaining rounds that didn't complete a match
-  flushMatch();
-
-  return matches;
-}
-
-type AppView = "welcome" | "analyze" | "split" | "strive" | "dashboard" | "annotate";
-
-function ReanalyzeOverlay({ isAll }: { isAll: boolean }) {
-  const [progress, setProgress] = useState("");
-
-  useEffect(() => {
-    let cancelled = false;
-    const unlistenPromise = listen<string>("reanalyze-progress", (event) => {
-      if (!cancelled) setProgress(event.payload);
-    });
-    return () => {
-      cancelled = true;
-      unlistenPromise.then((fn) => fn());
-    };
-  }, []);
-
-  return (
-    <div className="absolute inset-0 z-50 bg-surface-0/80 backdrop-blur-sm flex items-center justify-center">
-      <div className="flex flex-col items-center gap-3 bg-surface-2 rounded-xl border border-surface-4/50 px-8 py-6 shadow-2xl min-w-[320px]">
-        <div className="w-10 h-10 border-2 border-accent-purple/30 border-t-accent-purple rounded-full animate-spin" />
-        <div className="text-text-primary text-sm font-medium">
-          {isAll ? "Reanalyzing all replays..." : "Reanalyzing replay..."}
-        </div>
-        {progress && (
-          <div className="text-text-muted text-xs text-center max-w-[280px] truncate">
-            {progress}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
+const VIDEO_EXT = /\.(mp4|mkv|avi|mov|webm)$/i;
 
 export default function App() {
-  const [view, setView] = useState<AppView>("welcome");
+  const [view, setView] = useState<AppView>("library");
 
   // DB + replay state
   const [dbPath, setDbPath] = useState<string | null>(null);
@@ -168,148 +88,57 @@ export default function App() {
   const [currentTimeMs, setCurrentTimeMs] = useState(0);
 
   // UI state
-  const [activeTab, setActiveTab] = useState<ActiveTab>("matches");
-  const [exportTarget, setExportTarget] = useState<{
-    startMs: number;
-    endMs: number;
-  } | null>(null);
-  const [selectedMatchIndex, setSelectedMatchIndex] = useState<number | null>(
-    null
-  );
+  const [exportTarget, setExportTarget] = useState<{ startMs: number; endMs: number } | null>(null);
+  const [selectedMatchIndex, setSelectedMatchIndex] = useState<number | null>(null);
   const [spagSession, setSpagSession] = useState<SpagSession | null>(null);
   const [spagzSession, setSpagzSession] = useState<SpagzSession | null>(null);
   const [videoMode, setVideoMode] = useState<VideoMode>("local");
   const [savingSpag, setSavingSpag] = useState(false);
   const [exportingSpag, setExportingSpag] = useState(false);
-  const [exportingSpagz, setExportingSpagz] = useState(false);
   const [showSpagzVideoModal, setShowSpagzVideoModal] = useState(false);
   const [pendingSpagzSession, setPendingSpagzSession] = useState<SpagzSession | null>(null);
   const [showAnnotateSetup, setShowAnnotateSetup] = useState(false);
   const [annotateSrcType, setAnnotateSrcType] = useState<VideoSourceType>("file");
   const [annotateEmbedId, setAnnotateEmbedId] = useState<string | undefined>();
-
-  // Resizable split between top (video/timeline) and bottom (tabs)
-  const [topHeight, setTopHeight] = useState<number | string>("55%");
-  const resizeRef = useRef<{ startY: number; startH: number } | null>(null);
-
-  const handleResizeStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const container = (e.target as HTMLElement).parentElement;
-    const topEl = container?.querySelector<HTMLElement>("[style*='height']");
-    if (!topEl) return;
-    const startH = topEl.getBoundingClientRect().height;
-    resizeRef.current = { startY: e.clientY, startH };
-
-    const onMove = (ev: MouseEvent) => {
-      if (!resizeRef.current) return;
-      const delta = ev.clientY - resizeRef.current.startY;
-      const newH = Math.max(150, resizeRef.current.startH + delta);
-      setTopHeight(newH);
-    };
-    const onUp = () => {
-      resizeRef.current = null;
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    document.body.style.cursor = "row-resize";
-    document.body.style.userSelect = "none";
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-  }, []);
+  const [pendingVideo, setPendingVideo] = useState<string | null>(null);
+  const [dragActive, setDragActive] = useState(false);
+  const [reanalyzing, setReanalyzing] = useState(false);
+  const [reanalyzingAll, setReanalyzingAll] = useState(false);
+  const [reanalyzeText, setReanalyzeText] = useState("");
 
   // Derived: group rounds into matches
   const matches = useMemo(() => groupRoundsIntoMatches(rounds), [rounds]);
+  const selectedMatch = selectedMatchIndex !== null ? matches[selectedMatchIndex] ?? null : null;
+  const displayStats = useMemo(
+    () => (selectedMatch && stats ? statsForMatch(stats, selectedMatch, damageEvents) : stats),
+    [selectedMatch, stats, damageEvents]
+  );
 
-  const selectedMatch =
-    selectedMatchIndex !== null ? matches[selectedMatchIndex] ?? null : null;
-
-  // Compute match-scoped stats when a match is selected
-  const displayStats = useMemo(() => {
-    if (!selectedMatch || !stats) return stats;
-    const matchDamage = damageEvents.filter(
-      (e) =>
-        e.timestamp_ms >= selectedMatch.start_ms &&
-        e.timestamp_ms <= selectedMatch.end_ms
-    );
-    const p1Hits = matchDamage.filter((e) => e.target_side === 1);
-    const p2Hits = matchDamage.filter((e) => e.target_side === 2);
-    const durations = selectedMatch.rounds.map(
-      (r) => (r.round_end_ms - r.round_start_ms) / 1000
-    );
-    const winnerHps = selectedMatch.rounds.map((r) => r.winner_final_hp);
-    return {
-      ...stats,
-      total_rounds: selectedMatch.rounds.length,
-      p1_round_wins: selectedMatch.p1_rounds_won,
-      p2_round_wins: selectedMatch.p2_rounds_won,
-      total_damage_events: matchDamage.length,
-      p1_damage_taken: p1Hits.reduce((s, e) => s + e.damage_pct, 0),
-      p2_damage_taken: p2Hits.reduce((s, e) => s + e.damage_pct, 0),
-      p1_biggest_hit:
-        p1Hits.length > 0 ? Math.max(...p1Hits.map((e) => e.damage_pct)) : 0,
-      p2_biggest_hit:
-        p2Hits.length > 0 ? Math.max(...p2Hits.map((e) => e.damage_pct)) : 0,
-      avg_round_duration_s:
-        durations.length > 0
-          ? durations.reduce((a, b) => a + b, 0) / durations.length
-          : 0,
-      longest_round_s: durations.length > 0 ? Math.max(...durations) : 0,
-      shortest_round_s: durations.length > 0 ? Math.min(...durations) : 0,
-      comeback_count: selectedMatch.rounds.filter((r) => r.is_comeback).length,
-      close_rounds: selectedMatch.rounds.filter(
-        (r) => r.winner_final_hp < 0.2
-      ).length,
-      avg_winner_final_hp:
-        winnerHps.length > 0
-          ? winnerHps.reduce((a, b) => a + b, 0) / winnerHps.length
-          : 0,
-      duration_s: (selectedMatch.end_ms - selectedMatch.start_ms) / 1000,
-    } as MatchStats;
-  }, [selectedMatch, stats, damageEvents]);
-
-  const openDatabase = useCallback(async (path: string) => {
-    setDbPath(path);
-    setLoading(true);
-    setError(null);
-    try {
-      const reps = await getReplays(path);
-      setReplays(reps);
-      setView("dashboard");
-      if (reps.length > 0) {
-        await loadReplayData(path, reps[0]);
-      }
-    } catch (err) {
-      console.error("Failed to load DB:", err);
-      setError(String(err));
-    } finally {
-      setLoading(false);
-    }
+  useEffect(() => {
+    const un = listen<string>("reanalyze-progress", (e) => setReanalyzeText(e.payload));
+    return () => {
+      un.then((fn) => fn());
+    };
   }, []);
 
-  // Auto-open the default DB on startup if it exists
-  useEffect(() => {
-    getDefaultDbPath()
-      .then((path) => openDatabase(path))
-      .catch(() => {
-        // No default DB yet — stay on welcome screen
-      });
-  }, [openDatabase]);
-
-  const handleOpenDb = useCallback(async () => {
-    const selected = await open({
-      multiple: false,
-      filters: [{ name: "SQLite Database", extensions: ["db"] }],
-    });
-    if (!selected) return;
-    await openDatabase(selected as string);
-  }, [openDatabase]);
+  const setLocalVideo = useCallback((path: string | null) => {
+    setVideoPath(path);
+    if (!path) {
+      setVideoSrc(null);
+      return;
+    }
+    try {
+      setVideoSrc(convertFileSrc(path));
+    } catch {
+      setVideoSrc(null);
+    }
+  }, []);
 
   const loadReplayData = useCallback(
     async (db: string, replay: Replay) => {
       setSelectedReplay(replay);
       setSelectedMatchIndex(null);
+      setCurrentTimeMs(0);
       setLoading(true);
       try {
         const [fd, de, rn, st, hl, nt, dr, vp] = await Promise.all([
@@ -329,55 +158,99 @@ export default function App() {
         setDrawings(dr);
         setStats(st);
         setHighlights(hl);
-        if (vp) {
-          setVideoPath(vp);
-          try {
-            setVideoSrc(convertFileSrc(vp));
-          } catch {
-            setVideoSrc(null);
-          }
-        } else {
-          setVideoPath(null);
-          setVideoSrc(null);
-        }
-        setActiveTab("matches");
+        setLocalVideo(vp || null);
       } catch (err) {
         console.error("Failed to load replay:", err);
+        setError(`Could not load this video's results: ${err}`);
       } finally {
         setLoading(false);
       }
     },
-    []
+    [setLocalVideo]
   );
 
-  const handleSelectReplay = useCallback(
-    (replay: Replay) => {
-      if (dbPath) {
-        loadReplayData(dbPath, replay);
+  /** Open an analysis database and show its library. */
+  const openDatabase = useCallback(async (path: string, openReplayId?: string) => {
+    setDbPath(path);
+    setSpagSession(null);
+    setSpagzSession(null);
+    setVideoMode("local");
+    setLoading(true);
+    setError(null);
+    try {
+      const reps = await getReplays(path);
+      setReplays(reps);
+      const target = openReplayId ? reps.find((r) => r.replay_id === openReplayId) : undefined;
+      if (target) {
+        setView("review");
+        await loadReplayData(path, target);
+      } else {
+        setView("library");
       }
+    } catch (err) {
+      console.error("Failed to load DB:", err);
+      setError(`Could not open the database: ${err}`);
+    } finally {
+      setLoading(false);
+    }
+  }, [loadReplayData]);
+
+  // Open the default DB on startup if it exists
+  useEffect(() => {
+    getDefaultDbPath()
+      .then((path) => openDatabase(path))
+      .catch(() => {
+        // No default DB yet: the library shows the getting-started page
+      });
+  }, [openDatabase]);
+
+  const handleOpenDb = useCallback(async () => {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "SQLite Database", extensions: ["db"] }],
+    });
+    if (!selected) return;
+    await openDatabase(selected as string);
+  }, [openDatabase]);
+
+  const handleOpenReplay = useCallback(
+    (replay: Replay) => {
+      if (!dbPath) return;
+      if (replay.frame_count === 0) {
+        // notes-only session: the annotate view
+        setSelectedReplay(replay);
+        setAnnotateSrcType("file");
+        setAnnotateEmbedId(undefined);
+        resolveVideoPath(dbPath, replay.replay_id)
+          .then((vp) => setLocalVideo(vp || null))
+          .catch(() => setLocalVideo(null));
+        Promise.all([
+          getNotes(dbPath, replay.replay_id).catch(() => [] as Note[]),
+          getDrawings(dbPath, replay.replay_id).catch(() => [] as Drawing[]),
+        ]).then(([nt, dr]) => {
+          setNotes(nt);
+          setDrawings(dr);
+          setView("annotate");
+        });
+        return;
+      }
+      setView("review");
+      loadReplayData(dbPath, replay);
     },
-    [dbPath, loadReplayData]
+    [dbPath, loadReplayData, setLocalVideo]
   );
 
-  const handleSeek = useCallback((ms: number) => {
-    setSeekToMs(ms);
-  }, []);
+  const handleSeek = useCallback((ms: number) => setSeekToMs(ms), []);
 
   const handleRoundSeek = useCallback(
     (ms: number) => {
       setSeekToMs(ms);
-      // Find which match contains this timestamp
-      const idx = matches.findIndex((m) =>
-        m.rounds.some((r) => r.round_start_ms === ms)
-      );
+      // Zoom to the game that contains this round
+      const idx = matches.findIndex((m) => m.rounds.some((r) => r.round_start_ms === ms));
       setSelectedMatchIndex(idx >= 0 ? idx : null);
     },
     [matches]
   );
-
-  const handleExport = useCallback((startMs: number, endMs: number) => {
-    setExportTarget({ startMs, endMs });
-  }, []);
 
   const handleLocateVideo = useCallback(async () => {
     const selected = await open({
@@ -385,18 +258,14 @@ export default function App() {
       filters: [{ name: "Video Files", extensions: ["mp4", "mkv", "avi"] }],
     });
     if (selected) {
-      const path = selected as string;
-      setVideoPath(path);
-      try {
-        setVideoSrc(convertFileSrc(path));
-      } catch {
-        setVideoSrc(null);
-      }
+      setLocalVideo(selected as string);
+      setVideoMode("local");
     }
-  }, []);
+  }, [setLocalVideo]);
 
   const handleAnalysisComplete = useCallback(
     async (resultDbPath: string) => {
+      setPendingVideo(null);
       await openDatabase(resultDbPath);
     },
     [openDatabase]
@@ -429,7 +298,6 @@ export default function App() {
     [dbPath]
   );
 
-  // Drawing handlers
   const handleSaveDrawing = useCallback(
     async (timestampMs: number, strokesJson: string) => {
       if (!dbPath || !selectedReplay) return;
@@ -456,48 +324,38 @@ export default function App() {
   );
 
   // Reanalyze: re-run Python CV pipeline then reload
-  const [reanalyzing, setReanalyzing] = useState(false);
   const handleReanalyze = useCallback(async () => {
     if (!dbPath || !selectedReplay) return;
     setReanalyzing(true);
+    setReanalyzeText("");
     setError(null);
     try {
       await reanalyzeReplay(dbPath, selectedReplay.replay_id);
       await loadReplayData(dbPath, selectedReplay);
     } catch (err) {
       console.error("Reanalysis failed:", err);
-      setError(String(err));
+      setError(`The analysis failed: ${err}`);
     } finally {
       setReanalyzing(false);
     }
   }, [dbPath, selectedReplay, loadReplayData]);
 
   // Reanalyze all: re-run Python CV pipeline on every replay then reload
-  const [reanalyzingAll, setReanalyzingAll] = useState(false);
   const handleReanalyzeAll = useCallback(async () => {
     if (!dbPath) return;
     setReanalyzingAll(true);
+    setReanalyzeText("");
     setError(null);
     try {
       await reanalyzeAll(dbPath);
-      // Refresh replay list (metadata may have changed)
-      const reps = await getReplays(dbPath);
-      setReplays(reps);
-      // Reload the currently selected replay if any
-      const current = selectedReplay
-        ? reps.find((r) => r.replay_id === selectedReplay.replay_id)
-        : null;
-      if (current) {
-        setSelectedReplay(current);
-        await loadReplayData(dbPath, current);
-      }
+      setReplays(await getReplays(dbPath));
     } catch (err) {
       console.error("Reanalyze all failed:", err);
-      setError(String(err));
+      setError(`The analysis failed: ${err}`);
     } finally {
       setReanalyzingAll(false);
     }
-  }, [dbPath, selectedReplay, loadReplayData]);
+  }, [dbPath]);
 
   // Override uncertain round winner
   const handleOverrideWinner = useCallback(
@@ -505,8 +363,7 @@ export default function App() {
       if (!dbPath || !selectedReplay) return;
       try {
         await setRoundWinner(dbPath, selectedReplay.replay_id, roundIndex, winner);
-        const rn = await getRounds(dbPath, selectedReplay.replay_id);
-        setRounds(rn);
+        setRounds(await getRounds(dbPath, selectedReplay.replay_id));
       } catch (err) {
         console.error("Failed to override winner:", err);
         setError(String(err));
@@ -515,6 +372,42 @@ export default function App() {
     [dbPath, selectedReplay]
   );
 
+  /** Notes and drawings of a session, then the annotate view. */
+  const enterAnnotate = useCallback(async (db: string, replay: Replay) => {
+    setSelectedReplay(replay);
+    const [nt, dr] = await Promise.all([
+      getNotes(db, replay.replay_id).catch(() => [] as Note[]),
+      getDrawings(db, replay.replay_id).catch(() => [] as Drawing[]),
+    ]);
+    setNotes(nt);
+    setDrawings(dr);
+    setView("annotate");
+  }, []);
+
+  /** All analysis data of a session's replay, then the review screen. */
+  const enterReview = useCallback(async (db: string, replay: Replay) => {
+    setView("review");
+    setSelectedReplay(replay);
+    setSelectedMatchIndex(null);
+    setCurrentTimeMs(0);
+    const [fd, de, rn, st, hl, nt, dr] = await Promise.all([
+      getFrameData(db, replay.replay_id),
+      getDamageEvents(db, replay.replay_id),
+      getRounds(db, replay.replay_id),
+      getMatchStats(db, replay.replay_id),
+      getHighlights(db, replay.replay_id),
+      getNotes(db, replay.replay_id).catch(() => [] as Note[]),
+      getDrawings(db, replay.replay_id).catch(() => [] as Drawing[]),
+    ]);
+    setFrameData(fd);
+    setDamageEvents(de);
+    setRounds(rn);
+    setStats(st);
+    setHighlights(hl);
+    setNotes(nt);
+    setDrawings(dr);
+  }, []);
+
   // .spag file support
   const openSpagFile = useCallback(async (path: string) => {
     setLoading(true);
@@ -522,147 +415,94 @@ export default function App() {
     try {
       const session = await openSpag(path);
       setSpagSession(session);
+      setSpagzSession(null);
       setDbPath(session.db_path);
-
+      setVideoMode("local");
       const reps = await getReplays(session.db_path);
       setReplays(reps);
-
-      // Load the replay (there's only one in a .spag)
-      const replay = reps.find(r => r.replay_id === session.replay_id) || reps[0];
+      // There's only one replay in a .spag
+      const replay = reps.find((r) => r.replay_id === session.replay_id) || reps[0];
       if (replay) {
-        // Annotate-only session — route to annotate view
+        setLocalVideo(session.video_path);
         if (replay.frame_count === 0) {
-          setSelectedReplay(replay);
           setAnnotateSrcType("file");
           setAnnotateEmbedId(undefined);
-          setVideoPath(session.video_path);
-          try {
-            setVideoSrc(convertFileSrc(session.video_path));
-          } catch {
-            setVideoSrc(null);
-          }
-          const [nt, dr] = await Promise.all([
-            getNotes(session.db_path, replay.replay_id).catch(() => [] as Note[]),
-            getDrawings(session.db_path, replay.replay_id).catch(() => [] as Drawing[]),
-          ]);
-          setNotes(nt);
-          setDrawings(dr);
-          setView("annotate");
-          return;
+          await enterAnnotate(session.db_path, replay);
+        } else {
+          await enterReview(session.db_path, replay);
         }
-
-        // Full analysis — load all data and go to dashboard
-        setView("dashboard");
-        setSelectedReplay(replay);
-        setSelectedMatchIndex(null);
-        const [fd, de, rn, st, hl, nt, dr] = await Promise.all([
-          getFrameData(session.db_path, replay.replay_id),
-          getDamageEvents(session.db_path, replay.replay_id),
-          getRounds(session.db_path, replay.replay_id),
-          getMatchStats(session.db_path, replay.replay_id),
-          getHighlights(session.db_path, replay.replay_id),
-          getNotes(session.db_path, replay.replay_id).catch(() => [] as Note[]),
-          getDrawings(session.db_path, replay.replay_id).catch(() => [] as Drawing[]),
-        ]);
-        setFrameData(fd);
-        setDamageEvents(de);
-        setRounds(rn);
-        setStats(st);
-        setHighlights(hl);
-        setNotes(nt);
-        setDrawings(dr);
-
-        // Use the extracted video from the .spag session
-        setVideoPath(session.video_path);
-        try {
-          setVideoSrc(convertFileSrc(session.video_path));
-        } catch {
-          setVideoSrc(null);
-        }
-        setActiveTab("matches");
       }
     } catch (err) {
       console.error("Failed to open .spag:", err);
-      setError(String(err));
+      setError(`Could not open the file: ${err}`);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [enterAnnotate, enterReview, setLocalVideo]);
+
+  /** A .spagz session: annotate sessions open at once, full analyses ask for the video. */
+  const loadSpagzReplayData = useCallback(async (session: SpagzSession) => {
+    setSpagzSession(session);
+    setSpagSession(null);
+    setDbPath(session.db_path);
+    const reps = await getReplays(session.db_path);
+    setReplays(reps);
+    const replay = reps.find((r) => r.replay_id === session.replay_id) || reps[0];
+    if (!replay) return;
+    if (replay.frame_count === 0) {
+      const detected = session.video_url ? detectVideoSource(session.video_url) : null;
+      if (detected && detected.type !== "file") {
+        setAnnotateSrcType(detected.type);
+        setAnnotateEmbedId(detected.id);
+        setVideoSrc(null);
+      } else {
+        setAnnotateSrcType("file");
+        setAnnotateEmbedId(undefined);
+      }
+      await enterAnnotate(session.db_path, replay);
+      return;
+    }
+    await enterReview(session.db_path, replay);
+  }, [enterAnnotate, enterReview]);
 
   const openSpagzFile = useCallback(async (path: string) => {
     setLoading(true);
     setError(null);
     try {
       const session = await openSpagz(path);
-
-      // Check if this is an annotate-only session (no CV analysis)
       const reps = await getReplays(session.db_path);
-      const replay = reps.find(r => r.replay_id === session.replay_id) || reps[0];
-
+      const replay = reps.find((r) => r.replay_id === session.replay_id) || reps[0];
       if (replay && replay.frame_count === 0) {
-        // Annotate session — try to embed directly from video_url
-        if (session.video_url) {
-          const detected = detectVideoSource(session.video_url);
-          if (detected.type !== "file") {
-            // YouTube/Twitch — go directly to annotate view with embed
-            const annotateSession: SpagzSession = { ...session };
-            setSpagzSession(annotateSession);
-            setDbPath(session.db_path);
-            setSelectedReplay(replay);
-            setAnnotateSrcType(detected.type);
-            setAnnotateEmbedId(detected.id);
-            setVideoSrc(null);
-            const [nt, dr] = await Promise.all([
-              getNotes(session.db_path, replay.replay_id).catch(() => [] as Note[]),
-              getDrawings(session.db_path, replay.replay_id).catch(() => [] as Drawing[]),
-            ]);
-            setNotes(nt);
-            setDrawings(dr);
-            setView("annotate");
-            return;
-          }
-        }
-        // Annotate session without embed URL — open without video
-        setSpagzSession(session);
-        setDbPath(session.db_path);
-        setSelectedReplay(replay);
-        setAnnotateSrcType("file");
-        setAnnotateEmbedId(undefined);
         setVideoSrc(null);
-        const [nt, dr] = await Promise.all([
-          getNotes(session.db_path, replay.replay_id).catch(() => [] as Note[]),
-          getDrawings(session.db_path, replay.replay_id).catch(() => [] as Drawing[]),
-        ]);
-        setNotes(nt);
-        setDrawings(dr);
-        setView("annotate");
+        await loadSpagzReplayData(session);
         return;
       }
-
-      // Full analysis — show SpagzVideoModal for user to provide video
+      // Full analysis: ask the user for the video
       setPendingSpagzSession(session);
       setShowSpagzVideoModal(true);
     } catch (err) {
       console.error("Failed to open .spagz:", err);
-      setError(String(err));
+      setError(`Could not open the file: ${err}`);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [loadSpagzReplayData]);
+
+  const openAnyFile = useCallback(
+    async (path: string) => {
+      if (path.toLowerCase().endsWith(".spagz")) await openSpagzFile(path);
+      else await openSpagFile(path);
+    },
+    [openSpagFile, openSpagzFile]
+  );
 
   const handleOpenSpag = useCallback(async () => {
     const selected = await open({
       multiple: false,
       filters: [{ name: "Spaghetti Lab Analysis", extensions: ["spag", "spagz"] }],
     });
-    if (!selected) return;
-    const path = selected as string;
-    if (path.endsWith(".spagz")) {
-      await openSpagzFile(path);
-    } else {
-      await openSpagFile(path);
-    }
-  }, [openSpagFile, openSpagzFile]);
+    if (selected) await openAnyFile(selected as string);
+  }, [openAnyFile]);
 
   const handleExportSpag = useCallback(async () => {
     if (!dbPath || !selectedReplay) return;
@@ -676,139 +516,11 @@ export default function App() {
       await exportSpag(dbPath, selectedReplay.replay_id, dest);
     } catch (err) {
       console.error("Failed to export .spag:", err);
-      setError(String(err));
+      setError(`Export failed: ${err}`);
     } finally {
       setExportingSpag(false);
     }
   }, [dbPath, selectedReplay]);
-
-  const handleSaveSpag = useCallback(async () => {
-    if (!spagSession) return;
-    setSavingSpag(true);
-    try {
-      await saveSpag(spagSession.spag_path, spagSession.db_path);
-    } catch (err) {
-      console.error("Failed to save .spag:", err);
-      setError(String(err));
-    } finally {
-      setSavingSpag(false);
-    }
-  }, [spagSession]);
-
-  // .spagz file support
-  const loadSpagzReplayData = useCallback(async (session: SpagzSession) => {
-    setSpagzSession(session);
-    setDbPath(session.db_path);
-    const reps = await getReplays(session.db_path);
-    setReplays(reps);
-
-    const replay = reps.find(r => r.replay_id === session.replay_id) || reps[0];
-    if (replay) {
-      // Detect annotate session: frame_count === 0 means no CV analysis
-      if (replay.frame_count === 0) {
-        setSelectedReplay(replay);
-        // Check if video_url contains a YouTube/Twitch URL
-        if (session.video_url) {
-          const detected = detectVideoSource(session.video_url);
-          if (detected.type !== "file") {
-            setAnnotateSrcType(detected.type);
-            setAnnotateEmbedId(detected.id);
-            setVideoSrc(null);
-          } else {
-            setAnnotateSrcType("file");
-            setAnnotateEmbedId(undefined);
-          }
-        }
-        const [nt, dr] = await Promise.all([
-          getNotes(session.db_path, replay.replay_id).catch(() => [] as Note[]),
-          getDrawings(session.db_path, replay.replay_id).catch(() => [] as Drawing[]),
-        ]);
-        setNotes(nt);
-        setDrawings(dr);
-        setView("annotate");
-        return;
-      }
-
-      setSelectedReplay(replay);
-      setSelectedMatchIndex(null);
-      setView("dashboard");
-      const [fd, de, rn, st, hl, nt, dr] = await Promise.all([
-        getFrameData(session.db_path, replay.replay_id),
-        getDamageEvents(session.db_path, replay.replay_id),
-        getRounds(session.db_path, replay.replay_id),
-        getMatchStats(session.db_path, replay.replay_id),
-        getHighlights(session.db_path, replay.replay_id),
-        getNotes(session.db_path, replay.replay_id).catch(() => [] as Note[]),
-        getDrawings(session.db_path, replay.replay_id).catch(() => [] as Drawing[]),
-      ]);
-      setFrameData(fd);
-      setDamageEvents(de);
-      setRounds(rn);
-      setStats(st);
-      setHighlights(hl);
-      setNotes(nt);
-      setDrawings(dr);
-      setActiveTab("matches");
-    }
-  }, []);
-
-  const handleSpagzLocalFile = useCallback(async (filePath: string) => {
-    setShowSpagzVideoModal(false);
-    if (!pendingSpagzSession) return;
-    setLoading(true);
-    try {
-      setVideoPath(filePath);
-      try {
-        setVideoSrc(convertFileSrc(filePath));
-      } catch {
-        setVideoSrc(null);
-      }
-      setVideoMode("local");
-      await loadSpagzReplayData(pendingSpagzSession);
-    } catch (err) {
-      console.error("Failed to load .spagz:", err);
-      setError(String(err));
-    } finally {
-      setLoading(false);
-      setPendingSpagzSession(null);
-    }
-  }, [pendingSpagzSession, loadSpagzReplayData]);
-
-  const handleSpagzStreamUrl = useCallback(async (url: string) => {
-    setShowSpagzVideoModal(false);
-    if (!pendingSpagzSession) return;
-    setLoading(true);
-    try {
-      setVideoSrc(url);
-      setVideoPath(null);
-      setVideoMode("url");
-      await loadSpagzReplayData(pendingSpagzSession);
-    } catch (err) {
-      console.error("Failed to load .spagz:", err);
-      setError(String(err));
-    } finally {
-      setLoading(false);
-      setPendingSpagzSession(null);
-    }
-  }, [pendingSpagzSession, loadSpagzReplayData]);
-
-  const handleSpagzSkip = useCallback(async () => {
-    setShowSpagzVideoModal(false);
-    if (!pendingSpagzSession) return;
-    setLoading(true);
-    try {
-      setVideoSrc(null);
-      setVideoPath(null);
-      setVideoMode("none");
-      await loadSpagzReplayData(pendingSpagzSession);
-    } catch (err) {
-      console.error("Failed to load .spagz:", err);
-      setError(String(err));
-    } finally {
-      setLoading(false);
-      setPendingSpagzSession(null);
-    }
-  }, [pendingSpagzSession, loadSpagzReplayData]);
 
   const handleExportSpagz = useCallback(async () => {
     if (!dbPath || !selectedReplay) return;
@@ -817,482 +529,252 @@ export default function App() {
       defaultPath: `${selectedReplay.replay_id}.spagz`,
     });
     if (!dest) return;
-    setExportingSpagz(true);
+    setExportingSpag(true);
     try {
       await exportSpagz(dbPath, selectedReplay.replay_id, dest);
     } catch (err) {
       console.error("Failed to export .spagz:", err);
-      setError(String(err));
+      setError(`Export failed: ${err}`);
     } finally {
-      setExportingSpagz(false);
+      setExportingSpag(false);
     }
   }, [dbPath, selectedReplay]);
 
-  const handleSaveSpagz = useCallback(async () => {
-    if (!spagzSession) return;
+  const handleSaveSession = useCallback(async () => {
     setSavingSpag(true);
     try {
-      await saveSpagz(spagzSession.spagz_path, spagzSession.db_path);
+      if (spagzSession) await saveSpagz(spagzSession.spagz_path, spagzSession.db_path);
+      else if (spagSession) await saveSpag(spagSession.spag_path, spagSession.db_path);
     } catch (err) {
-      console.error("Failed to save .spagz:", err);
-      setError(String(err));
+      console.error("Failed to save:", err);
+      setError(`Saving failed: ${err}`);
     } finally {
       setSavingSpag(false);
     }
-  }, [spagzSession]);
+  }, [spagSession, spagzSession]);
+
+  const finishSpagzModal = useCallback(
+    async (mode: VideoMode, setup: () => void) => {
+      setShowSpagzVideoModal(false);
+      const session = pendingSpagzSession;
+      if (!session) return;
+      setLoading(true);
+      try {
+        setup();
+        setVideoMode(mode);
+        await loadSpagzReplayData(session);
+      } catch (err) {
+        console.error("Failed to load .spagz:", err);
+        setError(`Could not open the file: ${err}`);
+      } finally {
+        setLoading(false);
+        setPendingSpagzSession(null);
+      }
+    },
+    [pendingSpagzSession, loadSpagzReplayData]
+  );
 
   // Annotate session handler
   const handleAnnotateSession = useCallback(
     async (session: SpagzSession, srcType: VideoSourceType, embedId?: string) => {
       setShowAnnotateSetup(false);
       setDbPath(session.db_path);
-      setSelectedReplay({
+      setSpagSession(null);
+      setSpagzSession(session.spagz_path ? session : null);
+      setAnnotateSrcType(srcType);
+      setAnnotateEmbedId(embedId);
+      if (srcType === "file" && session.video_hint) setLocalVideo(session.video_hint);
+      else setVideoSrc(null);
+      await enterAnnotate(session.db_path, {
         replay_id: session.replay_id,
         video_path: session.video_hint,
         duration_ms: 0,
         frame_count: 0,
       });
-      setSpagzSession(session.spagz_path ? session : null);
-      setAnnotateSrcType(srcType);
-      setAnnotateEmbedId(embedId);
-
-      if (srcType === "file" && session.video_hint) {
-        try {
-          setVideoSrc(convertFileSrc(session.video_hint));
-        } catch {
-          setVideoSrc(null);
-        }
-      } else {
-        setVideoSrc(null);
-      }
-
-      // Load any existing notes and drawings
-      const [nt, dr] = await Promise.all([
-        getNotes(session.db_path, session.replay_id).catch(() => [] as Note[]),
-        getDrawings(session.db_path, session.replay_id).catch(() => [] as Drawing[]),
-      ]);
-      setNotes(nt);
-      setDrawings(dr);
-      setView("annotate");
     },
-    []
+    [enterAnnotate, setLocalVideo]
   );
 
-  // Listen for .spag/.spagz file association (app launched with file argument)
+  // .spag/.spagz file association (app launched with a file argument)
   useEffect(() => {
-    const unlisten1 = listen<string>("open-spag-file", (event) => {
-      openSpagFile(event.payload);
-    });
-    const unlisten2 = listen<string>("open-spagz-file", (event) => {
-      openSpagzFile(event.payload);
-    });
+    const unlisten1 = listen<string>("open-spag-file", (event) => openSpagFile(event.payload));
+    const unlisten2 = listen<string>("open-spagz-file", (event) => openSpagzFile(event.payload));
     return () => {
-      unlisten1.then(fn => fn());
-      unlisten2.then(fn => fn());
+      unlisten1.then((fn) => fn());
+      unlisten2.then((fn) => fn());
     };
   }, [openSpagFile, openSpagzFile]);
 
+  // Drag and drop: a video starts an analysis, a .spag / .spagz opens
+  useEffect(() => {
+    const un = getCurrentWebview().onDragDropEvent((e) => {
+      const t = e.payload.type;
+      if (t === "enter" || t === "over") setDragActive(true);
+      else if (t === "leave") setDragActive(false);
+      else if (t === "drop") {
+        setDragActive(false);
+        const path = e.payload.paths[0];
+        if (!path) return;
+        if (/\.spagz?$/i.test(path)) openAnyFile(path);
+        else if (VIDEO_EXT.test(path)) {
+          setPendingVideo(path);
+          setView("analyze");
+        } else setError("Drop a match video (MP4, MKV, AVI) or a .spag / .spagz file.");
+      }
+    });
+    return () => {
+      un.then((fn) => fn());
+    };
+  }, [openAnyFile]);
+
   const handleOpenDefaultDb = useCallback(async () => {
     try {
-      const path = await getDefaultDbPath();
-      await openDatabase(path);
+      await openDatabase(await getDefaultDbPath());
     } catch {
-      // No default DB — fall back to file picker
       await handleOpenDb();
     }
   }, [openDatabase, handleOpenDb]);
 
-  // Welcome screen
-  if (view === "welcome") {
-    return (
-      <>
-        <WelcomeScreen
-          onAnalyze={() => setView("analyze")}
-          onSplitVod={() => setView("split")}
-          onExportStrive={() => setView("strive")}
-          onOpenSpag={handleOpenSpag}
-          onOpenDatabase={handleOpenDefaultDb}
-          onAnnotate={() => setShowAnnotateSetup(true)}
-        />
-        {showAnnotateSetup && (
-          <AnnotateSetup
-            onSession={handleAnnotateSession}
-            onCancel={() => setShowAnnotateSetup(false)}
-          />
-        )}
-        {showSpagzVideoModal && pendingSpagzSession && (
-          <SpagzVideoModal
-            videoHint={pendingSpagzSession.video_hint}
-            videoUrl={pendingSpagzSession.video_url}
-            onLocalFile={handleSpagzLocalFile}
-            onStreamUrl={handleSpagzStreamUrl}
-            onSkip={handleSpagzSkip}
-            onCancel={() => {
-              setShowSpagzVideoModal(false);
-              setPendingSpagzSession(null);
-            }}
-          />
-        )}
-      </>
-    );
-  }
+  const navigate = useCallback((t: RailTarget) => {
+    if (t === "annotate") setShowAnnotateSetup(true);
+    else if (t === "analyze") {
+      setPendingVideo(null);
+      setView("analyze");
+    } else setView(t);
+  }, []);
 
-  // Annotate view
-  if (view === "annotate" && selectedReplay && dbPath) {
-    return (
-      <>
-        <AnnotateView
-          videoSrc={videoSrc}
-          srcType={annotateSrcType}
-          embedId={annotateEmbedId}
-          replay={selectedReplay}
-          dbPath={dbPath}
-          spagzSession={spagzSession}
-          notes={notes}
-          drawings={drawings}
-          onNotesChange={setNotes}
-          onDrawingsChange={setDrawings}
-          onBack={() => setView("welcome")}
-        />
-        {showAnnotateSetup && (
-          <AnnotateSetup
-            onSession={handleAnnotateSession}
-            onCancel={() => setShowAnnotateSetup(false)}
-          />
-        )}
-      </>
-    );
-  }
+  const railActive: RailTarget | null =
+    view === "review" || view === "library" ? "library" : view;
 
-  // Analysis progress view
-  if (view === "analyze") {
-    return (
+  let content: React.ReactNode;
+  if (view === "review" && selectedReplay && stats && displayStats) {
+    content = (
+      <ReviewView
+        data={{ replay: selectedReplay, frameData, damageEvents, rounds, matches, stats, highlights, notes, drawings }}
+        displayStats={displayStats}
+        selectedMatch={selectedMatch}
+        onSelectMatch={setSelectedMatchIndex}
+        videoSrc={videoSrc}
+        videoMode={videoMode}
+        seekToMs={seekToMs}
+        onSeek={handleSeek}
+        onSeeked={() => setSeekToMs(null)}
+        currentTimeMs={currentTimeMs}
+        onTimeUpdate={setCurrentTimeMs}
+        onRoundSeek={handleRoundSeek}
+        onExportClip={(startMs, endMs) => setExportTarget({ startMs, endMs })}
+        onOverrideWinner={handleOverrideWinner}
+        onLocateVideo={handleLocateVideo}
+        onAddNote={handleAddNote}
+        onUpdateNote={handleUpdateNote}
+        onDeleteNote={handleDeleteNote}
+        onSaveDrawing={handleSaveDrawing}
+        onDeleteDrawing={handleDeleteDrawing}
+        onBack={() => setView("library")}
+        onReload={() => dbPath && loadReplayData(dbPath, selectedReplay)}
+        onReanalyze={dbPath ? handleReanalyze : undefined}
+        busy={{ loading, reanalyzing, reanalyzeText }}
+        share={{
+          session: spagzSession ? "spagz" : spagSession ? "spag" : null,
+          onSave: handleSaveSession,
+          saving: savingSpag,
+          onExportSpag: handleExportSpag,
+          onExportSpagz: handleExportSpagz,
+          exporting: exportingSpag,
+        }}
+      />
+    );
+  } else if (view === "review") {
+    content = (
+      <div className="h-full flex items-center justify-center gap-3 text-text-secondary">
+        <Spinner className="text-accent-purple" /> Loading the results…
+      </div>
+    );
+  } else if (view === "annotate" && selectedReplay && dbPath) {
+    content = (
+      <AnnotateView
+        videoSrc={videoSrc}
+        srcType={annotateSrcType}
+        embedId={annotateEmbedId}
+        replay={selectedReplay}
+        dbPath={dbPath}
+        spagzSession={spagzSession}
+        notes={notes}
+        drawings={drawings}
+        onNotesChange={setNotes}
+        onDrawingsChange={setDrawings}
+        onBack={() => setView("library")}
+      />
+    );
+  } else if (view === "analyze") {
+    content = (
       <AnalysisProgress
+        key={pendingVideo ?? "pick"}
+        initialPath={pendingVideo}
         onComplete={handleAnalysisComplete}
-        onCancel={() => setView(dbPath ? "dashboard" : "welcome")}
+        onCancel={() => setView("library")}
       />
     );
-  }
-
-  // Strive replay export view
-  if (view === "strive") {
-    return (
-      <StriveExportView
-        onComplete={handleAnalysisComplete}
-        onCancel={() => setView("welcome")}
-      />
-    );
-  }
-
-  // VOD splitter view
-  if (view === "split") {
-    return (
+  } else if (view === "strive") {
+    content = <StriveExportView onComplete={handleAnalysisComplete} onCancel={() => setView("library")} />;
+  } else if (view === "split") {
+    content = (
       <SplitVodView
         onComplete={(outputDir) => {
           console.log("VOD split complete:", outputDir);
-          setView("welcome");
+          setView("library");
         }}
-        onCancel={() => setView("welcome")}
+        onCancel={() => setView("library")}
+      />
+    );
+  } else {
+    content = (
+      <LibraryView
+        replays={replays}
+        dbPath={dbPath}
+        loading={loading}
+        dragActive={dragActive}
+        onOpenReplay={handleOpenReplay}
+        onAddVideo={() => navigate("analyze")}
+        onOpenFile={handleOpenSpag}
+        onOpenDatabase={handleOpenDefaultDb}
+        onAnnotate={() => setShowAnnotateSetup(true)}
+        onSplit={() => setView("split")}
+        onStrive={() => setView("strive")}
+        onReanalyzeAll={dbPath && !spagSession && !spagzSession ? handleReanalyzeAll : undefined}
+        reanalyzingAll={reanalyzingAll}
       />
     );
   }
 
-  // Dashboard
   return (
-    <div className="h-screen flex flex-col overflow-hidden">
-      {/* Top bar */}
-      <header className="h-12 bg-surface-1 border-b border-surface-4/50 flex items-center px-4 shrink-0">
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => {
-              setDbPath(null);
-              setSpagSession(null);
-              setSpagzSession(null);
-              setVideoMode("local");
-              setView("welcome");
-            }}
-            className="flex items-center gap-2 hover:opacity-80 transition-opacity cursor-pointer"
-          >
-            <img
-              src="/spaghetti-showdown-logo.png"
-              alt="Spaghetti Showdown"
-              className="h-7"
-            />
-            <span className="text-accent-purple font-semibold text-sm tracking-wide">
-              SPAGHETTI LAB
-            </span>
-          </button>
-          <span className="text-text-muted text-xs">|</span>
-          <span className="text-text-secondary text-xs truncate max-w-[400px]">
-            {spagzSession
-              ? spagzSession.spagz_path.split(/[/\\]/).pop()
-              : spagSession
-              ? spagSession.spag_path.split(/[/\\]/).pop()
-              : dbPath?.split(/[/\\]/).pop()}
-          </span>
-          {spagzSession ? (
-            <span className="text-accent-gold text-[10px] font-medium">.spagz</span>
-          ) : spagSession ? (
-            <span className="text-p2 text-[10px] font-medium">.spag</span>
-          ) : (
-            <span className="text-text-muted text-[10px]">
-              {replays.length} sets
-            </span>
-          )}
-        </div>
-        <div className="ml-auto flex items-center gap-2">
-          {error && (
-            <span className="text-p1 text-xs mr-2">{error}</span>
-          )}
-          {spagzSession && (
-            <button
-              onClick={handleSaveSpagz}
-              disabled={savingSpag}
-              className="btn-ghost text-xs text-accent-green border-accent-green/30 hover:bg-accent-green/10"
-            >
-              {savingSpag ? "Saving..." : "Save .spagz"}
+    <div className="h-screen flex overflow-hidden bg-surface-0">
+      <AppRail active={railActive} onNavigate={navigate} onOpenFile={handleOpenSpag} />
+      <main className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
+        <UpdateBanner />
+        {error && (
+          <div className="mx-3 mt-3 flex items-start gap-2 rounded-lg border border-p1/40 bg-p1/10 px-3 py-2 text-sm text-p1-light shrink-0">
+            <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+            <span className="flex-1 min-w-0 break-words">{error}</span>
+            <button onClick={() => setError(null)} className="shrink-0 opacity-70 hover:opacity-100 cursor-pointer" aria-label="Dismiss">
+              <X size={16} />
             </button>
-          )}
-          {spagSession && !spagzSession && (
-            <button
-              onClick={handleSaveSpag}
-              disabled={savingSpag}
-              className="btn-ghost text-xs text-accent-green border-accent-green/30 hover:bg-accent-green/10"
-            >
-              {savingSpag ? "Saving..." : "Save .spag"}
-            </button>
-          )}
-          {selectedReplay && !spagSession && !spagzSession && (
-            <>
-              <button
-                onClick={handleExportSpag}
-                disabled={exportingSpag}
-                className="btn-ghost text-xs text-p2 border-p2/30 hover:bg-p2/10"
-              >
-                {exportingSpag ? "Exporting..." : "Export .spag"}
-              </button>
-              <button
-                onClick={handleExportSpagz}
-                disabled={exportingSpagz}
-                className="btn-ghost text-xs text-accent-gold border-accent-gold/30 hover:bg-accent-gold/10"
-              >
-                {exportingSpagz ? "Exporting..." : "Export .spagz"}
-              </button>
-            </>
-          )}
-          <button onClick={handleOpenDb} className="btn-ghost text-xs">
-            Open Database
-          </button>
-        </div>
-      </header>
+          </div>
+        )}
+        <div className="flex-1 min-h-0">{content}</div>
 
-      <UpdateBanner />
-
-      <div className="flex flex-1 overflow-hidden">
-        {/* Sidebar */}
-        <Sidebar
-          replays={replays}
-          selectedReplay={selectedReplay}
-          onSelect={handleSelectReplay}
-          onOpenDb={handleOpenDb}
-          onReload={selectedReplay && dbPath ? () => loadReplayData(dbPath, selectedReplay) : undefined}
-          reloading={loading}
-          onReanalyze={selectedReplay && dbPath ? handleReanalyze : undefined}
-          reanalyzing={reanalyzing}
-          onReanalyzeAll={dbPath ? handleReanalyzeAll : undefined}
-          reanalyzingAll={reanalyzingAll}
-          onAnalyzeNew={() => setView("analyze")}
-          onAnnotate={() => setShowAnnotateSetup(true)}
-          videoMode={videoMode}
-        />
-
-        {/* Main content */}
-        <main className="flex-1 flex flex-col overflow-hidden relative">
-          {(reanalyzing || reanalyzingAll) && (
-            <ReanalyzeOverlay isAll={reanalyzingAll} />
-          )}
-          {loading ? (
-            <div className="flex-1 flex items-center justify-center">
-              <div className="flex flex-col items-center gap-3">
-                <div className="w-8 h-8 border-2 border-accent-purple/30 border-t-accent-purple rounded-full animate-spin" />
-                <div className="text-text-secondary text-sm">
-                  Loading analysis data...
-                </div>
-              </div>
+        {reanalyzingAll && (
+          <div className="absolute inset-0 z-40 bg-surface-0/80 backdrop-blur-sm flex items-center justify-center">
+            <div className="flex flex-col items-center gap-3 bg-surface-2 rounded-xl border border-surface-4 px-8 py-6 shadow-2xl min-w-[320px]">
+              <Spinner size={28} className="text-accent-purple" />
+              <div className="text-sm font-medium">Running the analysis again on every video…</div>
+              {reanalyzeText && <div className="text-xs text-text-muted max-w-[280px] truncate">{reanalyzeText}</div>}
             </div>
-          ) : selectedReplay && stats ? (
-            <>
-              {/* Top section: video + overview + timeline (resizable) */}
-              <div
-                className="shrink-0 overflow-y-auto"
-                style={{ height: topHeight }}
-              >
-                {/* Match zoom banner */}
-                {selectedMatch && (
-                  <div className="mx-4 mt-3 mb-0 flex items-center gap-2 bg-accent-purple/10 border border-accent-purple/25 rounded-lg px-3 py-1.5">
-                    <span className="text-accent-purple font-semibold text-sm">
-                      Viewing Game {selectedMatch.match_index + 1}
-                    </span>
-                    <span className="text-text-muted text-xs">
-                      {Math.floor(selectedMatch.start_ms / 60000)}:{String(Math.floor((selectedMatch.start_ms / 1000) % 60)).padStart(2, "0")} – {Math.floor(selectedMatch.end_ms / 60000)}:{String(Math.floor((selectedMatch.end_ms / 1000) % 60)).padStart(2, "0")}
-                    </span>
-                    <button
-                      onClick={() => setSelectedMatchIndex(null)}
-                      className="ml-auto text-xs bg-accent-purple/20 hover:bg-accent-purple/30 text-accent-purple px-2.5 py-1 rounded transition-colors cursor-pointer"
-                    >
-                      Show all games
-                    </button>
-                  </div>
-                )}
+          </div>
+        )}
+      </main>
 
-                {/* Video + Overview row */}
-                <div className="flex gap-4 p-4 pb-0">
-                  <div className="flex-1 min-w-0">
-                    <VideoPlayer
-                      src={videoSrc}
-                      seekToMs={seekToMs}
-                      onSeeked={() => setSeekToMs(null)}
-                      durationMs={selectedReplay.duration_ms}
-                      rounds={rounds}
-                      damageEvents={damageEvents}
-                      selectedMatch={selectedMatch}
-                      onClearSelection={() => setSelectedMatchIndex(null)}
-                      onLocateVideo={handleLocateVideo}
-                      onTimeUpdate={setCurrentTimeMs}
-                      notes={notes}
-                      drawings={drawings}
-                      onSaveDrawing={handleSaveDrawing}
-                      onDeleteDrawing={handleDeleteDrawing}
-                    />
-                  </div>
-                  <div className="w-[320px] shrink-0">
-                    <MatchOverview
-                      stats={displayStats!}
-                      replay={selectedReplay}
-                      selectedMatch={selectedMatch}
-                      onClearSelection={() => setSelectedMatchIndex(null)}
-                    />
-                  </div>
-                </div>
-
-                {/* Health timeline */}
-                <div className="px-4 pt-3">
-                  <HealthTimeline
-                    frameData={frameData}
-                    rounds={rounds}
-                    damageEvents={damageEvents}
-                    highlights={highlights}
-                    notes={notes}
-                    onSeek={handleSeek}
-                    selectedMatch={selectedMatch}
-                    onClearSelection={() => setSelectedMatchIndex(null)}
-                  />
-                </div>
-              </div>
-
-              {/* Resize handle */}
-              <div
-                className="h-1.5 shrink-0 cursor-row-resize group flex items-center justify-center hover:bg-accent-purple/10 transition-colors"
-                onMouseDown={handleResizeStart}
-              >
-                <div className="w-10 h-0.5 rounded-full bg-surface-4 group-hover:bg-accent-purple/50 transition-colors" />
-              </div>
-
-              {/* Tab section */}
-              <div className="flex-1 flex flex-col overflow-hidden px-4 pt-1 pb-4">
-                <div className="flex border-b border-surface-4/50 shrink-0">
-                  {(
-                    [
-                      ["matches", "Matches"],
-                      ["rounds", "Rounds"],
-                      ["highlights", "Highlights"],
-                      ["damage", "Damage Log"],
-                      ["notes", "Notes"],
-                    ] as const
-                  ).map(([key, label]) => (
-                    <button
-                      key={key}
-                      className={`tab-btn ${activeTab === key ? "active" : ""}`}
-                      onClick={() => setActiveTab(key)}
-                    >
-                      {label}
-                      {key === "matches" && matches.length > 0 && (
-                        <span className="ml-1.5 text-[10px] text-text-muted bg-surface-3 px-1 py-0.5 rounded">
-                          {matches.length}
-                        </span>
-                      )}
-                      {key === "rounds" && rounds.length > 0 && (
-                        <span className="ml-1.5 text-[10px] text-text-muted bg-surface-3 px-1 py-0.5 rounded">
-                          {rounds.length}
-                        </span>
-                      )}
-                      {key === "highlights" && highlights.length > 0 && (
-                        <span className="ml-1.5 text-[10px] text-accent-gold bg-accent-gold/15 px-1 py-0.5 rounded">
-                          {highlights.length}
-                        </span>
-                      )}
-                      {key === "notes" && notes.length > 0 && (
-                        <span className="ml-1.5 text-[10px] text-accent-green bg-accent-green/15 px-1 py-0.5 rounded">
-                          {notes.length}
-                        </span>
-                      )}
-                    </button>
-                  ))}
-                </div>
-                <div className="flex-1 overflow-y-auto mt-3">
-                  {activeTab === "matches" && (
-                    <MatchList
-                      matches={matches}
-                      onSeek={handleRoundSeek}
-                      onExport={handleExport}
-                      selectedMatchIndex={selectedMatchIndex}
-                      onOverrideWinner={handleOverrideWinner}
-                    />
-                  )}
-                  {activeTab === "rounds" && (
-                    <RoundBreakdown
-                      rounds={rounds}
-                      onSeek={handleRoundSeek}
-                      onExport={handleExport}
-                    />
-                  )}
-                  {activeTab === "highlights" && (
-                    <HighlightsPanel
-                      highlights={highlights}
-                      onSeek={handleSeek}
-                      onExport={handleExport}
-                    />
-                  )}
-                  {activeTab === "damage" && (
-                    <DamageLog
-                      events={damageEvents}
-                      onSeek={handleSeek}
-                    />
-                  )}
-                  {activeTab === "notes" && (
-                    <NotesPanel
-                      notes={notes}
-                      drawings={drawings}
-                      onSeek={handleSeek}
-                      onAdd={handleAddNote}
-                      onUpdate={handleUpdateNote}
-                      onDelete={handleDeleteNote}
-                      onDeleteDrawing={handleDeleteDrawing}
-                      currentTimeMs={currentTimeMs}
-                    />
-                  )}
-                </div>
-              </div>
-            </>
-          ) : (
-            <div className="flex-1 flex items-center justify-center text-text-muted">
-              Select a replay from the sidebar
-            </div>
-          )}
-        </main>
-      </div>
-
-      {/* Export modal — only for local video */}
+      {/* Clip export: only for a local video */}
       {exportTarget && videoPath && videoMode === "local" && (
         <ExportModal
           videoPath={videoPath}
@@ -1302,14 +784,18 @@ export default function App() {
         />
       )}
 
-      {/* Spagz video source modal */}
       {showSpagzVideoModal && pendingSpagzSession && (
         <SpagzVideoModal
           videoHint={pendingSpagzSession.video_hint}
           videoUrl={pendingSpagzSession.video_url}
-          onLocalFile={handleSpagzLocalFile}
-          onStreamUrl={handleSpagzStreamUrl}
-          onSkip={handleSpagzSkip}
+          onLocalFile={(filePath) => finishSpagzModal("local", () => setLocalVideo(filePath))}
+          onStreamUrl={(url) =>
+            finishSpagzModal("url", () => {
+              setVideoSrc(url);
+              setVideoPath(null);
+            })
+          }
+          onSkip={() => finishSpagzModal("none", () => setLocalVideo(null))}
           onCancel={() => {
             setShowSpagzVideoModal(false);
             setPendingSpagzSession(null);
@@ -1317,10 +803,7 @@ export default function App() {
         />
       )}
       {showAnnotateSetup && (
-        <AnnotateSetup
-          onSession={handleAnnotateSession}
-          onCancel={() => setShowAnnotateSetup(false)}
-        />
+        <AnnotateSetup onSession={handleAnnotateSession} onCancel={() => setShowAnnotateSetup(false)} />
       )}
     </div>
   );

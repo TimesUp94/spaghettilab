@@ -1,20 +1,29 @@
 # React Frontend
 
-The frontend is a React + TypeScript application built with Vite, running inside a Tauri webview. It provides a dashboard for viewing replay analysis, a VOD splitter workflow, and an analysis progress view.
+The frontend is a React + TypeScript application built with Vite, running inside a Tauri webview. A left
+rail (`components/shell/AppRail.tsx`) is always visible; the area next to it shows one view at a time.
 
 ---
 
 ## Application Views
 
-The top-level `App` component manages a `view` state with these modes:
+The top-level `App` component manages a `view` state (no router):
 
-| View | Component/Layout | Description |
-|------|-----------------|-------------|
-| `welcome` | `WelcomeScreen` | Intro screen with action buttons |
-| `analyze` | `AnalysisProgress` | Live progress from Python subprocess |
+| View | Component | Description |
+|------|-----------|-------------|
+| `library` | `views/LibraryView.tsx` | Home. The analysed videos of the open database as cards (search above 6), or a getting-started page with a drop zone when there are none |
+| `review` | `views/ReviewView.tsx` | One video's results: fitted video, timeline, tabbed results panel |
+| `analyze` | `AnalysisProgress` | Pick (or receive a dropped) video and analyse it, with live progress |
+| `annotate` | `AnnotateView` | Notes, drawings and the checklist on a file or a YouTube / Twitch embed (no analysis) |
 | `split` | `SplitVodView` | VOD splitter multi-step workflow |
-| `strive` | `StriveExportView` | Export saved Strive replays from the running game, then analyze them |
-| `dashboard` | Full dashboard layout | Main analysis viewer |
+| `strive` | `StriveExportView` | Export saved Strive replays from the running game, then analyse them |
+
+The rail's entries: Library, Analyse, Annotate (opens `AnnotateSetup`), Split VOD, Strive, and at the bottom
+Open (.spag / .spagz) and Support. Errors from any view show as a dismissable banner above the view.
+
+**Drag and drop** (`getCurrentWebview().onDragDropEvent` in `App`): a dropped video (mp4/mkv/avi/mov/webm)
+goes to `analyze` and starts at once; a `.spag` / `.spagz` opens. The library shows its drop zone while a
+drag is over the window.
 
 ---
 
@@ -116,8 +125,11 @@ When a match is selected (`selectedMatchIndex !== null`), `displayStats` is reco
 ### Startup
 
 1. `getDefaultDbPath()` attempts to find the default database
-2. If found, `openDatabase(path)` loads replays and switches to dashboard
-3. If not found, stays on welcome screen
+2. If found, `openDatabase(path)` loads the replay list and shows the library
+3. If not found, the library shows the getting-started page
+
+Clicking a card calls `handleOpenReplay`: `loadReplayData` and the review view (a notes-only replay,
+`frame_count === 0`, opens the annotate view).
 
 ### loadReplayData(db, replay)
 
@@ -147,72 +159,43 @@ Video path is resolved and converted to a Tauri asset URL via `convertFileSrc()`
 
 ## Components
 
-### Sidebar
+### ReviewView
 
-**Source:** `app/src/components/Sidebar.tsx`
+**Source:** `app/src/views/ReviewView.tsx`
 
-Left sidebar containing:
-- Replay list with selection highlighting
-- Database path display
-- Action buttons:
-  - Reload data
-  - Reanalyze current replay (re-run Python CV pipeline)
-  - Reanalyze all replays
-  - Analyze new video
-  - Open database
+- **Header:** back to the library, the set's players (from `setInfo(replay_id)`), a game picker (All games,
+  G1, G2…; a dot in the winner's colour), Reload, Reanalyse (local video only) and Share (export `.spag` /
+  `.spagz`; inside a `.spag` / `.spagz` session it is Save).
+- **Wide windows (≥ 1024 px, `useMediaQuery`):** a grid of the video column and a results panel
+  (`minmax(340px, 30%)`, 480 px from 2xl). The video column is the player (`fill`: the 16:9 video is fitted
+  into the space left above the timeline, so it never overflows) and the `ReviewTimeline`.
+- **Narrow windows:** one scrolling column: video (full width), timeline, then the panel.
+- **Panel tabs:** Overview (`MatchOverview` stats + `MatchList` games), Rounds, Highlights, Damage, Notes.
+  With a game selected, Rounds / Highlights / Damage list only that game, and the timeline zooms to it.
+
+### VideoPlayer
 
 ### VideoPlayer
 
 **Source:** `app/src/components/VideoPlayer.tsx`
 
-HTML5 `<video>` element with:
+HTML5 `<video>` or a YouTube / Twitch embed, with:
+- `fill`: fit the 16:9 video inside the parent's height (a `container-type: size` box; the video is
+  `min(100cqw, 100cqh * 16 / 9)` wide). Without it the video takes the full width.
+- `showProgress`: its own progress bar (rounds, big hits, notes, drawings); off under a `ReviewTimeline`
 - Programmatic seeking via `seekToMs` prop (consumed then cleared)
-- Round boundary markers on the progress bar
-- Damage event markers
+- Controls: ±5 s, play, frame step, time, Draw, speed, volume, shortcuts hint (lucide icons)
 - "Locate video" button when video file is not found
-- Note markers display
-- Time update callback for synchronizing with other components
+- `onTimeUpdate`: on `timeupdate` and, while playing, every ~66 ms (smooth playhead)
 
-### HealthTimeline
+### ReviewTimeline
 
-**Source:** `app/src/components/HealthTimeline.tsx`
+**Source:** `app/src/components/ReviewTimeline.tsx`
 
-Built with Recharts (`AreaChart` / `ResponsiveContainer`).
-
-**Layout:**
-- Health chart: 120px height, shows P1 and P2 health over time as overlapping area charts
-- P1 tension chart: 44px height, shows P1 tension gauge
-- P2 tension chart: 44px height, shows P2 tension gauge
-
-**Data structure:**
-```typescript
-interface ChartPoint {
-  time_s: number;
-  p1: number | null;     // P1 health
-  p2: number | null;     // P2 health
-  t1: number | null;     // P1 tension
-  t2: number | null;     // P2 tension
-}
-```
-
-**Tension spend markers:**
-```typescript
-interface TensionSpend {
-  time_s: number;
-  side: "p1" | "p2";
-  drop: number;  // drops >= 12% are marked
-}
-```
-A drop is measured from the side's last non-null tension reading up to 8 s back: tension is
-`null` while the HUD is hidden, which includes every super cinematic, where tension is spent
-(29 % of the drops on Tappa #4 are only visible across such a gap).
-
-**Visual features:**
-- Round boundaries as `ReferenceLine` components
-- Match selection as `ReferenceArea` highlighting
-- Highlight and note markers
-- Click-to-seek interaction
-- Damage events displayed contextually
+One SVG on a shared time axis (the whole replay, or the selected game): a rounds lane (one block per round
+in the winner's colour, dashed when the winner is uncertain, game starts marked), both health lines,
+both tension gauges as bars, big hits (≥ 30 %), notes and drawings, time ticks, the playhead and a hover
+line with the time and round. Click or drag anywhere to seek. Data is bucketed to ~2 px per sample.
 
 ### MatchOverview
 
@@ -331,57 +314,31 @@ Auto-updater banner:
 
 **Source:** `app/src/components/AnalysisProgress.tsx`
 
-Live progress display during Python analysis:
-- File picker for selecting video to analyze
-- Real-time output streaming from the Python subprocess
-- Completion callback with the database path
-
-### WelcomeScreen
-
-**Source:** `app/src/components/WelcomeScreen.tsx`
-
-Intro view with action cards:
-- "Analyze a Set" -> analyze view
-- "Split a VOD" -> split view
-- "Export Strive Replays" -> strive view
-- "Open .spag file" -> file picker
-- "Open Database" -> database picker
+- File picker (or `initialPath` from a drop, which starts at once)
+- Progress bar and stages from the `analyze-progress` event: `analyze_video` streams the script's stdout
+  lines, and `scripts/analyze_replay.py` prints `Progress NN%` during the frame pass
+- On failure the last output lines and stderr; on success the library of the result database
 
 ---
 
 ## Styling
 
-The app uses **Tailwind CSS** with custom color tokens defined in the Tailwind config.
+The app uses **Tailwind CSS** with custom color tokens defined in the Tailwind config. Dark only.
 
 ### Custom Color Tokens
 
 | Token | Usage |
 |-------|-------|
-| `p1` | Player 1 color (blue-ish) |
-| `p2` | Player 2 color (red-ish) |
-| `accent-purple` | Primary accent (buttons, highlights, branding) |
-| `accent-gold` | Secondary accent (comebacks, highlights badge) |
-| `accent-green` | Tertiary accent (notes, tension, save actions) |
-| `surface-0` | Deepest background |
-| `surface-1` | Header/sidebar background |
-| `surface-2` | Card background |
-| `surface-3` | Hover/active states |
-| `surface-4` | Borders, dividers |
-| `text-primary` | Primary text color |
-| `text-secondary` | Secondary text color |
-| `text-muted` | Muted/de-emphasized text |
+| `p1` | Player 1 colour (red, `#e84040`) |
+| `p2` | Player 2 colour (blue, `#4088e8`) |
+| `accent-purple` | Primary accent; despite the name it is yellow (`#e8c840`): primary buttons, active rail item |
+| `accent-gold` | Comebacks, drawings |
+| `accent-green` | Notes |
+| `surface-0` … `surface-4` | Backgrounds from deepest to borders |
+| `text-primary` / `text-secondary` / `text-muted` | Text |
 
-### Component Classes
+### Shared UI
 
-- `btn-ghost`: Ghost-style button with border
-- `tab-btn`: Tab button with active state indicator
-- All interactive elements use `cursor-pointer` and transition effects
-- Responsive layout with `flex`, `overflow-hidden`, and percentage-based heights
-
-### Resizable Split
-
-The dashboard has a draggable resize handle between the top section (video + timeline) and the bottom section (tab content):
-- Default top height: "55%"
-- Drag handle: 6px tall, centered dot indicator
-- Mouse drag computes delta from start position, minimum height 150px
-- Body cursor changes to `row-resize` during drag
+`components/ui.tsx`: `Button` (primary / secondary / ghost / danger, sm / md / lg, lucide icon, loading),
+`IconButton`, `Badge`, `Spinner`, `Modal`, `Tabs`, `EmptyState`, `PageHeader`. Icons come from
+`lucide-react`. The older `.btn-primary` / `.btn-ghost` classes in `index.css` match `Button`.

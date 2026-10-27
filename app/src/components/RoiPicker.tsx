@@ -338,7 +338,7 @@ export function RoiPicker({ imageSrc, videoWidth, videoHeight, videoDurationSecs
   };
 
   return (
-    <div className="h-screen flex flex-col bg-surface-0">
+    <div className="h-full flex flex-col bg-surface-0">
       <div className="flex items-center justify-between p-4 border-b border-surface-4/30">
         <h3 className="text-sm font-semibold text-text-primary">
           Adjust Detection Regions
@@ -414,7 +414,7 @@ export function RoiPicker({ imageSrc, videoWidth, videoHeight, videoDurationSecs
           <span>Drag regions to move. Drag corners to resize/reshape. Use slider to find gameplay.</span>
           <span className="text-blue-400">P1 Name</span>
           <span className="text-red-400">P2 Name</span>
-          <span className="text-yellow-400">Timer</span>
+          <span className="text-accent-purple">Timer</span>
         </div>
       </div>
     </div>

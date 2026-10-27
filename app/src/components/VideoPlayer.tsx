@@ -5,6 +5,11 @@ import { DrawingOverlay } from "./DrawingOverlay";
 import { DrawingToolbar } from "./DrawingToolbar";
 import { loadYouTubeApi } from "../lib/youtubeApi";
 import { loadTwitchApi } from "../lib/twitchApi";
+import {
+  Play, Pause, RotateCcw, RotateCw, ChevronLeft, ChevronRight, Volume2, VolumeX,
+  Pencil, Keyboard, VideoOff, FolderOpen,
+} from "lucide-react";
+import { Button, IconButton } from "./ui";
 
 interface Props {
   src: string | null;
@@ -23,6 +28,10 @@ interface Props {
   drawings?: Drawing[];
   onSaveDrawing?: (timestampMs: number, strokesJson: string) => void;
   onDeleteDrawing?: (drawingId: number) => void;
+  /** Fill the parent's height: the video is fitted inside it instead of taking the full width. */
+  fill?: boolean;
+  /** The built-in progress bar; off when a ReviewTimeline sits under the player. */
+  showProgress?: boolean;
 }
 
 function formatTime(s: number): string {
@@ -48,6 +57,8 @@ export function VideoPlayer({
   drawings = [],
   onSaveDrawing,
   onDeleteDrawing,
+  fill = false,
+  showProgress = true,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const embedRef = useRef<HTMLDivElement>(null);
@@ -55,6 +66,7 @@ export function VideoPlayer({
   const progressRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const videoContainerRef = useRef<HTMLDivElement>(null);
+  const pendingSeekRef = useRef<number | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(durationMs / 1000);
   const [playing, setPlaying] = useState(false);
@@ -271,11 +283,15 @@ export function VideoPlayer({
 
   useEffect(() => {
     if (isEmbed) return;
-    if (seekToMs !== null && videoRef.current) {
-      videoRef.current.currentTime = seekToMs / 1000;
-      onSeeked();
-    }
-  }, [seekToMs, onSeeked, isEmbed]);
+    const video = videoRef.current;
+    if (seekToMs === null || !video) return;
+    // a seek before the metadata has loaded is dropped by the browser: keep it for loadedmetadata
+    if (video.readyState >= 1) video.currentTime = seekToMs / 1000;
+    else pendingSeekRef.current = seekToMs / 1000;
+    setCurrentTime(seekToMs / 1000);
+    onTimeUpdate?.(seekToMs);
+    onSeeked();
+  }, [seekToMs, onSeeked, onTimeUpdate, isEmbed]);
 
   // Seek for embeds
   useEffect(() => {
@@ -298,11 +314,36 @@ export function VideoPlayer({
     return () => video.removeEventListener("timeupdate", handler);
   }, [src, onTimeUpdate, isEmbed]);
 
+  // timeupdate fires ~4x a second: while playing, also report every ~66 ms so the
+  // timeline's playhead moves smoothly
+  useEffect(() => {
+    if (isEmbed || !playing) return;
+    let raf = 0;
+    let last = 0;
+    const tick = (now: number) => {
+      const video = videoRef.current;
+      if (video && now - last > 66) {
+        last = now;
+        setCurrentTime(video.currentTime);
+        onTimeUpdate?.(video.currentTime * 1000);
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [playing, isEmbed, onTimeUpdate]);
+
   useEffect(() => {
     if (isEmbed) return;
     const video = videoRef.current;
     if (!video) return;
-    const handler = () => setDuration(video.duration || durationMs / 1000);
+    const handler = () => {
+      setDuration(video.duration || durationMs / 1000);
+      if (pendingSeekRef.current !== null) {
+        video.currentTime = pendingSeekRef.current;
+        pendingSeekRef.current = null;
+      }
+    };
     video.addEventListener("loadedmetadata", handler);
     return () => video.removeEventListener("loadedmetadata", handler);
   }, [src, durationMs, isEmbed]);
@@ -380,6 +421,16 @@ export function VideoPlayer({
     doSeek(Math.max(0, Math.min(d, t + delta)));
   }, [doGetCurrentTime, doGetDuration, doSeek, duration]);
 
+  const stepFrame = useCallback((dir: number) => {
+    const v = videoRef.current;
+    if (isEmbed || !v) return;
+    if (!v.paused) {
+      v.pause();
+      setPlaying(false);
+    }
+    v.currentTime = Math.max(0, v.currentTime + dir / 30);
+  }, [isEmbed]);
+
   // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -455,11 +506,20 @@ export function VideoPlayer({
   );
 
   const hasVideo = isEmbed ? !!embedId : !!src;
+  const rates = [0.25, 0.5, 1, 1.5, 2];
 
   return (
-    <div ref={containerRef} className="bg-surface-2 rounded-lg overflow-hidden border border-surface-4/50">
-      {/* Video */}
-      <div ref={videoContainerRef} className="relative bg-black aspect-video">
+    <div ref={containerRef} className={`flex flex-col min-h-0 ${fill ? "h-full" : ""}`}>
+      {/* Video: fitted inside the space it gets (16:9, never wider or taller) */}
+      <div
+        className={`relative bg-black rounded-lg overflow-hidden flex items-center justify-center ${fill ? "flex-1 min-h-[120px]" : "aspect-video"}`}
+        style={fill ? { containerType: "size" } : undefined}
+      >
+        <div
+          ref={videoContainerRef}
+          className="relative aspect-video max-w-full max-h-full"
+          style={fill ? { width: "min(100cqw, 100cqh * 16 / 9)" } : { width: "100%" }}
+        >
         {hasVideo ? (
           <>
             {isEmbed ? (
@@ -491,7 +551,6 @@ export function VideoPlayer({
                 containerRef={videoContainerRef}
               />
             )}
-            {/* Drawing toolbar */}
             {drawingMode && (
               <DrawingToolbar
                 activeTool={activeTool}
@@ -504,252 +563,155 @@ export function VideoPlayer({
                 onDone={handleDrawingDone}
               />
             )}
-            {/* Overlay: current round info */}
             {currentRound && !drawingMode && (
-              <div className="absolute top-2 left-2 bg-black/60 backdrop-blur-sm rounded px-2 py-1 text-[10px] text-text-secondary pointer-events-none">
+              <div className="absolute top-2 left-2 bg-black/60 backdrop-blur-sm rounded-md px-2 py-1 text-[11px] font-medium text-text-primary pointer-events-none">
                 Round {currentRound.round_index + 1}
-                {currentRound.is_comeback && (
-                  <span className="ml-1.5 text-accent-gold">COMEBACK</span>
-                )}
+                {currentRound.is_comeback && <span className="ml-1.5 text-accent-gold">Comeback</span>}
               </div>
             )}
-            {/* Drawing mode indicator */}
             {drawingMode && (
-              <div className="absolute bottom-2 left-2 bg-accent-gold/80 rounded px-2 py-1 text-[10px] text-black font-medium pointer-events-none">
-                Drawing Mode
+              <div className="absolute bottom-2 left-2 bg-accent-gold/90 rounded-md px-2 py-1 text-[11px] text-black font-semibold pointer-events-none">
+                Drawing — Esc to finish
               </div>
             )}
-            {/* Play overlay when paused */}
             {!playing && !drawingMode && (
               <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <div className="w-12 h-12 bg-black/40 rounded-full flex items-center justify-center">
-                  <span className="text-white/80 text-lg ml-0.5">{"\u25B6"}</span>
+                <div className="w-14 h-14 bg-black/50 backdrop-blur-sm rounded-full flex items-center justify-center">
+                  <Play size={24} className="text-white ml-1" fill="currentColor" />
                 </div>
               </div>
             )}
           </>
         ) : (
-          <div className="w-full h-full flex flex-col items-center justify-center text-text-muted gap-2">
-            <div className="text-2xl opacity-30">{"\uD83C\uDFAC"}</div>
-            <div className="text-sm">Video file not found</div>
-            <div className="text-[10px] text-text-muted/60">
-              Statistics are still available below
-            </div>
+          <div className="absolute inset-0 flex flex-col items-center justify-center text-text-muted gap-2 p-4 text-center">
+            <VideoOff size={28} className="opacity-50" />
+            <div className="text-sm text-text-secondary">Video file not found</div>
+            <div className="text-xs">The analysis is still available.</div>
             {onLocateVideo && (
-              <button
-                onClick={onLocateVideo}
-                className="btn-primary !py-1.5 !px-3 !text-xs mt-1"
-              >
-                Locate File
-              </button>
+              <Button size="sm" variant="primary" icon={FolderOpen} onClick={onLocateVideo} className="mt-1">
+                Locate video
+              </Button>
             )}
           </div>
         )}
-      </div>
-
-      {/* Custom progress bar with round markers */}
-      <div
-        ref={progressRef}
-        className="relative h-6 bg-surface-3 cursor-pointer group"
-        onClick={handleProgressClick}
-      >
-        {/* Filled progress */}
-        <div
-          className="absolute top-0 left-0 h-full bg-accent-purple/40 transition-[width] duration-75"
-          style={{ width: `${Math.max(0, Math.min(100, progress))}%` }}
-        />
-
-        {/* Round region shading */}
-        {visibleRounds.map((r, i) => {
-          const start = toBarPct(r.round_start_ms / 1000);
-          const end = toBarPct(r.round_end_ms / 1000);
-          const isP1Win = r.winner === "P1";
-          return (
-            <div
-              key={`round-bg-${i}`}
-              className={`absolute top-0 bottom-0 ${
-                isP1Win ? "bg-p1/8" : "bg-p2/8"
-              }`}
-              style={{ left: `${start}%`, width: `${end - start}%` }}
-            />
-          );
-        })}
-
-        {/* Round boundary markers */}
-        {visibleRounds.map((r, i) => {
-          const pos = toBarPct(r.round_end_ms / 1000);
-          return (
-            <div
-              key={`round-${i}`}
-              className="absolute top-0 bottom-0 w-px bg-text-muted/40"
-              style={{ left: `${pos}%` }}
-            />
-          );
-        })}
-
-        {/* Comeback markers */}
-        {visibleRounds
-          .filter((r) => r.is_comeback)
-          .map((r, i) => {
-            const pos = toBarPct(r.deficit_timestamp_ms / 1000);
-            return (
-              <div
-                key={`cb-${i}`}
-                className="absolute top-0 bottom-0 w-1 bg-accent-gold/60 rounded"
-                style={{ left: `${pos}%` }}
-                title={`Comeback: ${r.winner} (${(r.max_deficit * 100).toFixed(0)}% deficit)`}
-              />
-            );
-          })}
-
-        {/* High damage markers */}
-        {visibleDamage
-          .filter((e) => e.damage_pct > 0.30)
-          .map((e, i) => {
-            const pos = toBarPct(e.timestamp_ms / 1000);
-            const color = e.target_side === 1 ? "bg-p1/40" : "bg-p2/40";
-            return (
-              <div
-                key={`dmg-${i}`}
-                className={`absolute top-0 bottom-0 w-0.5 ${color}`}
-                style={{ left: `${pos}%` }}
-              />
-            );
-          })}
-
-        {/* Note markers */}
-        {notes?.map((note, i) => {
-          const pos = toBarPct(note.timestamp_ms / 1000);
-          return (
-            <div
-              key={`note-${i}`}
-              className="absolute top-0 bottom-0 w-1 bg-accent-green/50 rounded"
-              style={{ left: `${pos}%` }}
-              title={note.text}
-            />
-          );
-        })}
-
-        {/* Drawing markers */}
-        {drawings.map((d, i) => {
-          const pos = toBarPct(d.timestamp_ms / 1000);
-          return (
-            <div
-              key={`draw-${i}`}
-              className="absolute top-0 bottom-0 w-1 bg-accent-gold/50 rounded"
-              style={{ left: `${pos}%` }}
-              title="Drawing"
-            />
-          );
-        })}
-
-        {/* Playhead */}
-        <div
-          className="absolute top-0 bottom-0 w-0.5 bg-text-primary"
-          style={{ left: `${Math.max(0, Math.min(100, progress))}%` }}
-        />
-      </div>
-
-      {/* Controls */}
-      <div className="flex items-center gap-2 px-3 py-1.5 bg-surface-2">
-        <button
-          onClick={() => skipSeconds(-5)}
-          className="btn-ghost !px-1.5 !py-1 text-xs"
-          title="Rewind 5s (Left arrow)"
-        >
-          -5s
-        </button>
-        <button
-          onClick={togglePlay}
-          className="btn-ghost !px-2.5 !py-1 text-xs font-medium min-w-[40px]"
-          title="Play/Pause (Space)"
-        >
-          {playing ? "||" : "\u25B6"}
-        </button>
-        <button
-          onClick={() => skipSeconds(5)}
-          className="btn-ghost !px-1.5 !py-1 text-xs"
-          title="Forward 5s (Right arrow)"
-        >
-          +5s
-        </button>
-
-        <span className="text-[11px] font-mono text-text-secondary ml-1">
-          {formatTime(currentTime)} / {formatTime(duration)}
-        </span>
-
-        {selectedMatch && (
-          <button
-            onClick={onClearSelection}
-            className="text-[10px] text-accent-purple hover:text-accent-purple/80 transition-colors cursor-pointer px-1.5 py-0.5 rounded bg-accent-purple/10"
-            title="Show full timeline"
-          >
-            G{selectedMatch.match_index + 1} &times;
-          </button>
-        )}
-
-        {/* Draw toggle */}
-        {onSaveDrawing && (
-          <button
-            onClick={toggleDrawingMode}
-            className={`btn-ghost !px-2 !py-1 text-xs font-medium cursor-pointer transition-colors ${
-              drawingMode
-                ? "!bg-accent-gold/20 !text-accent-gold"
-                : ""
-            }`}
-            title="Toggle drawing mode (D)"
-          >
-            &#9998; Draw
-          </button>
-        )}
-
-        {/* Playback speed */}
-        <div className="ml-auto flex items-center gap-3">
-          <div className="flex items-center gap-1">
-            {[0.5, 1, 1.5, 2].map((rate) => (
-              <button
-                key={rate}
-                onClick={() => setPlaybackRate(rate)}
-                className={`text-[10px] px-1.5 py-0.5 rounded cursor-pointer transition-colors ${
-                  playbackRate === rate
-                    ? "bg-accent-purple/20 text-accent-purple"
-                    : "text-text-muted hover:text-text-secondary"
-                }`}
-              >
-                {rate}x
-              </button>
-            ))}
-          </div>
-
-          <div className="flex items-center gap-1.5">
-            <button
-              onClick={() => setVolume((v) => (v > 0 ? 0 : 0.5))}
-              className="btn-ghost !px-1 !py-0.5 text-[10px]"
-              title="Toggle mute (M)"
-            >
-              {volume === 0 ? "\uD83D\uDD07" : "\uD83D\uDD0A"}
-            </button>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.05"
-              value={volume}
-              onChange={(e) => setVolume(parseFloat(e.target.value))}
-              className="w-14 h-1 accent-accent-purple"
-            />
-          </div>
         </div>
       </div>
 
-      {/* Keyboard shortcuts hint */}
-      <div className="px-3 py-1 bg-surface-3/30 text-[9px] text-text-muted flex gap-4 border-t border-surface-4/20">
-        <span>Space: play/pause</span>
-        <span>{"<-/->"}: seek 5s</span>
-        <span>Shift+{"<-/->"}: seek 10s</span>
-        {!isEmbed && <span>,/.: frame step</span>}
-        <span>M: mute</span>
-        {onSaveDrawing && <span>D: draw</span>}
+      {/* Simple progress bar (when no separate timeline is shown) */}
+      {showProgress && (
+        <div
+          ref={progressRef}
+          className="relative h-5 mt-2 bg-surface-3 rounded cursor-pointer shrink-0"
+          onClick={handleProgressClick}
+        >
+          <div
+            className="absolute top-0 left-0 h-full bg-accent-purple/30 rounded-l"
+            style={{ width: `${Math.max(0, Math.min(100, progress))}%` }}
+          />
+          {visibleRounds.map((r, i) => {
+            const start = toBarPct(r.round_start_ms / 1000);
+            const end = toBarPct(r.round_end_ms / 1000);
+            return (
+              <div
+                key={`round-bg-${i}`}
+                className={`absolute top-0 bottom-0 border-r border-text-muted/40 ${r.winner === "P1" ? "bg-p1/10" : "bg-p2/10"}`}
+                style={{ left: `${start}%`, width: `${end - start}%` }}
+              />
+            );
+          })}
+          {visibleDamage
+            .filter((e) => e.damage_pct > 0.3)
+            .map((e, i) => (
+              <div
+                key={`dmg-${i}`}
+                className={`absolute top-0 bottom-0 w-0.5 ${e.target_side === 1 ? "bg-p1/40" : "bg-p2/40"}`}
+                style={{ left: `${toBarPct(e.timestamp_ms / 1000)}%` }}
+              />
+            ))}
+          {notes?.map((note, i) => (
+            <div
+              key={`note-${i}`}
+              className="absolute top-0 bottom-0 w-1 bg-accent-green/60 rounded"
+              style={{ left: `${toBarPct(note.timestamp_ms / 1000)}%` }}
+              title={note.text}
+            />
+          ))}
+          {drawings.map((d, i) => (
+            <div
+              key={`draw-${i}`}
+              className="absolute top-0 bottom-0 w-1 bg-accent-gold/60 rounded"
+              style={{ left: `${toBarPct(d.timestamp_ms / 1000)}%` }}
+              title="Drawing"
+            />
+          ))}
+          <div
+            className="absolute -top-0.5 -bottom-0.5 w-0.5 bg-text-primary rounded"
+            style={{ left: `${Math.max(0, Math.min(100, progress))}%` }}
+          />
+        </div>
+      )}
+
+      {/* Controls */}
+      <div className="flex items-center gap-1 pt-2 shrink-0 flex-wrap">
+        <IconButton icon={RotateCcw} label="Back 5 s (←, Shift+← 10 s)" onClick={() => skipSeconds(-5)} />
+        <IconButton icon={playing ? Pause : Play} label="Play / pause (Space)" onClick={togglePlay} size={36} className="!text-text-primary" />
+        <IconButton icon={RotateCw} label="Forward 5 s (→, Shift+→ 10 s)" onClick={() => skipSeconds(5)} />
+        {!isEmbed && (
+          <>
+            <IconButton icon={ChevronLeft} label="Previous frame (,)" onClick={() => stepFrame(-1)} size={28} />
+            <IconButton icon={ChevronRight} label="Next frame (.)" onClick={() => stepFrame(1)} size={28} />
+          </>
+        )}
+        <span className="text-xs font-mono tabular-nums text-text-secondary ml-1.5">
+          {formatTime(currentTime)} <span className="text-text-muted">/ {formatTime(duration)}</span>
+        </span>
+
+        <div className="ml-auto flex items-center gap-1">
+          {onSaveDrawing && (
+            <Button
+              size="sm"
+              variant={drawingMode ? "primary" : "ghost"}
+              icon={Pencil}
+              onClick={toggleDrawingMode}
+              title="Draw on the frame (D)"
+            >
+              <span className="hidden sm:inline">Draw</span>
+            </Button>
+          )}
+          <select
+            value={playbackRate}
+            onChange={(e) => setPlaybackRate(parseFloat(e.target.value))}
+            className="h-7 bg-surface-3 border border-surface-4 rounded-md text-xs text-text-secondary px-1.5 cursor-pointer focus:outline-none"
+            title="Playback speed"
+            disabled={srcType === "twitch"}
+          >
+            {rates.map((r) => (
+              <option key={r} value={r}>{r}×</option>
+            ))}
+          </select>
+          <IconButton
+            icon={volume === 0 ? VolumeX : Volume2}
+            label="Mute (M)"
+            onClick={() => setVolume((v) => (v > 0 ? 0 : 0.5))}
+            size={28}
+          />
+          <input
+            type="range"
+            min="0"
+            max="1"
+            step="0.05"
+            value={volume}
+            onChange={(e) => setVolume(parseFloat(e.target.value))}
+            className="w-16 h-1 accent-accent-purple hidden md:block"
+            aria-label="Volume"
+          />
+          <IconButton
+            icon={Keyboard}
+            label={`Shortcuts: Space play/pause · ←/→ 5 s · Shift+←/→ 10 s${isEmbed ? "" : " · , . frame step"} · M mute${onSaveDrawing ? " · D draw" : ""}`}
+            size={28}
+            className="hidden md:inline-flex cursor-help"
+          />
+        </div>
       </div>
     </div>
   );
