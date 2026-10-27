@@ -225,16 +225,39 @@ def keys(seq: str, gap_ms: int = 150) -> None:
 WINDOW_POS = tuple(int(v) for v in os.environ.get("GGST_WINDOW_POS", "5760,1080").split(","))
 
 
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", wt.RECT), ("rcWork", wt.RECT), ("dwFlags", wt.DWORD)]
+
+
+def on_a_monitor(x: int, y: int, w: int = 1920, h: int = 1080) -> bool:
+    """A single monitor holds the whole rectangle."""
+    user32.MonitorFromRect.restype = wt.HMONITOR
+    r = wt.RECT(x, y, x + w, y + h)
+    mon = user32.MonitorFromRect(ctypes.byref(r), 0)       # MONITOR_DEFAULTTONULL
+    if not mon:
+        return False
+    mi = MONITORINFO(cbSize=ctypes.sizeof(MONITORINFO))
+    user32.GetMonitorInfoW(mon, ctypes.byref(mi))
+    m = mi.rcMonitor
+    return m.left <= x and m.top <= y and x + w <= m.right and y + h <= m.bottom
+
+
 def place_window() -> None:
     """Make the game window borderless 1920x1080 at WINDOW_POS, without activating it."""
     hwnd = find_window()
     if not hwnd:
         raise SystemExit("Strive window not found")
     user32.SetProcessDPIAware()
+    # Only when a monitor holds the whole window at WINDOW_POS (it is on the third monitor,
+    # which is not always connected): otherwise the window is left as the game made it
+    if not on_a_monitor(*WINDOW_POS):
+        print(f"  no monitor holds a 1920x1080 window at {WINDOW_POS}; window left as it is")
+        return
+    pos = WINDOW_POS
     style = user32.GetWindowLongW(hwnd, -16)
     user32.SetWindowLongW(hwnd, -16, style & ~(0x00C00000 | 0x00040000))  # no caption / sizing frame
     # NOZORDER | NOACTIVATE | FRAMECHANGED
-    user32.SetWindowPos(hwnd, 0, WINDOW_POS[0], WINDOW_POS[1], 1920, 1080, 0x0004 | 0x0010 | 0x0020)
+    user32.SetWindowPos(hwnd, 0, pos[0], pos[1], 1920, 1080, 0x0004 | 0x0010 | 0x0020)
     rc = wt.RECT()
     user32.GetClientRect(hwnd, ctypes.byref(rc))
     if (rc.right, rc.bottom) != (1920, 1080):
