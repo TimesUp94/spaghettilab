@@ -110,6 +110,17 @@ def replay_folds(rows, k=5, seed=0):
     return np.array([fold_of[r["replay"]] for r in rows])
 
 
+# The video-only chain (openers, players, characters, moves) is measured end to end on the replays of
+# TEST_FOLD; every stage trains on the other folds for that, and on everything for the final weights.
+TEST_FOLD = 0
+
+
+def replay_fold_map() -> dict[str, int]:
+    """Replay -> fold over every opener row, so all video-only stages share one split."""
+    rows = load_rows(with_crops=False)
+    return dict(zip((r["replay"] for r in rows), (int(f) for f in replay_folds(rows))))
+
+
 # ---- metrics ------------------------------------------------------------------------------
 
 def report(y_true, y_pred, classes, proba=None, topk=(1, 3)):

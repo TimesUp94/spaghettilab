@@ -46,4 +46,24 @@ python tools/ggst_logger/dataset/build.py --idle
 
 - **`drive/search_batch.py`:** records other players' replays from Replay → Search, character by character and rank tier by rank tier (Iron … Vanquisher). It records `--per-rank` replays each and saves the character and rank range in the manifest.
 - **`dataset/moves.py`:** names characters from their action prefixes or signature actions, and maps action names to notation, move name and category. The logger's `p*_sprite` column (e.g. `sol000_11`) starts with the character code.
-- **`model/`:** first visual models trained on attacker crops around each opener: category, button and stance, and the exact move for the best-covered characters. Each script states how to run it.
+- **`model/`:** visual models of combo openers. Each script states how to run it.
+  - `extract_crops.py`, `finetune.py`, `train_heads.py`: the first models, on attacker crops placed by the game log (5-fold CV, no saved weights).
+  - The video-only chain, which needs nothing from the log at inference:
+    1. `video_openers.py`: combo starts and the attacker's side, from the CV pipeline's HUD readings (temporal conv + BiGRU).
+    2. `video_players.py`: both players' positions and both characters on 256×144 frames (ResNet18, CenterNet-style heatmap).
+    3. `video_crops.py`: cuts the attacker crop strip around each detected start.
+    4. `video_moves.py`: category, button/stance, exact move (restricted to the attacker's character), counter/punish, and "none" for a false start.
+  - `recognize.py <video>`: runs the whole chain with the `*_final.pt` weights (trained on all 722 replays) and writes `openers.json`.
+  - `degrade_eval.py`: the same chain on 720p30 3 Mbit/s copies of the test replays (a typical VOD).
+  - Weights and results are in `$GGST_DATA/ggst_dataset/model/` and are not in the repo.
+  - Test fold (144 held-out replays, 4,715 logged openers, bursts apart), from the 1080p60 recordings:
+    - Starts found: 0.92 at 0.82 precision (the app's damage events found 0.78 at 0.50).
+    - Found and kept: 0.89, with 0.95 of the kept ones real.
+    - Characters right on every replay.
+    - Given found: category 0.88, button/stance 0.92, exact move 0.89 (0.73–1.0 by character).
+    - The whole chain gets 0.79 of all openers found with the right move.
+  - On the 720p30 copies of the same replays (`degrade_eval.py`), almost nothing is lost:
+    - starts 0.93 found and 0.89 kept, with 0.92 of the kept ones real;
+    - characters all right;
+    - category 0.87, button/stance 0.91, exact move 0.88;
+    - whole chain 0.79.
