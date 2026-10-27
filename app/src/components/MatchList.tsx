@@ -55,7 +55,7 @@ export function MatchList({
               onClick={() => onSeek(m.rounds[0].round_start_ms)}
             >
               <span className="text-text-muted text-xs font-mono w-6 shrink-0">
-                G{m.match_index + 1}
+                M{m.match_index + 1}
               </span>
 
               {/* Score */}

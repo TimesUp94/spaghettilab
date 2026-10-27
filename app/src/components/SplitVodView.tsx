@@ -347,7 +347,7 @@ export function SplitVodView({ onComplete, onCancel }: Props) {
                         {" | "}
                         {(s.gameplay_duration_secs / 60).toFixed(1)} min gameplay
                         {" | "}
-                        {s.game_count} game{s.game_count !== 1 ? "s" : ""}
+                        {s.game_count} match{s.game_count !== 1 ? "es" : ""}
                       </div>
                     </div>
                   </label>

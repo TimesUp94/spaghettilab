@@ -169,7 +169,7 @@ export function ReviewView(p: Props) {
     <div className="shrink-0 rounded-lg bg-surface-1 border border-surface-4/60 px-3 pt-2 pb-1.5">
       <div className="flex items-center gap-x-3 gap-y-1 flex-wrap text-[10px] text-text-muted mb-1.5">
         <span className="font-semibold uppercase tracking-wider text-text-secondary">
-          {selectedMatch ? `Game ${selectedMatch.match_index + 1}` : "Timeline"}
+          {selectedMatch ? `Match ${selectedMatch.match_index + 1}` : "Timeline"}
         </span>
         <span className="inline-flex items-center gap-1"><i className="w-2.5 h-0.5 bg-p1 rounded" /> P1 health</span>
         <span className="inline-flex items-center gap-1"><i className="w-2.5 h-0.5 bg-p2 rounded" /> P2 health</span>
@@ -203,7 +203,7 @@ export function ReviewView(p: Props) {
             <MatchOverview stats={p.displayStats} replay={data.replay} selectedMatch={selectedMatch} onClearSelection={() => p.onSelectMatch(null)} />
             {data.matches.length > 0 && (
               <div>
-                <div className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary mb-2">Games</div>
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-text-secondary mb-2">Matches</div>
                 <MatchList
                   matches={data.matches}
                   onSeek={p.onRoundSeek}
@@ -217,8 +217,8 @@ export function ReviewView(p: Props) {
         )}
         {selectedMatch && tab !== "overview" && tab !== "notes" && (
           <div className="mb-2 text-[11px] text-text-secondary">
-            Game {selectedMatch.match_index + 1} only ·{" "}
-            <button onClick={() => p.onSelectMatch(null)} className="text-accent-purple hover:underline cursor-pointer">show all games</button>
+            Match {selectedMatch.match_index + 1} only ·{" "}
+            <button onClick={() => p.onSelectMatch(null)} className="text-accent-purple hover:underline cursor-pointer">show all matches</button>
           </div>
         )}
         {tab === "rounds" && <RoundBreakdown rounds={rounds} onSeek={p.onRoundSeek} onExport={p.onExportClip} />}
@@ -257,7 +257,7 @@ export function ReviewView(p: Props) {
               onClick={() => p.onSelectMatch(null)}
               className={`h-7 px-2.5 rounded-md text-xs font-medium whitespace-nowrap cursor-pointer transition-colors ${!selectedMatch ? "bg-accent-purple/15 text-accent-purple" : "text-text-secondary hover:bg-surface-3"}`}
             >
-              All games
+              All matches
             </button>
             {data.matches.map((m) => {
               const on = selectedMatch?.match_index === m.match_index;
@@ -268,10 +268,10 @@ export function ReviewView(p: Props) {
                     p.onSelectMatch(m.match_index);
                     p.onSeek(m.start_ms);
                   }}
-                  title={`Game ${m.match_index + 1}: ${m.p1_rounds_won}–${m.p2_rounds_won}, won by ${m.winner}`}
+                  title={`Match ${m.match_index + 1}: ${m.p1_rounds_won}–${m.p2_rounds_won}, won by ${m.winner}`}
                   className={`h-7 px-2 rounded-md text-xs font-medium whitespace-nowrap cursor-pointer transition-colors inline-flex items-center gap-1.5 ${on ? "bg-accent-purple/15 text-accent-purple" : "text-text-secondary hover:bg-surface-3"}`}
                 >
-                  G{m.match_index + 1}
+                  M{m.match_index + 1}
                   <span className={`w-1.5 h-1.5 rounded-full ${m.winner === "P1" ? "bg-p1" : m.winner === "P2" ? "bg-p2" : "bg-text-muted"}`} />
                 </button>
               );

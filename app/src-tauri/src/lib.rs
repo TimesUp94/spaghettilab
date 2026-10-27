@@ -2714,7 +2714,22 @@ fn find_project_root() -> Result<PathBuf, String> {
 ///
 /// For installed apps, output goes to AppData/Local/SpaghettiLab/output.
 /// For dev, output goes to <project_root>/output.
+/// Where the app keeps its data (`<dir>/SpaghettiLab/...`): the user's local app data, or
+/// `SPAGHETTI_LAB_DATA_DIR` (the e2e tests point it at a scratch folder).
+fn local_data_dir() -> PathBuf {
+    if let Some(d) = std::env::var_os("SPAGHETTI_LAB_DATA_DIR") {
+        return PathBuf::from(d);
+    }
+    dirs::data_local_dir().unwrap_or_else(|| dirs_fallback())
+}
+
 fn default_output_paths() -> Result<(PathBuf, PathBuf), String> {
+    // A data dir set by the e2e tests wins over the dev checkout's output/
+    if std::env::var_os("SPAGHETTI_LAB_DATA_DIR").is_some() {
+        let output_dir = local_data_dir().join("SpaghettiLab").join("output");
+        let db_path = output_dir.join("analysis.db");
+        return Ok((output_dir, db_path));
+    }
     // Try dev location first
     if let Ok(root) = find_project_root() {
         // Check if this looks like a dev environment (has pyproject.toml or .git)
@@ -2726,8 +2741,7 @@ fn default_output_paths() -> Result<(PathBuf, PathBuf), String> {
     }
 
     // Installed: use AppData/Local
-    let app_data = dirs::data_local_dir()
-        .unwrap_or_else(|| dirs_fallback());
+    let app_data = local_data_dir();
     let output_dir = app_data.join("SpaghettiLab").join("output");
     let db_path = output_dir.join("analysis.db");
     Ok((output_dir, db_path))
@@ -3667,6 +3681,10 @@ fn run_strive_export(
     if !cfg!(target_os = "windows") {
         return Err("Exporting Strive replays works on Windows only.".into());
     }
+    // The e2e tests must never drive the game (ranked menus, "Delete replay").
+    if std::env::var_os("SPAGHETTI_LAB_NO_GAME").is_some() {
+        return Err("Driving the game is disabled (SPAGHETTI_LAB_NO_GAME).".into());
+    }
     let args = strive_export_args(&options)?;
     if STRIVE_EXPORT_STDIN.lock().unwrap().is_some() {
         return Err("An export is already running.".into());
@@ -3995,8 +4013,7 @@ async fn open_spag(spag_path: String) -> Result<SpagSession, String> {
     }
 
     // Deterministic extraction dir based on file path
-    let app_data = dirs::data_local_dir()
-        .unwrap_or_else(|| dirs_fallback());
+    let app_data = local_data_dir();
     let hash = {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -4254,8 +4271,7 @@ async fn open_spagz(spagz_path: String) -> Result<SpagzSession, String> {
     }
 
     // Deterministic extraction dir based on file path
-    let app_data = dirs::data_local_dir()
-        .unwrap_or_else(|| dirs_fallback());
+    let app_data = local_data_dir();
     let hash = {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -4350,7 +4366,7 @@ async fn create_quick_session(
     };
 
     // Session dir based on replay_id
-    let app_data = dirs::data_local_dir().unwrap_or_else(|| dirs_fallback());
+    let app_data = local_data_dir();
     let session_dir = app_data
         .join("SpaghettiLab")
         .join("quick_sessions")

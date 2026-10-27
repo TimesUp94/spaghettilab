@@ -586,6 +586,8 @@ export default function App() {
       setAnnotateEmbedId(embedId);
       if (srcType === "file" && session.video_hint) setLocalVideo(session.video_hint);
       else setVideoSrc(null);
+      // the library behind the session is the session's own database
+      setReplays(await getReplays(session.db_path).catch(() => []));
       await enterAnnotate(session.db_path, {
         replay_id: session.replay_id,
         video_path: session.video_hint,
@@ -750,7 +752,7 @@ export default function App() {
         onAnnotate={() => setView("annotateSetup")}
         onSplit={() => setView("split")}
         onStrive={() => setView("strive")}
-        onReanalyzeAll={dbPath && !spagSession && !spagzSession ? handleReanalyzeAll : undefined}
+        onReanalyzeAll={dbPath && !spagSession && !spagzSession && replays.some((r) => r.frame_count > 0) ? handleReanalyzeAll : undefined}
         reanalyzingAll={reanalyzingAll}
       />
     );

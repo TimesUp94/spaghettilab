@@ -164,8 +164,8 @@ Video path is resolved and converted to a Tauri asset URL via `convertFileSrc()`
 
 **Source:** `app/src/views/ReviewView.tsx`
 
-- **Header:** back to the library, the set's players (from `setInfo(replay_id)`), a game picker (All games,
-  G1, G2…; a dot in the winner's colour), Reload, Reanalyse (local video only) and Share (export `.spag` /
+- **Header:** back to the library, the set's players (from `setInfo(replay_id)`), a game picker (All matches,
+  M1, M2…; a dot in the winner's colour), Reload, Reanalyse (local video only) and Share (export `.spag` /
   `.spagz`; inside a `.spag` / `.spagz` session it is Save).
 - **Wide windows (≥ 1024 px, `useMediaQuery`):** a grid of the video column and a results panel
   (`minmax(340px, 30%)`, 480 px from 2xl). The video column is the player (`fill`: the 16:9 video is fitted
@@ -217,7 +217,7 @@ Stats display panel (320px wide, right of video):
 Tab content showing matches in a card layout.
 
 **For each match:**
-- Match header: game number (G1, G2...), score, winner label, duration, comeback badge
+- Match header: match number (M1, M2...), score, winner label, duration, comeback badge
 - Round rows within each match card
 
 **Uncertain winner UI:**

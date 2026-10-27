@@ -37,6 +37,13 @@ cargo build
 # TypeScript type check (from app/)
 npx tsc --noEmit
 
+# End-to-end tests of the whole app (from app/; Windows; see app/e2e/README.md). Builds the app,
+# runs it isolated (SPAGHETTI_LAB_DATA_DIR = e2e/.run/data, never output/analysis.db;
+# SPAGHETTI_LAB_NO_GAME = the Strive export refuses to drive the game) and drives it with Playwright
+npm run e2e                                    # everything, ~10 min (real analyses)
+npm run e2e:fast                               # without the @slow reanalyse tests
+E2E_SKIP_BUILD=1 E2E_REUSE_DATA=1 npx playwright test 03   # iterate on one spec
+
 # Rust tests (from app/src-tauri/)
 cargo test -- --nocapture                      # --nocapture to see eprintln debug output
 cargo test test_slycoops_rounds -- --nocapture # single test

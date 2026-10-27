@@ -47,7 +47,7 @@ export function MatchOverview({
         {selectedMatch && (
           <div className="flex items-center justify-between mb-1.5">
             <span className="text-[10px] text-accent-purple font-medium">
-              Game {selectedMatch.match_index + 1}
+              Match {selectedMatch.match_index + 1}
             </span>
             <button
               onClick={onClearSelection}
