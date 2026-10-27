@@ -2749,6 +2749,7 @@ fn get_default_db_path() -> Result<String, String> {
 
 #[tauri::command]
 async fn analyze_video(
+    app_handle: tauri::AppHandle,
     video_path: String,
     _sample_every: Option<u32>,
 ) -> Result<String, String> {
@@ -2763,20 +2764,43 @@ async fn analyze_video(
     let mut cmd = require_python()?.command();
     // Set PYTHONPATH so `import replanal` works from installed location
     cmd.env("PYTHONPATH", project_root.to_str().unwrap())
+        .env("PYTHONUNBUFFERED", "1")
         .arg(script.to_str().unwrap())
         .arg(&video_path)
         .arg("--config")
         .arg(config.to_str().unwrap())
         .arg("--output")
-        .arg(output_dir.to_str().unwrap());
+        .arg(output_dir.to_str().unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
-    let output = cmd.output().map_err(|e| format!("Failed to run Python: {}", e))?;
+    let mut child = cmd.spawn().map_err(|e| format!("Failed to run Python: {}", e))?;
+    // stderr in a thread, so a chatty stderr can't block the stdout reader
+    let stderr = child.stderr.take().unwrap();
+    let err_reader = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = std::io::Read::read_to_string(&mut std::io::BufReader::new(stderr), &mut s);
+        s
+    });
+    // Every stdout line goes to the app ("  Progress NN%" during the frame pass);
+    // the last ones are kept for the error message
+    let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    for line in std::io::BufReader::new(child.stdout.take().unwrap()).lines().map_while(Result::ok) {
+        let _ = app_handle.emit("analyze-progress", &line);
+        tail.push_back(line);
+        if tail.len() > 40 {
+            tail.pop_front();
+        }
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let stderr = err_reader.join().unwrap_or_default();
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if !output.status.success() {
-        return Err(format!("Analysis failed:\n{}\n{}", stdout, stderr));
+    if !status.success() {
+        let stdout: Vec<String> = tail.into_iter().collect();
+        return Err(format!("Analysis failed:
+{}
+{}", stdout.join("
+"), stderr));
     }
 
     Ok(db_path.to_string_lossy().to_string())
@@ -2815,7 +2839,7 @@ async fn reanalyze_replay(
     for line in std::io::BufReader::new(stdout).lines() {
         if let Ok(line) = line {
             // Forward lines that contain frame progress
-            if line.contains("Processed") || line.contains("Analyzing") || line.contains("Detected") {
+            if line.contains("Processed") || line.contains("Analyzing") || line.contains("Detected") || line.contains("Progress") {
                 let _ = app_handle.emit("reanalyze-progress", &line);
             }
         }

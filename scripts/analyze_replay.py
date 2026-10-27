@@ -42,7 +42,7 @@ def main():
     if args.sample_every is not None:
         config.sample_every_n_frames = max(1, args.sample_every)
 
-    print(f"Analyzing: {video_path}")
+    print(f"Analyzing: {video_path}", flush=True)
     info = get_video_info(video_path, config.fps, config.sample_every_n_frames)
     print(f"  Resolution: {info['width']}x{info['height']}, FPS: {info['effective_fps']:.2f}, Frames: {info['frame_count']}")
     print(f"  Sampling every {info['sample_every']} frame(s) = {info['effective_fps'] / info['sample_every']:.1f} samples/s")
@@ -56,7 +56,17 @@ def main():
     combo_ext = ComboCounterExtractor()
     pipeline = ReplayPipeline(config, [scene_det, health_ext, timer_ext, tension_ext, heart_ext, combo_ext])
 
-    frames = pipeline.process_video(video_path)
+    # "Progress NN%" lines (whole percents) for the app's progress bar
+    total = max(1, int(info["frame_count"]))
+    last_pct = [-1]
+
+    def progress(frame_number: int) -> None:
+        pct = min(99, frame_number * 100 // total)
+        if pct != last_pct[0]:
+            last_pct[0] = pct
+            print(f"  Progress {pct}%", flush=True)
+
+    frames = pipeline.process_video(video_path, on_frame=progress)
     print(f"  Processed {len(frames)} frames")
     dropped = finalize_timer(frames)
     if dropped:

@@ -16,7 +16,8 @@ class ReplayPipeline:
         for ext in extractors:
             self.required_rois.update(ext.required_rois)
 
-    def process_video(self, video_path: str) -> list[FrameData]:
+    def process_video(self, video_path: str, on_frame=None) -> list[FrameData]:
+        """``on_frame(frame_number)``, if given, is called after every processed frame."""
         results: list[FrameData] = []
         for frame_number, timestamp_ms, frame_bgr in iter_frames(
             video_path,
@@ -46,5 +47,7 @@ class ReplayPipeline:
                     break
 
             results.append(data)
+            if on_frame is not None:
+                on_frame(frame_number)
 
         return results
