@@ -14,15 +14,16 @@ The top-level `App` component manages a `view` state (no router):
 | `library` | `views/LibraryView.tsx` | Home. The analysed videos of the open database as cards (search above 6), or a getting-started page with a drop zone when there are none |
 | `review` | `views/ReviewView.tsx` | One video's results: fitted video, timeline, tabbed results panel |
 | `analyze` | `AnalysisProgress` | Pick (or receive a dropped) video and analyse it, with live progress |
+| `annotateSetup` | `AnnotateSetup` | Pick a YouTube / Twitch link or a local video (browse or drop) to annotate |
 | `annotate` | `AnnotateView` | Notes, drawings and the checklist on a file or a YouTube / Twitch embed (no analysis) |
 | `split` | `SplitVodView` | VOD splitter multi-step workflow |
 | `strive` | `StriveExportView` | Export saved Strive replays from the running game, then analyse them |
 
-The rail's entries: Library, Analyse, Annotate (opens `AnnotateSetup`), Split VOD, Strive, and at the bottom
+The rail's entries: Library, Analyse, Annotate (the `annotateSetup` page), Split VOD, Strive, and at the bottom
 Open (.spag / .spagz) and Support. Errors from any view show as a dismissable banner above the view.
 
 **Drag and drop** (`getCurrentWebview().onDragDropEvent` in `App`): a dropped video (mp4/mkv/avi/mov/webm)
-goes to `analyze` and starts at once; a `.spag` / `.spagz` opens. The library shows its drop zone while a
+goes to `analyze` and starts at once (on the annotate page it opens a notes session instead); a `.spag` / `.spagz` opens. The library shows its drop zone while a
 drag is over the window.
 
 ---

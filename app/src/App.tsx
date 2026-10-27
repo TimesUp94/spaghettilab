@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect } from "react";
+import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -42,6 +42,7 @@ import {
   exportSpagz,
   openSpagz,
   saveSpagz,
+  createQuickSession,
 } from "./api";
 import { ExportModal } from "./components/ExportModal";
 import { AnalysisProgress } from "./components/AnalysisProgress";
@@ -58,12 +59,14 @@ import { ReviewView } from "./views/ReviewView";
 import { detectVideoSource, type VideoSourceType } from "./lib/videoSourceDetect";
 import { groupRoundsIntoMatches, statsForMatch } from "./lib/matches";
 
-type AppView = "library" | "review" | "analyze" | "split" | "strive" | "annotate";
+type AppView = "library" | "review" | "analyze" | "split" | "strive" | "annotateSetup" | "annotate";
 
 const VIDEO_EXT = /\.(mp4|mkv|avi|mov|webm)$/i;
 
 export default function App() {
   const [view, setView] = useState<AppView>("library");
+  const viewRef = useRef(view);
+  viewRef.current = view;
 
   // DB + replay state
   const [dbPath, setDbPath] = useState<string | null>(null);
@@ -97,7 +100,6 @@ export default function App() {
   const [exportingSpag, setExportingSpag] = useState(false);
   const [showSpagzVideoModal, setShowSpagzVideoModal] = useState(false);
   const [pendingSpagzSession, setPendingSpagzSession] = useState<SpagzSession | null>(null);
-  const [showAnnotateSetup, setShowAnnotateSetup] = useState(false);
   const [annotateSrcType, setAnnotateSrcType] = useState<VideoSourceType>("file");
   const [annotateEmbedId, setAnnotateEmbedId] = useState<string | undefined>();
   const [pendingVideo, setPendingVideo] = useState<string | null>(null);
@@ -577,7 +579,6 @@ export default function App() {
   // Annotate session handler
   const handleAnnotateSession = useCallback(
     async (session: SpagzSession, srcType: VideoSourceType, embedId?: string) => {
-      setShowAnnotateSetup(false);
       setDbPath(session.db_path);
       setSpagSession(null);
       setSpagzSession(session.spagz_path ? session : null);
@@ -616,7 +617,11 @@ export default function App() {
         const path = e.payload.paths[0];
         if (!path) return;
         if (/\.spagz?$/i.test(path)) openAnyFile(path);
-        else if (VIDEO_EXT.test(path)) {
+        else if (VIDEO_EXT.test(path) && viewRef.current === "annotateSetup") {
+          createQuickSession(path)
+            .then((session) => handleAnnotateSession(session, "file"))
+            .catch((err) => setError(String(err)));
+        } else if (VIDEO_EXT.test(path)) {
           setPendingVideo(path);
           setView("analyze");
         } else setError("Drop a match video (MP4, MKV, AVI) or a .spag / .spagz file.");
@@ -625,7 +630,7 @@ export default function App() {
     return () => {
       un.then((fn) => fn());
     };
-  }, [openAnyFile]);
+  }, [openAnyFile, handleAnnotateSession]);
 
   const handleOpenDefaultDb = useCallback(async () => {
     try {
@@ -636,7 +641,7 @@ export default function App() {
   }, [openDatabase, handleOpenDb]);
 
   const navigate = useCallback((t: RailTarget) => {
-    if (t === "annotate") setShowAnnotateSetup(true);
+    if (t === "annotate") setView("annotateSetup");
     else if (t === "analyze") {
       setPendingVideo(null);
       setView("analyze");
@@ -644,7 +649,7 @@ export default function App() {
   }, []);
 
   const railActive: RailTarget | null =
-    view === "review" || view === "library" ? "library" : view;
+    view === "review" || view === "library" ? "library" : view === "annotateSetup" ? "annotate" : view;
 
   let content: React.ReactNode;
   if (view === "review" && selectedReplay && stats && displayStats) {
@@ -706,6 +711,10 @@ export default function App() {
         onBack={() => setView("library")}
       />
     );
+  } else if (view === "annotateSetup" || view === "annotate") {
+    content = (
+      <AnnotateSetup onSession={handleAnnotateSession} onCancel={() => setView("library")} dragActive={dragActive} />
+    );
   } else if (view === "analyze") {
     content = (
       <AnalysisProgress
@@ -738,7 +747,7 @@ export default function App() {
         onAddVideo={() => navigate("analyze")}
         onOpenFile={handleOpenSpag}
         onOpenDatabase={handleOpenDefaultDb}
-        onAnnotate={() => setShowAnnotateSetup(true)}
+        onAnnotate={() => setView("annotateSetup")}
         onSplit={() => setView("split")}
         onStrive={() => setView("strive")}
         onReanalyzeAll={dbPath && !spagSession && !spagzSession ? handleReanalyzeAll : undefined}
@@ -801,9 +810,6 @@ export default function App() {
             setPendingSpagzSession(null);
           }}
         />
-      )}
-      {showAnnotateSetup && (
-        <AnnotateSetup onSession={handleAnnotateSession} onCancel={() => setShowAnnotateSetup(false)} />
       )}
     </div>
   );
