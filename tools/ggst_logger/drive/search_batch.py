@@ -238,12 +238,14 @@ def restart_game():
         os.remove(UE4SS_LOG)
     except OSError:
         pass
+    ggst.settings_windowed()
     os.startfile("steam://rungameid/1384160")
     t0 = time.time()
     while time.time() - t0 < 180:
         try:
             if "[InputLogger] UpdateBattle" in open(UE4SS_LOG, encoding="utf-8", errors="ignore").read():
                 time.sleep(5)
+                ggst.ensure_windowed()
                 ggst.place_window()
                 return
         except OSError:

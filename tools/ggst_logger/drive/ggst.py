@@ -242,6 +242,46 @@ def on_a_monitor(x: int, y: int, w: int = 1920, h: int = 1080) -> bool:
     return m.left <= x and m.top <= y and x + w <= m.right and y + h <= m.bottom
 
 
+SETTINGS = os.path.join(os.environ.get("LOCALAPPDATA", ""), r"GGST\Saved\Config\WindowsNoEditor\GameUserSettings.ini")
+
+
+def settings_windowed() -> None:
+    """The game's settings often drift back to fullscreen: set windowed (mode 2) before a launch."""
+    try:
+        with open(SETTINGS, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return
+    keys_ = ("FullscreenMode=", "LastConfirmedFullscreenMode=", "PreferredFullscreenMode=")
+    new = [l.split("=")[0] + "=2" if l.startswith(keys_) else l for l in lines]
+    if new != lines:
+        with open(SETTINGS, "w", encoding="utf-8") as f:
+            f.write("\n".join(new) + "\n")
+        print("  game settings were fullscreen; set to windowed")
+
+
+def is_fullscreen(hwnd: int) -> bool:
+    """No title bar and the window covers a whole monitor (only meaningful before place_window)."""
+    if user32.GetWindowLongW(hwnd, -16) & 0x00C00000:       # WS_CAPTION
+        return False
+    r = wt.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(r))
+    return on_a_monitor(r.left, r.top, r.right - r.left, r.bottom - r.top) and r.right - r.left >= 1920
+
+
+def ensure_windowed() -> None:
+    """A fresh game that came up fullscreen: Alt+Enter on it (it must be in front for that)."""
+    hwnd = find_window()
+    if not hwnd or not is_fullscreen(hwnd):
+        return
+    print("  Strive started fullscreen; Alt+Enter")
+    focus()
+    _send(0x38, False); _send(0x1C, False); time.sleep(0.05); _send(0x1C, True); _send(0x38, True)
+    time.sleep(4)
+    if is_fullscreen(find_window()):
+        raise SystemExit("Strive is still fullscreen after Alt+Enter")
+
+
 def place_window() -> None:
     """Make the game window borderless 1920x1080 at WINDOW_POS, without activating it."""
     hwnd = find_window()
