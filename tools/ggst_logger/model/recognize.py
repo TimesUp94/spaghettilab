@@ -3,7 +3,8 @@ characters and the opening move (category, button/stance, exact move, counter/pu
 
 Chain (final weights, trained on every logged replay):
 1. the app's CV pipeline (scripts/analyze_replay.py) reads the HUD, unless --analysis has it;
-2. video_openers: the frames combos start at, and the attacker's side;
+2. video_openers: the frames combos start at, and the attacker's side (from the HUD readings and,
+   when the weights were trained with it, the whole frame at 64x36: video_tiny);
 3. video_players + video_crops: both players on each frame around them, the attacker crop, and
    both characters by vote over every frame seen;
 4. video_moves: the opener's classes ('none' = not an opener after all, dropped), with the whole
@@ -30,7 +31,6 @@ from common import OUT, low_priority  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[3]
 PY = ROOT / ".venv" / "Scripts" / "python.exe"
-THRESHOLD = 0.3
 
 
 def analysis(video: Path, out: Path, given: Path | None) -> Path:
@@ -52,15 +52,15 @@ def analysis(video: Path, out: Path, given: Path | None) -> Path:
     return next(rd.glob("frames/*_frames.parquet"))
 
 
-def detect(parquet: Path, fps: float):
-    import torch
+def detect(video: Path, parquet: Path, fps: float):
     import video_openers as vo
+    import video_tiny as vt
     X, frames = vo.parquet_inputs(parquet)
-    net = vo.make_net().cuda()
-    net.load_state_dict(torch.load(OUT / "video_openers_final.pt"))
+    net = vo.load(OUT / "video_openers_final.pt")
+    im = vt.tiny_frames(video, frames) if net.tiny is not None else None
     f60 = np.round(frames * 60.0 / fps).astype(int)
     return [dict(frame=int(f60[i]), side=s, score=round(sc, 4), row=None)
-            for i, s, sc in vo.peaks(vo.predict(net, X), THRESHOLD)]
+            for i, s, sc in vo.peaks(vo.predict(net, X, im), vo.THR)]
 
 
 def main():
@@ -80,7 +80,7 @@ def main():
     t0 = time.time()
     fps, w, h = vc.video_format(a.video)
     pq_path = analysis(a.video, out, a.analysis)
-    dets = detect(pq_path, fps)
+    dets = detect(a.video, pq_path, fps)
     print(f"{len(dets)} combo starts found ({time.time() - t0:.0f}s)", flush=True)
     cdir = out / "crops"
     if (cdir / "index.json").exists():

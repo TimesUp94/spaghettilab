@@ -4,13 +4,14 @@ H.264 (a typical Twitch / YouTube VOD), against the game log.
 Stages (each skips what is done):
     encode   test-fold recordings -> <data>/ggst_dataset/degraded/<stem>.mp4
     analyze  the app's CV pipeline (scripts/analyze_replay.py) -> degraded/runs/<stem>/
+    tiny     video_tiny.py (64x36 frames at every step, for a detector trained with --tiny) -> degraded/tiny/<stem>.npy
     detect   video_openers_test.pt on those HUD readings, matched to the log -> degraded/detections.json
     crops    video_crops.py on the degraded videos -> degraded/vcrops/<stem>/
     scene    video_scene.py (whole frames, for a move net trained with --scene) -> degraded/vscene/<stem>/
     banners  banner_reader.py on the degraded videos -> banners_degraded/<stem>.npz
     eval     video_moves_test.pt end to end (counter / punish from banner_reader_test.pkl) -> model/results_degraded.json
 
-    .venv/Scripts/python.exe tools/ggst_logger/model/degrade_eval.py encode analyze detect crops scene banners eval
+    .venv/Scripts/python.exe tools/ggst_logger/model/degrade_eval.py encode analyze tiny detect crops scene banners eval
     .venv/Scripts/python.exe tools/ggst_logger/model/degrade_eval.py eval --moves video_moves_exp_x.pt   # -> results_exp_degraded_x.json
 """
 from __future__ import annotations
@@ -79,21 +80,30 @@ def analyze(stems, jobs):
             print(f"  analysed {k + 1}/{len(stems)} {s} ({dt:.0f}s)", flush=True)
 
 
+def tiny(stems, jobs):
+    import video_tiny as vt
+    from multiprocessing import Pool
+    (DEG / "tiny").mkdir(exist_ok=True)
+    tasks = [(s, str(DEG / f"{s}.mp4"), str(DEG / "runs" / s / "frames" / f"{s}_frames.parquet"), str(DEG / "tiny" / f"{s}.npy"))
+             for s in stems]
+    with Pool(jobs) as p:
+        for k, (s, n) in enumerate(p.imap_unordered(vt.process, tasks)):
+            print(f"  tiny {k + 1}/{len(stems)} {s} {n}", flush=True)
+
+
 def detect(stems, rows):
     """Detections in 60 fps frame numbers (the original recordings' timeline), matched to the log."""
-    import torch
     import video_openers as vo
     by = collections.defaultdict(list)
     for r in rows:
         by[r["replay"]].append(r)
-    net = vo.make_net().cuda()
-    net.load_state_dict(torch.load(OUT / "video_openers_test.pt"))
+    net = vo.load(OUT / "video_openers_test.pt")
     out, n_tru, n_hit, n_det = {}, 0, 0, 0
     for s in stems:
         X, frames = vo.parquet_inputs(DEG / "runs" / s / "frames" / f"{s}_frames.parquet")
         f60 = frames * 2                                   # 30 fps -> 60 fps frame numbers
         tru = vo.truth(by, s, f60)
-        dets = vo.peaks(vo.predict(net, X), 0.3)
+        dets = vo.peaks(vo.predict(net, X, vo.replay_tiny(s, DEG) if net.tiny is not None else None), vo.THR)
         hit, _ = vo.evaluate(dets, tru, f60)
         row_of = {(d[0], d[1]): tru[j][2] for j, d in hit.items()}
         out[s] = [dict(frame=int(f60[i]), side=sd, score=round(sc, 4),
@@ -150,7 +160,7 @@ def evaluate(stems, rows, moves="video_moves_test.pt"):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("stages", nargs="+", choices=["encode", "analyze", "detect", "crops", "scene", "banners", "eval"])
+    ap.add_argument("stages", nargs="+", choices=["encode", "analyze", "tiny", "detect", "crops", "scene", "banners", "eval"])
     ap.add_argument("--moves", default="video_moves_test.pt", help="move net weights for eval")
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--limit", type=int, default=0, help="first N test replays only")
@@ -163,7 +173,7 @@ def main():
     for st in a.stages:
         t0 = time.time()
         {"encode": lambda: encode(stems, video), "analyze": lambda: analyze(stems, a.jobs),
-         "detect": lambda: detect(stems, rows), "crops": lambda: crops(stems), "scene": lambda: scene(stems, a.jobs),
+         "tiny": lambda: tiny(stems, a.jobs), "detect": lambda: detect(stems, rows), "crops": lambda: crops(stems), "scene": lambda: scene(stems, a.jobs),
          "banners": lambda: __import__("banner_reader").extract("degraded", a.jobs, stems),
          "eval": lambda: evaluate(stems, rows, a.moves)}[st]()
         print(f"[{st}] {time.time() - t0:.0f}s", flush=True)

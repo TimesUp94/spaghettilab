@@ -45,14 +45,12 @@ def move_preds(weights, root, by_key, test):
 
 
 def detector_probs(test):
-    import torch
     import video_openers as vo
-    net = vo.make_net().cuda()
-    net.load_state_dict(torch.load(OUT / "video_openers_test.pt", map_location="cpu"))
+    net = vo.load(OUT / "video_openers_test.pt")
     out = {}
     for s in test:
         X, frames = vo.replay_inputs(s)
-        out[s] = (vo.predict(net, X), frames, X)
+        out[s] = (vo.predict(net, X, vo.replay_tiny(s) if net.tiny is not None else None), frames, X)
     return out
 
 
