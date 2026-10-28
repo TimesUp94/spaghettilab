@@ -55,6 +55,7 @@ python tools/ggst_logger/dataset/build.py --idle
     4. `video_moves.py`: category, button/stance, exact move (restricted to the attacker's character), counter/punish, and "none" for a false start.
   - `recognize.py <video>`: runs the whole chain with the `*_final.pt` weights (trained on all 722 replays) and writes `openers.json`.
   - `degrade_eval.py`: the same chain on 720p30 3 Mbit/s copies of the test replays (a typical VOD).
+  - `error_report.py`: where the chain loses the test fold's openers (missed, dropped as "none", wrong move) by category, character and move. `video_moves.py` and `video_openers.py` take `--frac` for a learning curve.
   - Weights and results are in `$GGST_DATA/ggst_dataset/model/` and are not in the repo.
   - Test fold (144 held-out replays, 4,715 logged openers, bursts apart), from the 1080p60 recordings:
     - Starts found: 0.92 at 0.82 precision (the app's damage events found 0.78 at 0.50).

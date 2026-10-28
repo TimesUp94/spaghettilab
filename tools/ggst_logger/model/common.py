@@ -121,6 +121,14 @@ def replay_fold_map() -> dict[str, int]:
     return dict(zip((r["replay"] for r in rows), (int(f) for f in replay_folds(rows))))
 
 
+def subsample(stems, frac, seed=0):
+    """A share of the replays, nested (a smaller share is a prefix of a larger one)."""
+    if frac >= 1:
+        return list(stems)
+    order = list(np.random.default_rng(seed).permutation(sorted(stems)))
+    return sorted(order[:max(1, round(frac * len(order)))])
+
+
 # ---- metrics ------------------------------------------------------------------------------
 
 def report(y_true, y_pred, classes, proba=None, topk=(1, 3)):

@@ -9,9 +9,10 @@ with temporal fusion, and heads for
 
     .venv/Scripts/python.exe tools/ggst_logger/model/video_moves.py train    # folds 1-4 -> test fold 0
     .venv/Scripts/python.exe tools/ggst_logger/model/video_moves.py final    # every replay
+    .venv/Scripts/python.exe tools/ggst_logger/model/video_moves.py train --frac 0.25   # learning curve
 
--> <data>/ggst_dataset/model/video_moves_{test,final}.pt, results_video_moves.json,
-   preds_video_moves_test.json (per detection, for the end-to-end report)
+-> <data>/ggst_dataset/model/video_moves_{test,final}.pt, results_video_moves.json
+   (--frac: a share of the training replays -> video_moves_exp_frac<pct>.pt, results_exp_moves_frac<pct>.json)
 """
 from __future__ import annotations
 
@@ -26,8 +27,8 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (DATA, OUT, TEST_FOLD, collapse_rare, label_category, label_hit_kind, label_normal,  # noqa: E402
-                    low_priority, replay_fold_map, report, save_json)
+from common import (CAT6, DATA, OUT, TEST_FOLD, collapse_rare, label_category, label_hit_kind, label_normal,  # noqa: E402
+                    low_priority, replay_fold_map, report, save_json, subsample)
 
 WIN = list(range(-16, 5))
 FRAMES = [-15, -12, -9, -6, -4, -2, 0, 2]
@@ -55,7 +56,7 @@ def items_for(root: Path, rows_by_key, stems):
 def vocab(items):
     """Class lists per head from the training items (rare moves -> '<char>:(rare)')."""
     rows = [it["row"] for it in items if it["row"] is not None]
-    cat = sorted({label_category(r) for r in rows} | {"none"})
+    cat = sorted(set(CAT6.values()) | {"none"})
     nor = sorted({l for l in collapse_rare([label_normal(r) for r in rows], 5) if l is not None})
     hk = sorted({l for l in (label_hit_kind(r) for r in rows) if l is not None})
     mv = sorted({l for l in collapse_rare([f"{r['char']}:{r['move']}" for r in rows], 5) if l is not None})
@@ -300,6 +301,7 @@ def main():
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--backbone", default="resnet18")
     ap.add_argument("--crops", default="test")
+    ap.add_argument("--frac", type=float, default=1.0, help="share of the training replays (by replay, seed 0)")
     a = ap.parse_args()
     low_priority()
     import pyarrow.parquet as pq
@@ -311,13 +313,17 @@ def main():
     stems = sorted(fold)
     test = [s for s in stems if fold[s] == TEST_FOLD]
     train_stems = stems if a.mode == "final" else [s for s in stems if fold[s] != TEST_FOLD]
+    train_stems = subsample(train_stems, a.frac)
     items = items_for(root, by_key, train_stems)
     voc = vocab(items)
     print(len(items), "training detections;", {h: len(v) for h, v in voc.items()}, flush=True)
     net = fit(items, voc, a.epochs, a.backbone)
     tag = "final" if a.mode == "final" else "test"
+    suf = "" if a.backbone == "resnet18" else "_" + a.backbone
+    if a.frac < 1:
+        tag, suf = "exp", f"_frac{round(a.frac * 100)}" + suf
     torch.save({"state": net.state_dict(), "voc": voc, "backbone": a.backbone, "frames": FRAMES, "res": RES},
-               OUT / f"video_moves_{tag}{'' if a.backbone == 'resnet18' else '_' + a.backbone}.pt")
+               OUT / f"video_moves_{tag}{suf}.pt")
     if a.mode == "train":
         titems = items_for(root, by_key, test)
         chars_list = torch.load(OUT / "video_players_test.pt", map_location="cpu")["chars"]
@@ -325,7 +331,8 @@ def main():
         P = predict(net, titems, voc, vch)
         res = end_to_end(titems, P, voc, vch, rows, set(test))
         res["backbone"] = a.backbone
-        save_json(res, OUT / f"results_video_moves{'' if a.backbone == 'resnet18' else '_' + a.backbone}.json")
+        res["train_replays"] = len(train_stems)
+        save_json(res, OUT / (f"results_exp_moves{suf}.json" if a.frac < 1 else f"results_video_moves{suf}.json"))
         brief = {k: v for k, v in res.items() if k not in ("category", "hit_kind", "move_acc_by_char")}
         brief["category_acc"] = res["category"]["accuracy"]
         brief["category_bal"] = res["category"]["balanced_accuracy"]

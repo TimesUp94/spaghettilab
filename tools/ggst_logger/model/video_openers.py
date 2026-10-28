@@ -9,6 +9,7 @@ out). The pipeline samples every 2nd video frame (30 Hz), so a step is 2 video f
     .venv/Scripts/python.exe tools/ggst_logger/model/video_openers.py final   # every replay -> weights
 
 -> <data>/ggst_dataset/model/video_openers_{test,final}.pt, results_video_openers.json
+   (train --frac 0.25: a share of the training replays -> video_openers_exp_frac<pct>.pt, results_exp_openers_frac<pct>.json)
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import DATA, OUT, TEST_FOLD, low_priority, replay_fold_map, save_json  # noqa: E402
+from common import DATA, OUT, TEST_FOLD, low_priority, replay_fold_map, save_json, subsample  # noqa: E402
 
 RUNS = DATA / "runs"
 STEP = 2            # video frames per pipeline sample
@@ -265,6 +266,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=["train", "final", "crossfit"])
     ap.add_argument("--epochs", type=int, default=30)
+    ap.add_argument("--frac", type=float, default=1.0, help="share of the training replays (by replay, seed 0)")
+    ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
     low_priority()
     import pyarrow.parquet as pq
@@ -277,13 +280,16 @@ def main():
         return crossfit(data, fold, a.epochs)
     test = [s for s in stems if fold[s] == TEST_FOLD]
     trainset = stems if a.mode == "final" else [s for s in stems if fold[s] != TEST_FOLD]
+    trainset = subsample(trainset, a.frac)
+    exp = a.frac < 1 or a.seed != 0
+    name = f"exp_frac{round(a.frac * 100)}" + (f"_seed{a.seed}" if a.seed else "")
     t0 = time.time()
-    net = train([data[s][:3] for s in trainset], a.epochs)
+    net = train([data[s][:3] for s in trainset], a.epochs, seed=a.seed)
     print(f"trained on {len(trainset)} replays in {time.time() - t0:.0f}s")
-    torch.save(net.state_dict(), OUT / f"video_openers_{'final' if a.mode == 'final' else 'test'}.pt")
+    torch.save(net.state_dict(), OUT / f"video_openers_{name if exp else 'final' if a.mode == 'final' else 'test'}.pt")
     if a.mode == "train":
         res = {f"{thr:.2f}": report_detection(data, test, net, thr) for thr in (0.2, 0.3, 0.4, 0.5, 0.6)}
-        save_json(res, OUT / "results_video_openers.json")
+        save_json(res, OUT / (f"results_{name.replace('exp_', 'exp_openers_')}.json" if exp else "results_video_openers.json"))
         for k, v in res.items():
             print(f"thr {k}: recall {v['recall']:.3f} precision {v['precision']:.3f} f1 {v['f1']:.3f}")
         best = max(res.values(), key=lambda v: v["f1"])
