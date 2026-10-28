@@ -6,12 +6,13 @@ Chain (final weights, trained on every logged replay):
 2. video_openers: the frames combos start at, and the attacker's side;
 3. video_players + video_crops: both players on each frame around them, the attacker crop, and
    both characters by vote over every frame seen;
-4. video_moves: the opener's classes ('none' = not an opener after all, dropped);
+4. video_moves: the opener's classes ('none' = not an opener after all, dropped), with the whole
+   frame around each start too (video_scene) when the weights were trained with it;
 5. banner_reader: counter / punish from the game's banner (in place of video_moves' guess).
 
     .venv/Scripts/python.exe tools/ggst_logger/model/recognize.py <video> [--out <dir>] [--analysis <dir>]
 
--> <out>/openers.json (and the crops under <out>/crops)
+-> <out>/openers.json (and the crops under <out>/crops, <out>/scene)
 """
 from __future__ import annotations
 
@@ -73,6 +74,7 @@ def main():
     import banner_reader as br
     import video_crops as vc
     import video_moves as vm
+    import video_scene as vs
     out = a.out or a.video.with_suffix("")
     out.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
@@ -88,11 +90,13 @@ def main():
     players_ck = torch.load(OUT / "video_players_final.pt", map_location="cpu")
     lp = np.array(idx["chars_logp"])
     chars = (players_ck["chars"][int(lp[0].argmax())], players_ck["chars"][int(lp[1].argmax())])
-    ck = torch.load(OUT / "video_moves_final.pt", map_location="cpu")
-    net = vm.make_net(ck["voc"], ck["backbone"]).cuda()
-    net.load_state_dict(ck["state"])
-    items = [dict(stem="v", file=str(cdir / d["file"]), frame=d["frame"], side=d["side"], score=d["score"], row=None)
-             for d in idx["dets"]]
+    net, ck = vm.load(OUT / "video_moves_final.pt")
+    sdir = out / "scene"
+    if ck.get("scene"):
+        (sdir / "done").unlink(missing_ok=True)
+        vs.process((a.video.stem, str(a.video), str(cdir), str(sdir)))
+    items = [dict(stem="v", file=str(cdir / d["file"]), frame=d["frame"], side=d["side"], score=d["score"], row=None,
+                  scene=str(sdir / d["file"])) for d in idx["dets"]]
     P = vm.predict(net, items, ck["voc"], {"v": chars})
     voc = ck["voc"]
     hk = {(d["frame"], d["side"]): p for d, p in zip(dets, br.hit_kind(a.video, dets))}

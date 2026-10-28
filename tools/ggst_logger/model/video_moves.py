@@ -6,10 +6,14 @@ with temporal fusion, and heads for
 - counter / punish / neither,
 - the exact move: one vocabulary over every character, the logits restricted to the attacker's
   character (the log's at training, the video vote's in the end-to-end test).
+A second backbone also sees the whole frame at low resolution (video_scene.py) at the
+same offsets, for projectiles, summons and hits away from the attacker crop (run video_scene.py
+after video_crops.py).
 
     .venv/Scripts/python.exe tools/ggst_logger/model/video_moves.py train    # folds 1-4 -> test fold 0
     .venv/Scripts/python.exe tools/ggst_logger/model/video_moves.py final    # every replay
     .venv/Scripts/python.exe tools/ggst_logger/model/video_moves.py train --frac 0.25   # learning curve
+    .venv/Scripts/python.exe tools/ggst_logger/model/video_moves.py train --no-scene --name crop   # crop only
 
 -> <data>/ggst_dataset/model/video_moves_{test,final}.pt, results_video_moves.json
    (--frac: a share of the training replays -> video_moves_exp_frac<pct>.pt, results_exp_moves_frac<pct>.json)
@@ -34,6 +38,7 @@ WIN = list(range(-16, 5))
 FRAMES = [-15, -12, -9, -6, -4, -2, 0, 2]
 SHIFTS = [-1, 0, 1, 2]
 RES = 192
+SCENE = (384, 216)
 HEADS = ("category", "normal", "hit_kind", "move")
 IGNORE = -100
 
@@ -49,7 +54,7 @@ def items_for(root: Path, rows_by_key, stems):
         for d in idx["dets"]:
             r = rows_by_key.get(f"{s}/{d['row']}") if d["row"] else None
             out.append(dict(stem=s, file=str(root / s / d["file"]), frame=d["frame"], side=d["side"],
-                            score=d["score"], row=r))
+                            score=d["score"], row=r, scene=str(scene_root(root) / s / d["file"])))
     return out
 
 
@@ -80,13 +85,17 @@ def targets(it, voc):
             "move": voc["move"].index(mv) if mv in voc["move"] else IGNORE}
 
 
+def scene_root(root: Path) -> Path:
+    return root.parent / root.name.replace("vcrops", "vscene")
+
+
 def char_mask(voc, char):
     return np.array([m.startswith(char + ":") for m in voc["move"]])
 
 
 class Crops:
-    def __init__(self, items, voc, train, chars=None):
-        self.items, self.voc, self.train = items, voc, train
+    def __init__(self, items, voc, train, chars=None, scene=None):
+        self.items, self.voc, self.train, self.scene = items, voc, train, scene
         self.chars = chars           # stem -> (P1 char, P2 char) from the video vote; None = the log's
         self.masks = {}
 
@@ -118,16 +127,24 @@ class Crops:
             lo = int(RES * k)
             x = np.stack([cv2.resize(cv2.resize(t, (lo, lo), interpolation=cv2.INTER_AREA), (RES, RES),
                                      interpolation=cv2.INTER_LINEAR) for t in x])
+        xs = np.zeros(0, np.uint8)
+        if self.scene:
+            sw, sh = self.scene
+            img = cv2.imread(it["scene"])[:, :, ::-1]
+            w = img.shape[1] // len(WIN)
+            xs = np.stack([cv2.resize(img[:, WIN.index(o) * w:(WIN.index(o) + 1) * w], (sw, sh),
+                                      interpolation=cv2.INTER_AREA) for o in offs])
         t = targets(it, self.voc)
         if self.chars is not None:
             char = self.chars[it["stem"]][it["side"] - 1]
         else:
             char = it["row"]["char"] if it["row"] is not None else None
         m = self.mask(char) if char is not None else np.zeros(len(self.voc["move"]), bool)
-        return x, np.array([t[h] for h in HEADS], np.int64), m
+        return x, xs, np.array([t[h] for h in HEADS], np.int64), m
 
 
-def make_net(voc, backbone="resnet18"):
+def make_net(voc, backbone="resnet18", scene=None):
+    import torch
     import torch.nn as nn
     import torchvision
 
@@ -142,13 +159,20 @@ def make_net(voc, backbone="resnet18"):
                 d = 2048
             b.fc = nn.Identity()
             self.b = b
+            self.s = None
+            if scene:
+                self.s = torchvision.models.resnet18(weights=torchvision.models.ResNet18_Weights.IMAGENET1K_V1)
+                self.s.fc = nn.Identity()
+                d += 512
             self.t = nn.Sequential(nn.Conv1d(d, 384, 3, padding=1), nn.GELU(), nn.Conv1d(384, 384, 3, padding=1),
                                    nn.GELU(), nn.AdaptiveMaxPool1d(1), nn.Flatten(), nn.Dropout(0.3))
             self.heads = nn.ModuleDict({h: nn.Linear(384, len(voc[h])) for h in HEADS})
 
-        def forward(self, x):            # x [B, T, 3, H, W]
+        def forward(self, x, xs=None):   # x [B, T, 3, H, W], xs the scene [B, T, 3, h, w]
             B, T = x.shape[:2]
             f = self.b(x.flatten(0, 1)).view(B, T, -1)
+            if self.s is not None:
+                f = torch.cat([f, self.s(xs.flatten(0, 1)).view(B, T, -1)], -1)
             z = self.t(f.transpose(1, 2))
             return {h: m(z) for h, m in self.heads.items()}
     return Net()
@@ -158,13 +182,15 @@ MEAN = np.array([0.485, 0.456, 0.406], np.float32).reshape(1, 1, 3, 1, 1)
 STD = np.array([0.229, 0.224, 0.225], np.float32).reshape(1, 1, 3, 1, 1)
 
 
-def prep(x, train):
+def prep(x, train, shift=16):
     import torch
+    if x.ndim < 5:
+        return None
     x = x.cuda(non_blocking=True).permute(0, 1, 4, 2, 3).float().div(255)
     if train:
         B = x.shape[0]
         x = x * (0.8 + 0.4 * torch.rand(B, 1, 1, 1, 1, device="cuda")) + 0.1 * (torch.rand(B, 1, 1, 1, 1, device="cuda") - 0.5)
-        dx, dy = np.random.randint(-16, 17, 2)
+        dx, dy = np.random.randint(-shift, shift + 1, 2)
         x = torch.roll(x, (int(dy), int(dx)), (3, 4))
     return (x.clamp(0, 1) - torch.from_numpy(MEAN).cuda()) / torch.from_numpy(STD).cuda()
 
@@ -175,10 +201,10 @@ def loader(ds, train, bs):
                                        drop_last=train, pin_memory=True)
 
 
-def fit(items, voc, epochs, backbone, bs=24, lr=3e-4):
+def fit(items, voc, epochs, backbone, bs=24, lr=3e-4, scene=None):
     import torch
     import torch.nn as nn
-    net = make_net(voc, backbone).cuda()
+    net = make_net(voc, backbone, scene).cuda()
     ys = np.array([[targets(it, voc)[h] for h in HEADS] for it in items])
     weights = {}
     for k, h in enumerate(HEADS):
@@ -191,14 +217,14 @@ def fit(items, voc, epochs, backbone, bs=24, lr=3e-4):
     steps = epochs * (len(items) // bs)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, lr, total_steps=steps, pct_start=0.15)
     scaler = torch.amp.GradScaler()
-    ds = Crops(items, voc, True)
+    ds = Crops(items, voc, True, scene=scene)
     for ep in range(epochs):
         net.train()
         t0, tot, n = time.time(), 0.0, 0
-        for x, y, m in loader(ds, True, bs):
+        for x, xs, y, m in loader(ds, True, bs):
             y, m = y.cuda(), m.cuda()
             with torch.autocast("cuda", dtype=torch.float16):
-                out = net(prep(x, True))
+                out = net(prep(x, True), prep(xs, True, 8))
                 loss = 0
                 for k, h in enumerate(HEADS):
                     lg = out[h].float()
@@ -217,15 +243,25 @@ def fit(items, voc, epochs, backbone, bs=24, lr=3e-4):
     return net
 
 
+def load(path):
+    """(net on the GPU, checkpoint) of saved weights."""
+    import torch
+    ck = torch.load(path, map_location="cpu")
+    net = make_net(ck["voc"], ck.get("backbone", "resnet18"), ck.get("scene")).cuda()
+    net.load_state_dict(ck["state"])
+    net.scene = ck.get("scene")
+    return net, ck
+
+
 def predict(net, items, voc, chars):
     """Per item: probabilities per head (move restricted to the given characters)."""
     import torch
     net.eval()
-    ds = Crops(items, voc, False, chars)
+    ds = Crops(items, voc, False, chars, getattr(net, "scene", None))
     out = {h: [] for h in HEADS}
     with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
-        for x, _, m in loader(ds, False, 48):
-            o = net(prep(x, False))
+        for x, xs, _, m in loader(ds, False, 48):
+            o = net(prep(x, False), prep(xs, False))
             for h in HEADS:
                 lg = o[h].float()
                 if h == "move":
@@ -302,6 +338,8 @@ def main():
     ap.add_argument("--backbone", default="resnet18")
     ap.add_argument("--crops", default="test")
     ap.add_argument("--frac", type=float, default=1.0, help="share of the training replays (by replay, seed 0)")
+    ap.add_argument("--scene", action=argparse.BooleanOptionalAction, default=True, help="the whole-frame stream (video_scene.py)")
+    ap.add_argument("--name", help="experiment name -> video_moves_exp_<name>.pt, results_exp_moves_<name>.json")
     a = ap.parse_args()
     low_priority()
     import pyarrow.parquet as pq
@@ -317,12 +355,17 @@ def main():
     items = items_for(root, by_key, train_stems)
     voc = vocab(items)
     print(len(items), "training detections;", {h: len(v) for h, v in voc.items()}, flush=True)
-    net = fit(items, voc, a.epochs, a.backbone)
+    scene = SCENE if a.scene else None
+    net = fit(items, voc, a.epochs, a.backbone, scene=scene)
+    net.scene = scene
     tag = "final" if a.mode == "final" else "test"
     suf = "" if a.backbone == "resnet18" else "_" + a.backbone
     if a.frac < 1:
         tag, suf = "exp", f"_frac{round(a.frac * 100)}" + suf
-    torch.save({"state": net.state_dict(), "voc": voc, "backbone": a.backbone, "frames": FRAMES, "res": RES},
+    if a.name:
+        tag, suf = "exp", f"_{a.name}"
+    exp = tag == "exp"
+    torch.save({"state": net.state_dict(), "voc": voc, "backbone": a.backbone, "frames": FRAMES, "res": RES, "scene": scene},
                OUT / f"video_moves_{tag}{suf}.pt")
     if a.mode == "train":
         titems = items_for(root, by_key, test)
@@ -332,7 +375,7 @@ def main():
         res = end_to_end(titems, P, voc, vch, rows, set(test))
         res["backbone"] = a.backbone
         res["train_replays"] = len(train_stems)
-        save_json(res, OUT / (f"results_exp_moves{suf}.json" if a.frac < 1 else f"results_video_moves{suf}.json"))
+        save_json(res, OUT / (f"results_exp_moves{suf}.json" if exp else f"results_video_moves{suf}.json"))
         brief = {k: v for k, v in res.items() if k not in ("category", "hit_kind", "move_acc_by_char")}
         brief["category_acc"] = res["category"]["accuracy"]
         brief["category_bal"] = res["category"]["balanced_accuracy"]

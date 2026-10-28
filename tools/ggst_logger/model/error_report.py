@@ -36,10 +36,8 @@ def key(r):
 def move_preds(weights, root, by_key, test):
     import torch
     import video_moves as vm
-    ck = torch.load(OUT / weights, map_location="cpu")
+    net, ck = vm.load(OUT / weights)
     voc = ck["voc"]
-    net = vm.make_net(voc, ck.get("backbone", "resnet18")).cuda()
-    net.load_state_dict(ck["state"])
     items = vm.items_for(root, by_key, test)
     chars_list = torch.load(OUT / "video_players_test.pt", map_location="cpu")["chars"]
     vch = vm.video_chars(root, test, chars_list)

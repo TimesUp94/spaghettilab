@@ -6,10 +6,12 @@ Stages (each skips what is done):
     analyze  the app's CV pipeline (scripts/analyze_replay.py) -> degraded/runs/<stem>/
     detect   video_openers_test.pt on those HUD readings, matched to the log -> degraded/detections.json
     crops    video_crops.py on the degraded videos -> degraded/vcrops/<stem>/
+    scene    video_scene.py (whole frames, for a move net trained with --scene) -> degraded/vscene/<stem>/
     banners  banner_reader.py on the degraded videos -> banners_degraded/<stem>.npz
     eval     video_moves_test.pt end to end (counter / punish from banner_reader_test.pkl) -> model/results_degraded.json
 
-    .venv/Scripts/python.exe tools/ggst_logger/model/degrade_eval.py encode analyze detect crops banners eval
+    .venv/Scripts/python.exe tools/ggst_logger/model/degrade_eval.py encode analyze detect crops scene banners eval
+    .venv/Scripts/python.exe tools/ggst_logger/model/degrade_eval.py eval --moves video_moves_exp_x.pt   # -> results_exp_degraded_x.json
 """
 from __future__ import annotations
 
@@ -111,15 +113,22 @@ def crops(stems):
         print(f"  crops {k + 1}/{len(stems)} {s} {n}", flush=True)
 
 
-def evaluate(stems, rows):
+def scene(stems, jobs):
+    import video_scene as vs
+    from multiprocessing import Pool
+    tasks = [(s, str(DEG / f"{s}.mp4"), str(DEG / "vcrops" / s), str(DEG / "vscene" / s)) for s in stems]
+    with Pool(jobs) as p:
+        for k, (s, n) in enumerate(p.imap_unordered(vs.process, tasks)):
+            print(f"  scene {k + 1}/{len(stems)} {s} {n}", flush=True)
+
+
+def evaluate(stems, rows, moves="video_moves_test.pt"):
     import pyarrow.parquet as pq
     import torch
     import video_moves as vm
     allrows = pq.read_table(DATA / "openers.parquet").to_pylist()
     by_key = {f"{r['replay']}/{r['log_row']}_{r['attacker']}": r for r in allrows}
-    ck = torch.load(OUT / "video_moves_test.pt", map_location="cpu")
-    net = vm.make_net(ck["voc"], ck["backbone"]).cuda()
-    net.load_state_dict(ck["state"])
+    net, ck = vm.load(OUT / moves)
     root = DEG / "vcrops"
     items = vm.items_for(root, by_key, stems)
     chars_list = torch.load(OUT / "video_players_test.pt", map_location="cpu")["chars"]
@@ -131,7 +140,8 @@ def evaluate(stems, rows):
         Pb = br.probs_for(items, "degraded")
         P["hit_kind"] = np.where(np.isnan(Pb).any(1)[:, None], P["hit_kind"], Pb)
     res = vm.end_to_end(items, P, ck["voc"], vch, allrows, set(stems))
-    save_json(res, OUT / "results_degraded.json")
+    exp = moves.startswith("video_moves_exp_")
+    save_json(res, OUT / (f"results_exp_degraded_{moves[16:-3]}.json" if exp else "results_degraded.json"))
     brief = {k: v for k, v in res.items() if k not in ("category", "hit_kind", "move_acc_by_char")}
     brief["category_acc"] = res["category"]["accuracy"]
     brief["hit_kind_acc"] = res["hit_kind"]["accuracy"]
@@ -140,7 +150,8 @@ def evaluate(stems, rows):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("stages", nargs="+", choices=["encode", "analyze", "detect", "crops", "banners", "eval"])
+    ap.add_argument("stages", nargs="+", choices=["encode", "analyze", "detect", "crops", "scene", "banners", "eval"])
+    ap.add_argument("--moves", default="video_moves_test.pt", help="move net weights for eval")
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--limit", type=int, default=0, help="first N test replays only")
     a = ap.parse_args()
@@ -152,9 +163,9 @@ def main():
     for st in a.stages:
         t0 = time.time()
         {"encode": lambda: encode(stems, video), "analyze": lambda: analyze(stems, a.jobs),
-         "detect": lambda: detect(stems, rows), "crops": lambda: crops(stems),
+         "detect": lambda: detect(stems, rows), "crops": lambda: crops(stems), "scene": lambda: scene(stems, a.jobs),
          "banners": lambda: __import__("banner_reader").extract("degraded", a.jobs, stems),
-         "eval": lambda: evaluate(stems, rows)}[st]()
+         "eval": lambda: evaluate(stems, rows, a.moves)}[st]()
         print(f"[{st}] {time.time() - t0:.0f}s", flush=True)
 
 

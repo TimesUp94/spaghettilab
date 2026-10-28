@@ -51,8 +51,8 @@ python tools/ggst_logger/dataset/build.py --idle
   - The video-only chain, which needs nothing from the log at inference:
     1. `video_openers.py`: combo starts and the attacker's side, from the CV pipeline's HUD readings (temporal conv + BiGRU).
     2. `video_players.py`: both players' positions and both characters on 256×144 frames (ResNet18, CenterNet-style heatmap).
-    3. `video_crops.py`: cuts the attacker crop strip around each detected start.
-    4. `video_moves.py`: category, button/stance, exact move (restricted to the attacker's character), and "none" for a false start.
+    3. `video_crops.py`: cuts the attacker crop strip around each detected start; `video_scene.py` adds the whole frame at 384×216 at the same moments (mirrored like the crop), for projectiles, summons and hits away from the attacker.
+    4. `video_moves.py`: category, button/stance, exact move (restricted to the attacker's character), and "none" for a false start, from the crop and the whole frame (two ResNet18s, temporal fusion).
     5. `banner_reader.py`: counter / punish / neither from the game's own banner around each start: the yellow COUNTER / PUNISH word in the attacker's HUD box (the dataset build's templates), and a large counter hit's letterbox or big white COUNTER! (random forest on the scores of every 2nd frame from -60 to +60). It replaces `video_moves`' counter/punish head, which guessed from the attacker crop (0.65).
   - `recognize.py <video>`: runs the whole chain with the `*_final.pt` weights (trained on all 722 replays) and writes `openers.json`.
   - `degrade_eval.py`: the same chain on 720p30 3 Mbit/s copies of the test replays (a typical VOD).
@@ -60,12 +60,12 @@ python tools/ggst_logger/dataset/build.py --idle
   - Weights and results are in `$GGST_DATA/ggst_dataset/model/` and are not in the repo.
   - Test fold (144 held-out replays, 4,715 logged openers, bursts apart), from the 1080p60 recordings:
     - Starts found: 0.92 at 0.82 precision (the app's damage events found 0.78 at 0.50).
-    - Found and kept: 0.89, with 0.95 of the kept ones real.
+    - Found and kept: 0.91, with 0.98 of the kept ones real.
     - Characters right on every replay.
-    - Given found: category 0.88, button/stance 0.92, exact move 0.89 (0.73–1.0 by character), counter/punish/neither 0.96.
-    - The whole chain gets 0.79 of all openers found with the right move.
+    - Given found: category 0.91, button/stance 0.92, exact move 0.90 (0.73–1.0 by character), counter/punish/neither 0.96.
+    - The whole chain gets 0.82 of all openers found with the right move (0.79 with the attacker crop alone).
   - On the 720p30 copies of the same replays (`degrade_eval.py`), almost nothing is lost:
-    - starts 0.93 found and 0.89 kept, with 0.92 of the kept ones real;
+    - starts 0.93 found and 0.92 kept, with 0.96 of the kept ones real;
     - characters all right;
-    - category 0.87, button/stance 0.91, exact move 0.88, counter/punish/neither 0.96;
-    - whole chain 0.79.
+    - category 0.91, button/stance 0.92, exact move 0.89, counter/punish/neither 0.96;
+    - whole chain 0.83.
