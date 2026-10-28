@@ -6,9 +6,10 @@ Stages (each skips what is done):
     analyze  the app's CV pipeline (scripts/analyze_replay.py) -> degraded/runs/<stem>/
     detect   video_openers_test.pt on those HUD readings, matched to the log -> degraded/detections.json
     crops    video_crops.py on the degraded videos -> degraded/vcrops/<stem>/
-    eval     video_moves_test.pt end to end -> model/results_degraded.json
+    banners  banner_reader.py on the degraded videos -> banners_degraded/<stem>.npz
+    eval     video_moves_test.pt end to end (counter / punish from banner_reader_test.pkl) -> model/results_degraded.json
 
-    .venv/Scripts/python.exe tools/ggst_logger/model/degrade_eval.py encode analyze detect crops eval
+    .venv/Scripts/python.exe tools/ggst_logger/model/degrade_eval.py encode analyze detect crops banners eval
 """
 from __future__ import annotations
 
@@ -124,16 +125,22 @@ def evaluate(stems, rows):
     chars_list = torch.load(OUT / "video_players_test.pt", map_location="cpu")["chars"]
     vch = vm.video_chars(root, stems, chars_list)
     P = vm.predict(net, items, ck["voc"], vch)
+    if (OUT / "banner_reader_test.pkl").exists():
+        import banner_reader as br
+        assert tuple(ck["voc"]["hit_kind"]) == br.CLASSES
+        Pb = br.probs_for(items, "degraded")
+        P["hit_kind"] = np.where(np.isnan(Pb).any(1)[:, None], P["hit_kind"], Pb)
     res = vm.end_to_end(items, P, ck["voc"], vch, allrows, set(stems))
     save_json(res, OUT / "results_degraded.json")
     brief = {k: v for k, v in res.items() if k not in ("category", "hit_kind", "move_acc_by_char")}
     brief["category_acc"] = res["category"]["accuracy"]
+    brief["hit_kind_acc"] = res["hit_kind"]["accuracy"]
     print(json.dumps(brief, indent=1, default=float))
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("stages", nargs="+", choices=["encode", "analyze", "detect", "crops", "eval"])
+    ap.add_argument("stages", nargs="+", choices=["encode", "analyze", "detect", "crops", "banners", "eval"])
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--limit", type=int, default=0, help="first N test replays only")
     a = ap.parse_args()
@@ -146,6 +153,7 @@ def main():
         t0 = time.time()
         {"encode": lambda: encode(stems, video), "analyze": lambda: analyze(stems, a.jobs),
          "detect": lambda: detect(stems, rows), "crops": lambda: crops(stems),
+         "banners": lambda: __import__("banner_reader").extract("degraded", a.jobs, stems),
          "eval": lambda: evaluate(stems, rows)}[st]()
         print(f"[{st}] {time.time() - t0:.0f}s", flush=True)
 

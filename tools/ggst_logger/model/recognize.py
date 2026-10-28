@@ -6,7 +6,8 @@ Chain (final weights, trained on every logged replay):
 2. video_openers: the frames combos start at, and the attacker's side;
 3. video_players + video_crops: both players on each frame around them, the attacker crop, and
    both characters by vote over every frame seen;
-4. video_moves: the opener's classes ('none' = not an opener after all, dropped).
+4. video_moves: the opener's classes ('none' = not an opener after all, dropped);
+5. banner_reader: counter / punish from the game's banner (in place of video_moves' guess).
 
     .venv/Scripts/python.exe tools/ggst_logger/model/recognize.py <video> [--out <dir>] [--analysis <dir>]
 
@@ -69,6 +70,7 @@ def main():
     a = ap.parse_args()
     low_priority()
     import torch
+    import banner_reader as br
     import video_crops as vc
     import video_moves as vm
     out = a.out or a.video.with_suffix("")
@@ -93,6 +95,8 @@ def main():
              for d in idx["dets"]]
     P = vm.predict(net, items, ck["voc"], {"v": chars})
     voc = ck["voc"]
+    hk = {(d["frame"], d["side"]): p for d, p in zip(dets, br.hit_kind(a.video, dets))}
+    print(f"banners read ({time.time() - t0:.0f}s)", flush=True)
     res = []
     for i, it in enumerate(items):
         cat = voc["category"][int(P["category"][i].argmax())]
@@ -107,7 +111,8 @@ def main():
             move=voc["move"][top[0]].split(":", 1)[1], move_p=round(float(P["move"][i][top[0]]), 3),
             move_top3=[(voc["move"][k].split(":", 1)[1], round(float(P["move"][i][k]), 3)) for k in top],
             normal=voc["normal"][int(P["normal"][i].argmax())] if cat == "normal" else None,
-            hit_kind=voc["hit_kind"][int(P["hit_kind"][i].argmax())],
+            hit_kind=br.CLASSES[int(hk[(it["frame"], it["side"])].argmax())],
+            hit_kind_p=round(float(hk[(it["frame"], it["side"])].max()), 3),
         ))
     doc = dict(video=str(a.video), fps=fps, size=[w, h], characters={"P1": chars[0], "P2": chars[1]}, openers=res)
     (out / "openers.json").write_text(json.dumps(doc, indent=1))
