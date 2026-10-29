@@ -266,6 +266,8 @@ def go_to_search():
         nav.wait_for("search_list", box=SEARCH_HEADER, timeout=60)
         return
     nav.to_main()
+    ggst.ensure_windowed()       # again: the game can go fullscreen or resize its window
+    ggst.place_window()          # after the first placement at launch
     ggst.keys("d d d d d d", 300)
     time.sleep(1.5)
     nav.wait_for("collection", box=batch.COLLECTION_TAB, timeout=20)

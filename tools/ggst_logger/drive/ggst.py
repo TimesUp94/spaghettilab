@@ -261,12 +261,21 @@ def settings_windowed() -> None:
 
 
 def is_fullscreen(hwnd: int) -> bool:
-    """No title bar and the window covers a whole monitor (only meaningful before place_window)."""
+    """No title bar and the window is exactly its monitor (only meaningful before place_window).
+    Exclusive fullscreen switches that monitor to 1920x1080, so compare with the monitor's own
+    rectangle, not a 4K desktop."""
     if user32.GetWindowLongW(hwnd, -16) & 0x00C00000:       # WS_CAPTION
         return False
     r = wt.RECT()
     user32.GetWindowRect(hwnd, ctypes.byref(r))
-    return on_a_monitor(r.left, r.top, r.right - r.left, r.bottom - r.top) and r.right - r.left >= 1920
+    user32.MonitorFromRect.restype = wt.HMONITOR
+    mon = user32.MonitorFromRect(ctypes.byref(r), 0)
+    if not mon:
+        return False
+    mi = MONITORINFO(cbSize=ctypes.sizeof(MONITORINFO))
+    user32.GetMonitorInfoW(mon, ctypes.byref(mi))
+    m = mi.rcMonitor
+    return (r.left, r.top, r.right, r.bottom) == (m.left, m.top, m.right, m.bottom)
 
 
 def ensure_windowed() -> None:
