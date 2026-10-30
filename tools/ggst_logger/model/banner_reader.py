@@ -9,6 +9,8 @@ video; a random-forest classifier on those series (and the nearest detections: a
 counter hit, an earlier hit's banner may still be up) gives counter / punish / none.
 
     .venv/Scripts/python.exe tools/ggst_logger/model/banner_reader.py extract --set rec --jobs 5
+    .venv/Scripts/python.exe tools/ggst_logger/model/banner_reader.py extract --set rec --base banners_rec_v1   # new detections: reuse the
+        rows of an earlier extraction for detections at the same frame and side (a row depends on nothing else)
     .venv/Scripts/python.exe tools/ggst_logger/model/banner_reader.py extract --set degraded --jobs 5
     .venv/Scripts/python.exe tools/ggst_logger/model/banner_reader.py train      # folds 1-4 -> test fold 0
     .venv/Scripts/python.exe tools/ggst_logger/model/banner_reader.py final      # every replay
@@ -32,7 +34,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(1, str(Path(__file__).resolve().parents[1] / "dataset"))
-from common import DATA, OUT, TEST_FOLD, label_hit_kind, low_priority, replay_fold_map, report, save_json  # noqa: E402
+from common import DATA, OUT, TEST_FOLD, label_hit_kind, low_priority, replay_fold_map, report, save_json, test_subsets  # noqa: E402
 
 OFFS = tuple(range(-60, 61, 2))
 W, H = 960, 540                  # frames at half the 1920x1080 the boxes and templates are set for
@@ -140,15 +142,22 @@ def scan(video, frames):
 
 
 def _scan_one(args):
-    stem, video, dets, path = args
+    stem, video, dets, path, base = args
     low_priority()
     if Path(path).exists():
         return stem, -1
-    x = scan(video, [d["frame"] for d in dets])
+    old = {}
+    if base and (Path(base) / Path(path).name).exists():
+        z = np.load(Path(base) / Path(path).name)
+        old = {(int(f), int(s)): z["x"][k] for k, (f, s) in enumerate(zip(z["frame"], z["side"]))}
+    todo = [d["frame"] for d in dets if (d["frame"], d["side"]) not in old]
+    fresh = dict(zip(todo, scan(video, todo))) if todo else {}
+    x = np.stack([old[(d["frame"], d["side"])] if (d["frame"], d["side"]) in old else fresh[d["frame"]] for d in dets]) \
+        if dets else np.zeros((0, len(OFFS), NF), np.float32)
     tmp = Path(path).with_suffix(".part.npz")
     np.savez_compressed(tmp, x=x, frame=np.array([d["frame"] for d in dets]), side=np.array([d["side"] for d in dets]))
     tmp.replace(path)
-    return stem, len(dets)
+    return stem, len(todo)
 
 
 def sources(which):
@@ -163,13 +172,13 @@ def sources(which):
     return dets, video, DATA / f"banners_{which}"
 
 
-def extract(which, jobs, only=None):
+def extract(which, jobs, only=None, base=None):
     dets, video, root = sources(which)
     root.mkdir(parents=True, exist_ok=True)
     fold = replay_fold_map()
     # the test fold first, so it can be measured before the training replays are done
     stems = sorted((s for s in dets if dets[s] and (not only or s in only)), key=lambda s: (fold.get(s) != TEST_FOLD, s))
-    tasks = [(s, video[s], dets[s], str(root / f"{s}.npz")) for s in stems]
+    tasks = [(s, video[s], dets[s], str(root / f"{s}.npz"), str(DATA / base) if base else None) for s in stems]
     t0 = time.time()
     with Pool(jobs) as p:
         for k, (s, n) in enumerate(p.imap_unordered(_scan_one, tasks)):
@@ -278,10 +287,11 @@ def main():
     ap.add_argument("--set", default="rec", choices=["rec", "degraded"])
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--only", nargs="*")
+    ap.add_argument("--base", help="extract: banners dir under the data root to reuse rows from")
     a = ap.parse_args()
     low_priority()
     if a.mode == "extract":
-        return extract(a.set, a.jobs, a.only)
+        return extract(a.set, a.jobs, a.only, a.base)
     import pyarrow.parquet as pq
     rows = pq.read_table(DATA / "openers.parquet").to_pylist()
     by_key = {f"{r['replay']}/{r['log_row']}_{r['attacker']}": r for r in rows}
@@ -296,13 +306,15 @@ def main():
     with open(OUT / f"banner_reader_{tag}.pkl", "wb") as f:
         pickle.dump({"clf": clf, "classes": CLASSES, "offs": OFFS}, f)
     if a.mode == "train":
-        test = [s for s in stems if fold[s] == TEST_FOLD]
         res = {}
-        for which in ("rec", "degraded"):
-            d = dets if which == "rec" else sources("degraded")[0]
-            r, _, _ = evaluate(clf, which, test, by_key, d)
-            res[which] = r
-            print(which, {k: r[k] for k in ("n", "accuracy", "balanced_accuracy", "replays")}, r["top_confusions"][:4], flush=True)
+        for sub, test in test_subsets(fold).items():
+            for which in ("rec", "degraded"):
+                d = dets if which == "rec" else sources("degraded")[0]
+                if not any(d.get(s) for s in test):
+                    continue
+                r, _, _ = evaluate(clf, which, test, by_key, d)
+                res[which if sub == "all" else f"{which}_{sub}"] = r
+                print(which, sub, {k: r[k] for k in ("n", "accuracy", "balanced_accuracy", "replays")}, r["top_confusions"][:4], flush=True)
         save_json(res, OUT / "results_banner.json")
 
 

@@ -4,6 +4,8 @@ video_moves_test.pt runs end to end on them, as in video_moves.py train.
 
     .venv/Scripts/python.exe tools/ggst_logger/model/chain_eval.py --name tiny              # detections_exp_tiny.json (video_openers.py train --name tiny)
     .venv/Scripts/python.exe tools/ggst_logger/model/chain_eval.py --name tiny --degraded   # video_openers_exp_tiny.pt on the 720p30 copies
+    .venv/Scripts/python.exe tools/ggst_logger/model/chain_eval.py --rebuild --base vcrops_v1   # the chain's own vcrops_test /
+        vscene_test for every replay at detections.json (new crossfit detections), reusing vcrops_v1's tiles
 
 -> <data>/ggst_dataset/vcrops_exp_<name>/ (or degraded/vcrops_exp_<name>/), model/results_exp_chain_<name>[_degraded].json
 """
@@ -60,8 +62,9 @@ def build(args):
     cdir, sdir = out / stem, vm.scene_root(out) / stem
     if (cdir / "index.json").exists():
         return stem, 0
-    old = json.loads((base / stem / "index.json").read_text())
-    have = {(d["frame"], d["side"]): d for d in old["dets"]}
+    bidx = base / stem / "index.json"
+    old = json.loads(bidx.read_text()) if bidx.exists() else None
+    have = {(d["frame"], d["side"]): d for d in old["dets"]} if old else {}
     cdir.mkdir(parents=True, exist_ok=True)
     sdir.mkdir(parents=True, exist_ok=True)
     new = [d for d in dets if (d["frame"], d["side"]) not in have]
@@ -78,7 +81,8 @@ def build(args):
             if (stmp / d["file"]).exists():
                 shutil.move(stmp / d["file"], sdir / d["file"])
             cut[(d["frame"], d["side"])] = d
-        shutil.rmtree(tmp, ignore_errors=True)
+        if old is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
         shutil.rmtree(stmp, ignore_errors=True)
     entries = []
     for d in dets:
@@ -92,6 +96,9 @@ def build(args):
             entries.append(dict(d, file=o["file"], pos=o["pos"]))
         elif k in cut:
             entries.append(dict(d, file=cut[k]["file"], pos=cut[k]["pos"]))
+    if old is None:                       # nothing to reuse: the new cut's index (its character vote)
+        old = json.loads((tmp / "index.json").read_text()) if new else {"win": vc.WIN, "chars_logp": None, "frames_seen": 0}
+        shutil.rmtree(tmp, ignore_errors=True)
     idx = dict(old, dets=entries)
     (cdir / "index.json").write_text(json.dumps(idx))
     return stem, len(new)
@@ -99,10 +106,13 @@ def build(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--name", required=True, help="detector experiment (video_openers_exp_<name>.pt / detections_exp_<name>.json)")
+    ap.add_argument("--name", help="detector experiment (video_openers_exp_<name>.pt / detections_exp_<name>.json)")
+    ap.add_argument("--rebuild", action="store_true",
+                    help="cut the chain's vcrops_test / vscene_test for every replay at detections.json (from --base's tiles where the same)")
     ap.add_argument("--degraded", action="store_true", help="the 720p30 copies of the test replays")
     ap.add_argument("--moves", default="video_moves_test.pt")
     ap.add_argument("--base", help="crops dir to reuse tiles from (default: the chain's, vcrops_test or degraded/vcrops)")
+    ap.add_argument("--reverse", action="store_true", help="--rebuild: last replay first, skipping any already started")
     ap.add_argument("--jobs", type=int, default=3, help="processes cutting new crops (each loads the player net)")
     a = ap.parse_args()
     low_priority()
@@ -113,6 +123,18 @@ def main():
     fold = replay_fold_map()
     test = sorted(s for s in fold if fold[s] == TEST_FOLD)
     video = {r["replay"]: r["video"] for r in rows}
+    if a.rebuild:
+        dets = json.loads((OUT / "detections.json").read_text())
+        tasks = [(s, dets[s], DATA / a.base, DATA / "vcrops_test", video[s], str(OUT / "video_players_test.pt"))
+                 for s in sorted(dets, reverse=a.reverse) if s in video]
+        if a.reverse:     # a second runner from the other end: only replays nobody started
+            tasks = [t for t in tasks if not (DATA / "vcrops_test" / t[0]).exists()]
+        n_new = 0
+        with Pool(a.jobs) as p:
+            for k, (s, n) in enumerate(p.imap_unordered(build, tasks)):
+                n_new += n
+                print(f"  {k + 1}/{len(tasks)} {s}: {n} new detections cut ({n_new} in all)", flush=True)
+        return
     root = DATA / "degraded" if a.degraded else DATA
     base = root / (a.base or ("vcrops" if a.degraded else "vcrops_test"))
     out = root / f"vcrops_exp_{a.name}"

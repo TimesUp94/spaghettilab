@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import DATA, OUT, TEST_FOLD, label_category, label_hit_kind, low_priority, replay_fold_map, save_json  # noqa: E402
+from common import DATA, OUT, TEST_FOLD, label_category, label_hit_kind, low_priority, replay_fold_map, save_json, test_subsets  # noqa: E402
 
 STATUS = ("missed", "dropped_none", "wrong_move", "right")
 
@@ -113,6 +113,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--moves", default="video_moves_test.pt")
     ap.add_argument("--out", default="results_errors.json")
+    ap.add_argument("--subset", default="all", choices=["old", "new", "all", "old_unleaked"], help="test replays: frozen split's, added, all")
     a = ap.parse_args()
     os.environ.setdefault("VM_WORKERS", "4")
     low_priority()
@@ -120,7 +121,7 @@ def main():
     rows = pq.read_table(DATA / "openers.parquet").to_pylist()
     by_key = {key_full(r): r for r in rows}
     fold = replay_fold_map()
-    test = sorted(s for s in fold if fold[s] == TEST_FOLD)
+    test = test_subsets(fold)[a.subset]
     tset = set(test)
     train_rows = [r for r in rows if r["replay"] in fold and fold[r["replay"]] != TEST_FOLD]
     root = DATA / "vcrops_test"
@@ -165,7 +166,7 @@ def main():
                 st = "right" if pm == lab else "wrong_move"
         status[k], info[k] = st, d
 
-    res = dict(openers=n, moves_weights=a.moves, status=share(collections.Counter(status.values()), n))
+    res = dict(openers=n, replays=len(test), subset=a.subset, moves_weights=a.moves, status=share(collections.Counter(status.values()), n))
     cat = lambda r: label_category(r)
     res["by_category"] = table(tru, status, cat)
     res["by_raw_category"] = table(tru, status, lambda r: r["category"])

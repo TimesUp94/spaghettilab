@@ -104,6 +104,46 @@ def read_manifest() -> list[dict]:
     return out
 
 
+def log_inputs(path: str) -> tuple[tuple, dict]:
+    """(characters by sprite prefix, {(round, game frame): both players' inputs}) of a log, for
+    telling a replay recorded twice (the replay batch can play the same saved replay again)."""
+    import pyarrow.csv as pc
+    cols = ["round", "game_frame", "p1_rec", "p2_rec", "p1_sprite", "p2_sprite"]
+    t = pc.read_csv(path, convert_options=pc.ConvertOptions(include_columns=cols, include_missing_columns=True)).to_pydict()
+    a = np.array([t[c] for c in cols[:4]], dtype=np.float64).T
+    a = a[np.isfinite(a).all(1)].astype(np.int64)
+    chars = tuple(str(t[c][0])[:3] if t[c] and t[c][0] is not None else "?" for c in cols[4:])
+    return chars, dict(zip(zip(a[:, 0].tolist(), a[:, 1].tolist()), (a[:, 2] * 65536 + a[:, 3]).tolist()))
+
+
+def find_duplicates(entries: list[dict], min_common=3000, min_match=0.99) -> dict[str, str]:
+    """{dropped stem: kept stem} for replays recorded more than once: same characters and the same
+    inputs on >= min_match of the (round, game frame)s both logs have (copies differ only in where
+    the recording started and stopped). The earliest copy is kept, except that a copy in the frozen
+    test fold (model/folds.json) is always the one kept, so that fold stays whole and no copy of a
+    test replay is trained on."""
+    import itertools
+    folds = OUT / "model" / "folds.json"
+    test = {s for s, f in json.loads(folds.read_text()).items() if f == 0} if folds.exists() else set()
+    by = collections.defaultdict(list)
+    seqs = {}
+    for e in entries:
+        stem = Path(e["video"]).stem
+        chars, seqs[stem] = log_inputs(e["csv"])
+        by[chars].append((e.get("index", 0), stem))
+    dropped = {}
+    for group in by.values():
+        for (_, a), (_, b) in itertools.combinations(sorted(group), 2):
+            if a in dropped or b in dropped:
+                continue
+            A, B = seqs[a], seqs[b]
+            com = A.keys() & B.keys()
+            if len(com) >= min_common and sum(A[k] == B[k] for k in com) >= min_match * len(com):
+                keep, drop = (b, a) if b in test and a not in test else (a, b)
+                dropped[drop] = keep
+    return dropped
+
+
 def load_log(path: str) -> dict:
     with open(path, newline="") as fh:
         rows = list(csv.reader(fh))
@@ -519,16 +559,67 @@ def banner_kind_log(r: dict, normal: int | None) -> str:
     return "unclear"
 
 
+# A large counter hit's hitstop is ~30-31 frames whatever the move's normal one (14 -> 31, 19 -> 31,
+# Nagoriyuki's 24 -> 31). A KO's freeze runs to hitstop_len's cap.
+LARGE_CH_HITSTOP = 29
+HITSTOP_CAP = 40                         # hitstop_len's max_len
+# Defender states a counter hit needs besides attacking: Roman Cancel, Faultless Defense landing
+COUNTER_ACTS = ("CmnActRomanCancel", "CmnActFaultlessPressureLand")
+
+
+def is_hitstop(r: dict) -> bool:
+    """r's hitstop is a measurement: not a throw, and not a KO's freeze (a KO stops both players
+    for the round-end slash, so its 'hitstop' runs to the cap; 80% of the capped openers)."""
+    return not r["is_throw"] and not (r["ko"] and r["hitstop"] >= HITSTOP_CAP)
+
+
+def normal_hitstop(calm: list[int], any_def: list[int]) -> int | None:
+    """A move's hitstop without a counter hit. Only a defender that is attacking can be counter
+    hit, so its hits on a defender that is not (no banner or PUNISH: a punish adds no hitstop)
+    are the clean sample: their most common hitstop (the lowest of a tie). Among all hits without
+    a banner, a move that usually lands as a large CH (5H of Asuka, Sol, Goldlewis, Ramlethal,
+    I-No 6H) has the large-CH hitstop (31) as its most common one, the red word being rarely read.
+    Without a clean sample: the lowest hitstop below the large-CH one seen at least twice (single
+    short ones are measurement slips), else the lowest below it; None when every hit was that long
+    (Jack-O and Leo 2H, Goldlewis Swing 3 land only as large CH in the data)."""
+    if calm:
+        c = collections.Counter(calm)
+        top = max(c.values())
+        return min(h for h, n in c.items() if n == top)
+    short = [h for h in any_def if h < LARGE_CH_HITSTOP]
+    if short:
+        c = collections.Counter(short)
+        twice = [h for h, n in c.items() if n >= 2]
+        return min(twice) if twice else min(short)
+    return None
+
+
+def long_hitstop(r: dict, normal: int | None) -> bool:
+    """A large CH from the log: a defender that can be counter hit, and a hitstop 10+ frames over
+    the move's normal one, or the large-CH hitstop and 5+ over (a small CH adds 4-9; banner_kind
+    tells it by its yellow COUNTER)."""
+    if not is_hitstop(r) or r["trade"] or not (r["defender_attacking"] or r["defender_act"] in COUNTER_ACTS):
+        return False
+    hitstop = r["hitstop"]
+    if normal is None:
+        return hitstop >= 25
+    return hitstop >= normal + 10 or (hitstop >= LARGE_CH_HITSTOP and hitstop >= normal + 5)
+
+
 def mark_counter_hits(rows: list[dict]) -> None:
     """Counter hit = the attacker's HUD shows the yellow "COUNTER" banner (small CH) or the red
     one (large CH), told from the "PUNISH" banner by the word's shape (banner_kind, from the
     video pass). Without word scores, the older guesses: any yellow in the banner box (which
     also takes PUNISH for a counter) and a large CH from the hitstop.
 
-    Large CH from the log: per (attacker char, move) the normal hitstop is the most common
-    hitstop among hits without a banner (>= 3 samples; else the move's minimum); a hitstop at
-    least 10 frames longer is a large CH (5H: 14 normal, 30-31 on large CH). Trades (both
-    players hit on the same frame) are flagged and never counted as CH.
+    Large CH from the log: per (attacker char, move) the normal hitstop (normal_hitstop: from the
+    hits on a defender that is not attacking, which can't be counter hit) and a hitstop well over
+    it (long_hitstop; 5H: 14 normal, 30-31 on large CH), on a defender that can be counter hit.
+    Until 2026-10-29 the normal hitstop was the most common one among all hits without a banner,
+    which for moves that usually land as a large CH was the large-CH hitstop itself (openers
+    showing the big white COUNTER! labelled neither), and a KO's freeze (hitstop at the cap) or a
+    hit on a defender that wasn't attacking counted as a large CH. Trades (both players hit on the
+    same frame) are flagged and never counted as CH.
 
     The yellow COUNTER turns orange, then red, as it ages: a red COUNTER without the long
     hitstop is the banner of an earlier counter hit (in 61% of them the same attacker opened
@@ -536,20 +627,22 @@ def mark_counter_hits(rows: list[dict]) -> None:
     read like an unclear word. An unclear word is settled from the log where the rates allow
     (banner_kind_log); banner_src says what decided: words, frames or log."""
     key = lambda r: (r["attacker_char"], r["move_act"])
-    by = collections.defaultdict(list)
+    calm, by = collections.defaultdict(list), collections.defaultdict(list)
     for r in rows:
         kind = banner_kind(r)
-        if kind == "none" or (kind is None and not r.get("counter_banner")):
+        if not is_hitstop(r):
+            continue
+        if kind in ("none", "punish") or (kind is None and not r.get("counter_banner")):
             by[key(r)].append(r["hitstop"])
+            if not r["defender_attacking"]:
+                calm[key(r)].append(r["hitstop"])
     at = {(r["replay"], r["log_row"], r["attacker"]) for r in rows}
     for r in rows:
         other = "P1" if r["attacker"] == "P2" else "P2"
         r["trade"] = any((r["replay"], r["log_row"] + d, other) in at for d in (-1, 0, 1))
-        hs = by.get(key(r), [])
-        normal = (collections.Counter(hs).most_common(1)[0][0] if len(hs) >= 3 else min(hs)) if hs else None
+        normal = normal_hitstop(calm.get(key(r), []), by.get(key(r), []))
         r["hitstop_normal"] = None if normal is None else int(normal)
-        long_stop = (not r["is_throw"] and not r["trade"]
-                     and (r["hitstop"] >= normal + 10 if normal is not None else r["hitstop"] >= 25))
+        long_stop = long_hitstop(r, normal)
         kind = banner_kind(r)
         src = "words" if kind == banner_kind_words(r) else "frames"
         if kind == "large" and not long_stop:
@@ -931,6 +1024,7 @@ def main():
     ap.add_argument("--no-cv", action="store_true",
                     help="never start the CV pipeline (replays without CV output are skipped)")
     ap.add_argument("--only", nargs="*", help="replay stems to process")
+    ap.add_argument("--max-index", type=int, help="manifest entries up to this index only (a snapshot of a batch still recording)")
     ap.add_argument("--quiet", type=int, default=1,
                     help="opener: defender in no damage state in the preceding N frames (default 1)")
     ap.add_argument("--tol", type=int, default=10, help="CV match window in video frames (default 10)")
@@ -939,9 +1033,14 @@ def main():
     set_own_priority(prio)
 
     entries = read_manifest()
+    if args.max_index is not None:
+        entries = [e for e in entries if e.get("index", 0) <= args.max_index]
+    dup = find_duplicates(entries)
+    (OUT / "duplicates.json").write_text(json.dumps(dup, indent=1))
+    entries = [e for e in entries if Path(e["video"]).stem not in dup]
     if args.only:
         entries = [e for e in entries if Path(e["video"]).stem in args.only]
-    print(f"{len(entries)} complete manifest entries")
+    print(f"{len(entries)} complete manifest entries ({len(dup)} duplicate recordings dropped: duplicates.json)")
     todo = [] if args.no_cv else [e for e in entries if args.force_cv or not cv_done(Path(e["video"]).stem)]
     if todo:
         print(f"running CV pipeline on {len(todo)} video(s), {args.jobs} at a time")

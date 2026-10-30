@@ -115,10 +115,45 @@ def replay_folds(rows, k=5, seed=0):
 TEST_FOLD = 0
 
 
+FOLDS = OUT / "folds.json"
+
+
+def frozen_folds() -> dict[str, int]:
+    """The frozen replay -> fold map (model/folds.json: the first 722 replays' split, saved before
+    the dataset grew), or {} when there is none."""
+    return {k: int(v) for k, v in json.loads(FOLDS.read_text()).items()} if FOLDS.exists() else {}
+
+
 def replay_fold_map() -> dict[str, int]:
-    """Replay -> fold over every opener row, so all video-only stages share one split."""
+    """Replay -> fold over every opener row, so all video-only stages share one split. Replays in
+    folds.json keep their fold (the test fold stays comparable as the dataset grows); the others
+    are split among themselves, greedily by size (replay_folds, seeded), so each fold gets a
+    balanced share of them."""
     rows = load_rows(with_crops=False)
-    return dict(zip((r["replay"] for r in rows), (int(f) for f in replay_folds(rows))))
+    frozen = frozen_folds()
+    if not frozen:
+        return dict(zip((r["replay"] for r in rows), (int(f) for f in replay_folds(rows))))
+    new = [r for r in rows if r["replay"] not in frozen]
+    out = {s: f for s, f in frozen.items()}
+    if new:
+        out.update(zip((r["replay"] for r in new), (int(f) for f in replay_folds(new))))
+    present = {r["replay"] for r in rows}
+    return {s: f for s, f in out.items() if s in present}
+
+
+def test_subsets(fold: dict[str, int]) -> dict[str, list[str]]:
+    """The test fold's replays: all of them, those of the frozen split ('old', what earlier results
+    were measured on) and the ones added since ('new')."""
+    frozen = frozen_folds()
+    test = sorted(s for s in fold if fold[s] == TEST_FOLD)
+    # 'old_unleaked': the old ones minus those recorded twice with the other copy in a training fold of the
+    # frozen split (dataset/duplicates.json, dropped -> kept): models trained before the duplicates were
+    # dropped saw them, so this is the fair set to compare those models with newer ones
+    dup = DATA / "duplicates.json"
+    leaked = {kept for drop, kept in (json.loads(dup.read_text()).items() if dup.exists() else ())
+              if frozen.get(drop, TEST_FOLD) != TEST_FOLD}
+    return {"all": test, "old": [s for s in test if s in frozen], "new": [s for s in test if s not in frozen],
+            "old_unleaked": [s for s in test if s in frozen and s not in leaked]}
 
 
 def subsample(stems, frac, seed=0):

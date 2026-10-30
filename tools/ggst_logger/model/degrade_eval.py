@@ -28,18 +28,19 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import DATA, OUT, TEST_FOLD, low_priority, replay_fold_map, save_json  # noqa: E402
+from common import DATA, OUT, TEST_FOLD, low_priority, replay_fold_map, save_json, test_subsets  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[3]
 PY = ROOT / ".venv" / "Scripts" / "python.exe"
 DEG = DATA / "degraded"
 
 
-def test_rows():
+def test_rows(subset="old"):
+    """Opener rows of the test replays: 'old' (the frozen split's, the ones with 720p30 copies), 'new' or 'all'."""
     import pyarrow.parquet as pq
     rows = pq.read_table(DATA / "openers.parquet").to_pylist()
-    fold = replay_fold_map()
-    return [r for r in rows if fold.get(r["replay"]) == TEST_FOLD]
+    stems = set(test_subsets(replay_fold_map())[subset])
+    return [r for r in rows if r["replay"] in stems]
 
 
 def encode(stems, video):
@@ -164,9 +165,10 @@ def main():
     ap.add_argument("--moves", default="video_moves_test.pt", help="move net weights for eval")
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--limit", type=int, default=0, help="first N test replays only")
+    ap.add_argument("--subset", default="old", choices=["old", "new", "all", "old_unleaked"], help="test replays (default: the frozen split's)")
     a = ap.parse_args()
     low_priority()
-    rows = test_rows()
+    rows = test_rows(a.subset)
     video = {r["replay"]: r["video"] for r in rows}
     stems = sorted(video)[:a.limit or None]
     print(len(stems), "test replays")

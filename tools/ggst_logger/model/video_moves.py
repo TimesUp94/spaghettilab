@@ -20,6 +20,16 @@ frame shifts (TTA).
     .venv/Scripts/python.exe tools/ggst_logger/model/video_moves.py ensemble video_moves_exp_final_r18.pt video_moves_exp_final_r50.pt --name final
     .venv/Scripts/python.exe tools/ggst_logger/model/video_moves.py train --frac 0.25   # learning curve
     .venv/Scripts/python.exe tools/ggst_logger/model/video_moves.py train --no-scene --name crop   # crop only
+    .venv/Scripts/python.exe tools/ggst_logger/model/video_moves.py train --epochs 8 --init video_moves_test.pt --name warm
+    .venv/Scripts/python.exe tools/ggst_logger/model/video_moves.py eval video_moves_test.pt --name chain   # the whole chain
+
+--init <weights> (warm start) loads the backbones and the temporal layers from a previous net (an
+ensemble's member with the same backbone) and its heads by class name (classes new to the
+vocabulary start fresh), instead of starting from ImageNet.
+
+The test results are for the whole test fold and for its frozen ('old': the first 722 replays' split,
+what earlier numbers were measured on) and added ('new') replays; counter / punish from
+banner_reader_test.pkl when it exists (the move net's own guess as hit_kind_movenet_acc).
 
 -> <data>/ggst_dataset/model/video_moves_{test,final}.pt, results_video_moves.json
    (--frac: a share of the training replays -> video_moves_exp_frac<pct>.pt, results_exp_moves_frac<pct>.json)
@@ -38,7 +48,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import (CAT6, DATA, OUT, TEST_FOLD, collapse_rare, label_category, label_hit_kind, label_normal,  # noqa: E402
-                    low_priority, replay_fold_map, report, save_json, subsample)
+                    low_priority, replay_fold_map, report, save_json, subsample, test_subsets)
 
 WIN = list(range(-16, 5))
 FRAMES = [-15, -12, -9, -6, -4, -2, 0, 2]
@@ -102,7 +112,11 @@ def char_mask(voc, char):
 
 class Crops:
     def __init__(self, items, voc, train, chars=None, scene=None, shift=0, flip=False, frames=None, res=None):
-        self.items, self.voc, self.train, self.scene = items, voc, train, scene
+        # what __getitem__ needs, without the opener rows: each DataLoader worker gets a pickled copy
+        # of the dataset, and 30k full rows in each of them ran the machine out of memory
+        self.items = [dict(stem=it["stem"], side=it["side"], file=it["file"], scene=it["scene"],
+                           t=targets(it, voc), char=it["row"]["char"] if it["row"] is not None else None) for it in items]
+        self.voc, self.train, self.scene = voc, train, scene
         self.frames, self.res = frames or FRAMES, res or RES
         self.shift, self.flip = shift, flip   # test-time variants: frame offset, mirrored image
         self.chars = chars           # stem -> (P1 char, P2 char) from the video vote; None = the log's
@@ -147,11 +161,8 @@ class Crops:
         if self.flip:
             x = np.ascontiguousarray(x[:, :, ::-1])
             xs = np.ascontiguousarray(xs[:, :, ::-1]) if xs.size else xs
-        t = targets(it, self.voc)
-        if self.chars is not None:
-            char = self.chars[it["stem"]][it["side"] - 1]
-        else:
-            char = it["row"]["char"] if it["row"] is not None else None
+        t = it["t"]
+        char = self.chars[it["stem"]][it["side"] - 1] if self.chars is not None else it["char"]
         m = self.mask(char) if char is not None else np.zeros(len(self.voc["move"]), bool)
         return x, xs, np.array([t[h] for h in HEADS], np.int64), m
 
@@ -214,10 +225,44 @@ def loader(ds, train, bs):
                                        drop_last=train, pin_memory=True)
 
 
-def fit(items, voc, epochs, backbone, bs=24, lr=3e-4, scene=None, frames=None, res=None):
+def warm_start(net, path, voc, backbone):
+    """Load a previous net's weights into net: every tensor of the same name and shape, and the
+    heads' rows by class name (a class new to voc keeps its fresh initialisation)."""
+    import torch
+    ck = torch.load(path, map_location="cpu")
+    if "members" in ck:
+        ck = next(m for m in ck["members"] if m.get("backbone", "resnet18") == backbone)
+    own = net.state_dict()
+    n_same = n_rows = 0
+    for k, v in ck["state"].items():
+        if k.startswith("heads."):
+            h = k.split(".")[1]
+            if h not in voc or h not in ck["voc"]:
+                continue
+            old = {c: j for j, c in enumerate(ck["voc"][h])}
+            t = own[k].clone()
+            for i, c in enumerate(voc[h]):
+                if c in old:
+                    t[i] = v[old[c]]
+                    n_rows += k.endswith(".bias")
+            own[k] = t
+        elif k in own and own[k].shape == v.shape:
+            own[k] = v
+            n_same += 1
+    net.load_state_dict(own)
+    print(f"warm start from {Path(path).name}: {n_same} tensors, {n_rows} head classes of "
+          f"{sum(len(v) for v in voc.values())} kept", flush=True)
+
+
+def fit(items, voc, epochs, backbone, bs=24, lr=3e-4, scene=None, frames=None, res=None, init=None, accum=1):
+    """accum: each batch in that many micro-batches, gradients summed (the same step on less GPU
+    memory, which counts against the machine's commit limit on Windows; BatchNorm sees the smaller
+    micro-batches)."""
     import torch
     import torch.nn as nn
     net = make_net(voc, backbone, scene).cuda()
+    if init is not None:
+        warm_start(net, init, voc, backbone)
     ys = np.array([[targets(it, voc)[h] for h in HEADS] for it in items])
     weights = {}
     for k, h in enumerate(HEADS):
@@ -236,17 +281,22 @@ def fit(items, voc, epochs, backbone, bs=24, lr=3e-4, scene=None, frames=None, r
         t0, tot, n = time.time(), 0.0, 0
         for x, xs, y, m in loader(ds, True, bs):
             y, m = y.cuda(), m.cuda()
-            with torch.autocast("cuda", dtype=torch.float16):
-                out = net(prep(x, True), prep(xs, True, 8))
-                loss = 0
-                for k, h in enumerate(HEADS):
-                    lg = out[h].float()
-                    if h == "move":
-                        lg = lg.masked_fill(~m, -1e4)
-                    loss = loss + nn.functional.cross_entropy(lg, y[:, k], weight=weights[h], ignore_index=IGNORE,
-                                                              label_smoothing=0.0 if h == "move" else 0.05) * (1.0 if h != "hit_kind" else 0.5)
             opt.zero_grad()
-            scaler.scale(loss).backward()
+            step_loss = 0.0
+            for c in np.array_split(np.arange(len(y)), accum):
+                with torch.autocast("cuda", dtype=torch.float16):
+                    out = net(prep(x[c], True), prep(xs[c] if xs.ndim == 5 else xs, True, 8))
+                    loss = 0
+                    for k, h in enumerate(HEADS):
+                        lg = out[h].float()
+                        if h == "move":
+                            lg = lg.masked_fill(~m[c], -1e4)
+                        loss = loss + nn.functional.cross_entropy(lg, y[c, k], weight=weights[h], ignore_index=IGNORE,
+                                                                  label_smoothing=0.0 if h == "move" else 0.05) * (1.0 if h != "hit_kind" else 0.5)
+                    loss = loss / accum
+                scaler.scale(loss).backward()
+                step_loss += float(loss.detach())
+            loss = torch.tensor(step_loss)
             scaler.step(opt)
             scaler.update()
             sched.step()
@@ -364,13 +414,58 @@ def end_to_end(items, P, voc, chars, rows, stems):
     for (r, i), (_, ok) in zip(dd, mv):
         right += ok and P["category"][i].argmax() != cat_none
     res["chain_move_right_of_all_openers"] = right / n
+    res["detector_precision"] = sum(it["row"] is not None for it in items) / max(1, len(items))
     return res
+
+
+def test_results(net, voc, rows, fold, troot, banners="rec", banner_model="test"):
+    """The whole chain on the test fold's detections in troot, for all / old / new test replays:
+    {subset: end_to_end result}. Counter / punish from banner_reader (banners_<banners>,
+    banner_reader_<banner_model>.pkl) when there is one."""
+    import torch
+    by_key = {f"{r['replay']}/{r['log_row']}_{r['attacker']}": r for r in rows}
+    subs = test_subsets(fold)
+    titems = items_for(troot, by_key, subs["all"])
+    chars_list = torch.load(OUT / "video_players_test.pt", map_location="cpu")["chars"]
+    vch = video_chars(troot, subs["all"], chars_list)
+    P = predict(net, titems, voc, vch)
+    P["hit_kind_movenet"] = P["hit_kind"]
+    src = "video_moves"
+    if banner_model != "none" and (OUT / f"banner_reader_{banner_model}.pkl").exists():
+        import banner_reader as br
+        assert tuple(voc["hit_kind"]) == br.CLASSES
+        Pb = br.probs_for(titems, banners, banner_model)
+        P["hit_kind"] = np.where(np.isnan(Pb).any(1)[:, None], P["hit_kind"], Pb)
+        src = f"banner_reader_{banner_model} on banners_{banners}"
+    out = {}
+    for sub, stems in subs.items():
+        if not stems:
+            continue
+        st = set(stems)
+        idx = [i for i, it in enumerate(titems) if it["stem"] in st]
+        Ps = {h: v[idx] for h, v in P.items()}
+        res = end_to_end([titems[i] for i in idx], Ps, voc, vch, rows, st)
+        hk = [(label_hit_kind(titems[i]["row"]), k) for k, i in enumerate(idx)
+              if titems[i]["row"] is not None and label_hit_kind(titems[i]["row"]) is not None]
+        res["hit_kind_movenet_acc"] = float(np.mean([voc["hit_kind"][int(Ps["hit_kind_movenet"][k].argmax())] == l for l, k in hk]))
+        res["hit_kind_source"] = src
+        res["replays"] = len(stems)
+        out[sub] = res
+    return out
+
+
+def brief(res):
+    b = {k: v for k, v in res.items() if k not in ("category", "hit_kind", "move_acc_by_char")}
+    b["category_acc"] = res["category"]["accuracy"]
+    b["category_bal"] = res["category"]["balanced_accuracy"]
+    b["hit_kind_acc"] = res["hit_kind"]["accuracy"]
+    return b
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["train", "final", "ensemble"])
-    ap.add_argument("members", nargs="*", help="ensemble: weights in model/ to join into --name")
+    ap.add_argument("mode", choices=["train", "final", "ensemble", "eval"])
+    ap.add_argument("members", nargs="*", help="ensemble: weights in model/ to join into --name; eval: the weights")
     ap.add_argument("--epochs", type=int, default=10)
     ap.add_argument("--backbone", default="resnet18")
     ap.add_argument("--crops", default="test")
@@ -380,6 +475,10 @@ def main():
     ap.add_argument("--frames", default=",".join(map(str, FRAMES)), help="frame offsets from the hit, within WIN")
     ap.add_argument("--eval-crops", help="crops dir of the test fold (default: --crops), e.g. exp_tiny10")
     ap.add_argument("--name", help="experiment name -> video_moves_exp_<name>.pt, results_exp_moves_<name>.json")
+    ap.add_argument("--init", help="weights in model/ to start from (warm start)")
+    ap.add_argument("--accum", type=int, default=1, help="micro-batches per batch (less GPU memory)")
+    ap.add_argument("--banners", default="rec", help="banners_<x> for counter / punish (train, eval)")
+    ap.add_argument("--banner-model", default="test", help="banner_reader_<x>.pkl, or none")
     a = ap.parse_args()
     if a.mode == "ensemble":
         return ensemble([OUT / m for m in a.members], OUT / f"video_moves_{a.name}.pt")
@@ -389,6 +488,15 @@ def main():
     rows = pq.read_table(DATA / "openers.parquet").to_pylist()
     by_key = {f"{r['replay']}/{r['log_row']}_{r['attacker']}": r for r in rows}
     fold = replay_fold_map()
+    if a.mode == "eval":
+        net, ck = load(OUT / a.members[0])
+        res = test_results(net, ck["voc"], rows, fold, DATA / f"vcrops_{a.eval_crops or a.crops}", a.banners, a.banner_model)
+        res["weights"] = a.members[0]
+        save_json(res, OUT / f"results_{a.name or 'eval'}.json")
+        for sub, r in res.items():
+            if isinstance(r, dict):
+                print(sub, json.dumps(brief(r), default=float))
+        return
     root = DATA / f"vcrops_{a.crops}"
     stems = sorted(fold)
     test = [s for s in stems if fold[s] == TEST_FOLD]
@@ -399,7 +507,9 @@ def main():
     print(len(items), "training detections;", {h: len(v) for h, v in voc.items()}, flush=True)
     scene = SCENE if a.scene else None
     frames = [int(f) for f in a.frames.split(",")]
-    net = fit(items, voc, a.epochs, a.backbone, scene=scene, frames=frames, res=a.res)
+    t0 = time.time()
+    net = fit(items, voc, a.epochs, a.backbone, scene=scene, frames=frames, res=a.res, init=OUT / a.init if a.init else None, accum=a.accum)
+    print(f"trained in {time.time() - t0:.0f}s", flush=True)
     net.scene, net.frames, net.res = scene, frames, a.res
     tag = "final" if a.mode == "final" else "test"
     suf = "" if a.backbone == "resnet18" else "_" + a.backbone
@@ -411,20 +521,16 @@ def main():
     torch.save({"state": net.state_dict(), "voc": voc, "backbone": a.backbone, "frames": frames, "res": a.res, "scene": scene},
                OUT / f"video_moves_{tag}{suf}.pt")
     if a.mode == "train":
-        troot = DATA / f"vcrops_{a.eval_crops or a.crops}"
-        titems = items_for(troot, by_key, test)
-        chars_list = torch.load(OUT / "video_players_test.pt", map_location="cpu")["chars"]
-        vch = video_chars(troot, test, chars_list)
-        P = predict(net, titems, voc, vch)
-        res = end_to_end(titems, P, voc, vch, rows, set(test))
+        subs = test_results(net, voc, rows, fold, DATA / f"vcrops_{a.eval_crops or a.crops}", a.banners, a.banner_model)
+        res = dict(subs["all"], subsets=subs)
         res["backbone"] = a.backbone
         res["train_replays"] = len(train_stems)
+        res["init"] = a.init
+        res["accum"] = a.accum
+        res["train_seconds"] = round(time.time() - t0)
         save_json(res, OUT / (f"results_exp_moves{suf}.json" if exp else f"results_video_moves{suf}.json"))
-        brief = {k: v for k, v in res.items() if k not in ("category", "hit_kind", "move_acc_by_char")}
-        brief["category_acc"] = res["category"]["accuracy"]
-        brief["category_bal"] = res["category"]["balanced_accuracy"]
-        brief["hit_kind_acc"] = res["hit_kind"]["accuracy"]
-        print(json.dumps(brief, indent=1, default=float))
+        for sub, r in subs.items():
+            print(sub, json.dumps(brief(r), default=float))
         print(res["move_acc_by_char"])
 
 

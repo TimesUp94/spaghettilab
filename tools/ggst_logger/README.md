@@ -54,19 +54,30 @@ python tools/ggst_logger/dataset/build.py --idle
     3. `video_crops.py`: cuts the attacker crop strip around each detected start; `video_scene.py` adds the whole frame at 384×216 at the same moments (mirrored like the crop), for projectiles, summons and hits away from the attacker.
     4. `video_moves.py`: category, button/stance, exact move (restricted to the attacker's character), and "none" for a false start, from the crop and the whole frame (ResNet crop and ResNet18 whole-frame backbones, temporal fusion). The weights are an ensemble of a ResNet18 (20 epochs) and a ResNet50 (10 epochs) crop net, averaged over both and over the training frame shifts (-1..+2).
     5. `banner_reader.py`: counter / punish / neither from the game's own banner around each start: the yellow COUNTER / PUNISH word in the attacker's HUD box (the dataset build's templates), and a large counter hit's letterbox or big white COUNTER! (random forest on the scores of every 2nd frame from -60 to +60). It replaces `video_moves`' counter/punish head, which guessed from the attacker crop (0.65).
-  - `recognize.py <video>`: runs the whole chain with the `*_final.pt` weights (trained on all 722 replays) and writes `openers.json`.
+  - `recognize.py <video>`: runs the whole chain with the `*_final.pt` weights and writes `openers.json`. The detector and `banner_reader` finals are trained on all 1,090 replays; `video_moves_final.pt` is still the one trained on the first 722 (its retraining on all 1,090 is pending).
   - `degrade_eval.py`: the same chain on 720p30 3 Mbit/s copies of the test replays (a typical VOD).
-  - `chain_eval.py`: the whole chain on the test fold with another detector (cuts crops only for new detections).
+  - `chain_eval.py`: the whole chain on the test fold with another detector (cuts crops only for new detections); `--rebuild` cuts the chain's own crops and whole frames at `detections.json`, reusing the tiles of an earlier cut.
   - `error_report.py`: where the chain loses the test fold's openers (missed, dropped as "none", wrong move) by category, character and move. `video_moves.py` and `video_openers.py` take `--frac` for a learning curve.
   - Weights and results are in `$GGST_DATA/ggst_dataset/model/` and are not in the repo.
-  - Test fold (144 held-out replays, 4,715 logged openers, bursts apart), from the 1080p60 recordings:
-    - Starts found: 0.95 at 0.92 precision (HUD only: 0.94 at 0.83 at threshold 0.3; supers 0.84, HUD only 0.72; the app's damage events found 0.78 at 0.50).
-    - Found and kept: 0.93, with 0.98 of the kept ones real.
-    - Characters right on every replay.
-    - Given found: category 0.93, button/stance 0.95, exact move 0.93 (0.77–0.99 by character), counter/punish/neither 0.96.
-    - The whole chain gets 0.87 of all openers found with the right move (0.84 with one ResNet18 move net and no frame-shift averaging, 0.82 with the HUD-only detector, 0.79 with the attacker crop alone).
-  - On the 720p30 copies of the same replays (`degrade_eval.py`), almost nothing is lost:
-    - starts 0.95 found at 0.93 precision and 0.93 kept, with 0.98 of the kept ones real;
-    - characters all right;
-    - category 0.93, button/stance 0.94, exact move 0.93, counter/punish/neither 0.96;
-    - whole chain 0.86.
+  - Folds: `model/folds.json` freezes the split of the first 722 replays, and later replays are split among themselves (`common.replay_fold_map`). This keeps the test fold comparable as the dataset grows. Results are reported for the whole test fold, its `old` replays (the frozen 144) and its `new` ones. `old_unleaked` is the old ones minus 5 replays that had been recorded twice with the other copy in training.
+  - Duplicates: `dataset/build.py` drops replays recorded twice (same characters and logged inputs: `ggst_dataset/duplicates.json`), keeping the frozen test fold's copy.
+  - `video_moves.py --init <weights>` warm-starts from an earlier net (heads mapped by class name).
+    - Measured once: 8 epochs from the previous ResNet18 against 20 from ImageNet, on the same split. It saves 61% of the time (57 vs 146 min).
+    - Whole chain: 0.878 vs 0.883 on the old test replays (within run-to-run noise), but 0.835 vs 0.846 on the new ones.
+    - The weights here are trained from scratch.
+    - `--accum 2` splits a batch into two micro-batches (needed for the ResNet50 on this machine's memory).
+  - Test fold, from the 1080p60 recordings: 220 held-out replays of 1,090, of which the old 144 have 4,715 logged openers (bursts apart) and the new 76 have 2,612. Labels have counter / punish fixed since 2026-10-29 (`build.mark_counter_hits`). Numbers are for the old 144; new 76 in brackets.
+    - Starts found: 0.955 at 0.943 precision (0.951 at 0.933).
+      - Before the dataset grew: 0.95 at 0.92.
+      - HUD only: 0.94 at 0.83 at threshold 0.3; supers 0.84, HUD only 0.72.
+      - The app's damage events found 0.78 at 0.50.
+    - Found and kept: 0.94, with 0.98 of the kept ones real (0.93, 0.98).
+    - Characters right on every old replay (0.99 of the new ones' openers).
+    - Given found: category 0.93 (0.95), button/stance 0.96 (0.95), exact move 0.94 (0.91), counter/punish/neither 0.98 (0.99).
+    - The whole chain gets 0.887 of all openers found with the right move (0.855 on the new replays).
+      - Before the dataset grew it was 0.865 (0.862 on the 139 old replays without a duplicate in training; the new chain gets 0.887 there).
+      - Earlier: 0.84 with one ResNet18 move net and no frame-shift averaging, 0.82 with the HUD-only detector, 0.79 with the attacker crop alone.
+  - On the 720p30 copies of the old test replays (`degrade_eval.py`):
+    - the new detector finds 0.957 at 0.943 precision;
+    - the rest of the new chain is not measured yet;
+    - the previous chain lost almost nothing: starts 0.95 at 0.93, category 0.93, button/stance 0.94, exact move 0.93, counter/punish/neither 0.96, whole chain 0.86.

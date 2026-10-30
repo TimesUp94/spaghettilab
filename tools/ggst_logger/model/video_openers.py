@@ -7,6 +7,9 @@ out). The pipeline samples every 2nd video frame (30 Hz), so a step is 2 video f
 
     .venv/Scripts/python.exe tools/ggst_logger/model/video_openers.py train   # folds 1-4, test on fold 0
     .venv/Scripts/python.exe tools/ggst_logger/model/video_openers.py final   # every replay -> weights
+    .venv/Scripts/python.exe tools/ggst_logger/model/video_openers.py crossfit --tiny   # detections.json; its fold-0 net is the test net
+
+--init <weights> starts from a previous net (same inputs) instead of from scratch.
 
 --tiny adds an image stream: a small CNN on the whole frame at 64x36 at every step (video_tiny.py),
 for what the HUD misses (super flash, cinematics with the HUD hidden, hitsparks).
@@ -20,6 +23,7 @@ from __future__ import annotations
 import argparse
 import collections
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -27,7 +31,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import DATA, OUT, TEST_FOLD, low_priority, replay_fold_map, save_json, subsample  # noqa: E402
+from common import DATA, OUT, TEST_FOLD, low_priority, replay_fold_map, save_json, subsample, test_subsets  # noqa: E402
 
 RUNS = DATA / "runs"
 STEP = 2            # video frames per pipeline sample
@@ -111,11 +115,19 @@ def make_net(tiny=False):
 
         def forward(self, im, chunk=8192):     # [B, T, H, W, 3] uint8 -> [B, T, TINY_DIM]
             B, T = im.shape[:2]
-            x = im.permute(0, 1, 4, 2, 3).float() / 255 - 0.5
+            x = im.permute(0, 1, 4, 2, 3).half() / 255 - 0.5       # fp16, as autocast feeds the conv anyway
             d = torch.cat([torch.zeros_like(x[:, :1]), x[:, 1:] - x[:, :-1]], 1)
             x = torch.cat([x, d], 2).flatten(0, 1)
             with torch.autocast("cuda", dtype=torch.float16):
-                z = torch.cat([self.cnn(x[k:k + chunk]) for k in range(0, len(x), chunk)])
+                if torch.is_grad_enabled():
+                    # recomputed in the backward pass: the activations of 24 x 600 frames took ~5 GB of
+                    # GPU memory, which on Windows counts against the machine's commit limit
+                    from torch.utils.checkpoint import checkpoint
+                    c = chunk // 4
+                    z = torch.cat([checkpoint(self.cnn, x[k:k + c], use_reentrant=False)
+                                   for k in range(0, len(x), c)])
+                else:
+                    z = torch.cat([self.cnn(x[k:k + chunk]) for k in range(0, len(x), chunk)])
             return z.float().view(B, T, -1)
 
     class Net(nn.Module):
@@ -139,12 +151,15 @@ def make_net(tiny=False):
     return Net()
 
 
-def train(data, epochs=30, win=600, bs=24, lr=2e-3, seed=0, tiny=False):
-    """data: list of (X [T,C], y [T] int64 0/1/2, w [T] float32 (0 = ignore)[, tiny frames [T,H,W,3]])."""
+def train(data, epochs=30, win=600, bs=24, lr=2e-3, seed=0, tiny=False, init=None):
+    """data: list of (X [T,C], y [T] int64 0/1/2, w [T] float32 (0 = ignore)[, tiny frames [T,H,W,3]]).
+    init: a state dict to start from (warm start)."""
     import torch
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     net = make_net(tiny).cuda()
+    if init is not None:
+        net.load_state_dict(init)
     opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-2)
     per_ep = sum(len(d[0]) for d in data) // (win * bs) + 1
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, lr, total_steps=epochs * per_ep, pct_start=0.1)
@@ -273,8 +288,24 @@ def load_all(rows, tiny=False):
     return data
 
 
-def train_on(data, stems, epochs, seed=0, tiny=False):
-    return train([data[s][:3] + ((data[s][5],) if tiny else ()) for s in stems], epochs, seed=seed, tiny=tiny)
+def train_on(data, stems, epochs, seed=0, tiny=False, init=None):
+    return train([data[s][:3] + ((data[s][5],) if tiny else ()) for s in stems], epochs, seed=seed, tiny=tiny, init=init)
+
+
+def test_report(data, fold, probs, path):
+    """Detection at every threshold on the test fold, and on its frozen ('old') and added ('new') replays."""
+    res = {}
+    for sub, stems in test_subsets(fold).items():
+        stems = [s for s in stems if s in probs]
+        if stems:
+            res[sub] = {f"{thr:.2f}": report_detection(data, stems, probs, thr) for thr in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6)}
+            res[sub]["replays"] = len(stems)
+    out = dict(res["all"], subsets=res)
+    save_json(out, path)
+    for sub, r in res.items():
+        b = r[f"{THR:.2f}"]
+        print(f"{sub} ({r['replays']} replays) thr {THR}: recall {b['recall']:.3f} precision {b['precision']:.3f}")
+    return out
 
 
 def report_detection(data, test, probs, thr):
@@ -311,21 +342,43 @@ def matched_dets(p, frames, tru, thr=THR):
     return out, len(hit)
 
 
-def crossfit(data, fold, epochs, thr=THR, tiny=False):
+def crossfit(data, fold, epochs, thr=THR, tiny=False, init=None):
     """Detections of every replay by the network that did not train on its fold, matched to the
     logged openers -> detections.json {stem: [{frame, side, score, row (log_row_attacker) | null}]}.
-    The move models train on these, so they see the detector's timing and its false alarms."""
+    The move models train on these, so they see the detector's timing and its false alarms.
+    The test fold's net is what `train` trains (folds 1-4, seed 0): it is saved as
+    video_openers_test.pt with results_video_openers.json."""
+    import torch
     out, n_tru, n_hit, n_det = {}, 0, 0, 0
+    parts = OUT / "crossfit_parts"            # one file per finished fold: a rerun resumes
+    parts.mkdir(exist_ok=True)
     for f in sorted(set(fold.values())):
-        net = train_on(data, [s for s in data if fold[s] != f], epochs, seed=f, tiny=tiny)
+        part = parts / f"fold{f}.json"
+        if part.exists():
+            got = json.loads(part.read_text())
+            out.update(got["dets"])
+            n_tru, n_hit, n_det = n_tru + got["truth"], n_hit + got["hit"], n_det + sum(len(v) for v in got["dets"].values())
+            print(f"fold {f}: from {part.name}", flush=True)
+            continue
+        t0 = time.time()
+        net = train_on(data, [s for s in data if fold[s] != f], epochs, seed=f, tiny=tiny, init=init)
+        print(f"fold {f} net trained in {time.time() - t0:.0f}s", flush=True)
+        if f == TEST_FOLD:
+            torch.save(net.state_dict(), OUT / "video_openers_test.pt")
+            test = [s for s in data if fold[s] == f]
+            test_report(data, fold, {s: predict(net, data[s][0], data[s][5]) for s in test}, OUT / "results_video_openers.json")
+        got = {"dets": {}, "truth": 0, "hit": 0}
         for s in (s for s in data if fold[s] == f):
             X, _, _, frames, tru, im = data[s]
-            out[s], h = matched_dets(predict(net, X, im), frames, tru, thr)
-            n_tru += len(tru)
-            n_hit += h
-            n_det += len(out[s])
+            got["dets"][s], h = matched_dets(predict(net, X, im), frames, tru, thr)
+            got["truth"] += len(tru)
+            got["hit"] += h
+        part.write_text(json.dumps(got))
+        out.update(got["dets"])
+        n_tru, n_hit, n_det = n_tru + got["truth"], n_hit + got["hit"], n_det + sum(len(v) for v in got["dets"].values())
         print(f"fold {f}: {n_hit}/{n_tru} openers found so far, {n_det} detections", flush=True)
     (OUT / "detections.json").write_text(json.dumps(out))
+    shutil.rmtree(parts)
     print(f"recall {n_hit / n_tru:.3f}, precision {n_hit / n_det:.3f} at threshold {thr}")
 
 
@@ -337,6 +390,7 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--tiny", action="store_true", help="the image stream (video_tiny.py)")
     ap.add_argument("--name", help="experiment name -> video_openers_exp_<name>.pt, results_exp_openers_<name>.json")
+    ap.add_argument("--init", help="weights in model/ to start from (warm start)")
     a = ap.parse_args()
     low_priority()
     import pyarrow.parquet as pq
@@ -345,25 +399,25 @@ def main():
     fold = replay_fold_map()
     data = load_all(rows, a.tiny)
     stems = sorted(data)
+    init = torch.load(OUT / a.init, map_location="cpu") if a.init else None
     if a.mode == "crossfit":
-        return crossfit(data, fold, a.epochs, tiny=a.tiny)
+        return crossfit(data, fold, a.epochs, tiny=a.tiny, init=init)
     test = [s for s in stems if fold[s] == TEST_FOLD]
     trainset = stems if a.mode == "final" else [s for s in stems if fold[s] != TEST_FOLD]
     trainset = subsample(trainset, a.frac)
     exp = a.frac < 1 or a.seed != 0 or a.name
     name = f"exp_{a.name}" if a.name else f"exp_frac{round(a.frac * 100)}" + (f"_seed{a.seed}" if a.seed else "")
     t0 = time.time()
-    net = train_on(data, trainset, a.epochs, seed=a.seed, tiny=a.tiny)
+    net = train_on(data, trainset, a.epochs, seed=a.seed, tiny=a.tiny, init=init)
     print(f"trained on {len(trainset)} replays in {time.time() - t0:.0f}s")
     torch.save(net.state_dict(), OUT / f"video_openers_{name if exp else 'final' if a.mode == 'final' else 'test'}.pt")
     if a.mode == "train":
         probs = {s: predict(net, data[s][0], data[s][5]) for s in test}
-        res = {f"{thr:.2f}": report_detection(data, test, probs, thr) for thr in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6)}
-        save_json(res, OUT / (f"results_{name.replace('exp_', 'exp_openers_')}.json" if exp else "results_video_openers.json"))
+        res = test_report(data, fold, probs, OUT / (f"results_{name.replace('exp_', 'exp_openers_')}.json" if exp else "results_video_openers.json"))
         if a.name:
             dets = {s: matched_dets(probs[s], data[s][3], data[s][4])[0] for s in test}
             (OUT / f"detections_{name}.json").write_text(json.dumps(dets))
-        for k, v in res.items():
+        for k, v in ((k, v) for k, v in res.items() if k != "subsets"):
             print(f"thr {k}: recall {v['recall']:.3f} precision {v['precision']:.3f} f1 {v['f1']:.3f}")
         best = res[f"{THR:.2f}"]
         print(f"by category (thr {THR}):", best["recall_by_category"])
