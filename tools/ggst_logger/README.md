@@ -54,7 +54,7 @@ python tools/ggst_logger/dataset/build.py --idle
     3. `video_crops.py`: cuts the attacker crop strip around each detected start; `video_scene.py` adds the whole frame at 384×216 at the same moments (mirrored like the crop), for projectiles, summons and hits away from the attacker.
     4. `video_moves.py`: category, button/stance, exact move (restricted to the attacker's character), and "none" for a false start, from the crop and the whole frame (ResNet crop and ResNet18 whole-frame backbones, temporal fusion). The weights are an ensemble of a ResNet18 (20 epochs) and a ResNet50 (10 epochs) crop net, averaged over both and over the training frame shifts (-1..+2).
     5. `banner_reader.py`: counter / punish / neither from the game's own banner around each start: the yellow COUNTER / PUNISH word in the attacker's HUD box (the dataset build's templates), and a large counter hit's letterbox or big white COUNTER! (random forest on the scores of every 2nd frame from -60 to +60). It replaces `video_moves`' counter/punish head, which guessed from the attacker crop (0.65).
-  - `recognize.py <video>`: runs the whole chain with the `*_final.pt` weights and writes `openers.json`. The detector and `banner_reader` finals are trained on all 1,090 replays; `video_moves_final.pt` is still the one trained on the first 722 (its retraining on all 1,090 is pending).
+  - `recognize.py <video>`: runs the whole chain with the `*_final.pt` weights and writes `openers.json`. All three finals (detector, `banner_reader`, `video_moves_final.pt`) are trained on all 1,090 replays.
   - `degrade_eval.py`: the same chain on 720p30 3 Mbit/s copies of the test replays (a typical VOD).
   - `chain_eval.py`: the whole chain on the test fold with another detector (cuts crops only for new detections); `--rebuild` cuts the chain's own crops and whole frames at `detections.json`, reusing the tiles of an earlier cut.
   - `error_report.py`: where the chain loses the test fold's openers (missed, dropped as "none", wrong move) by category, character and move. `video_moves.py` and `video_openers.py` take `--frac` for a learning curve.
@@ -78,6 +78,5 @@ python tools/ggst_logger/dataset/build.py --idle
       - Before the dataset grew it was 0.865 (0.862 on the 139 old replays without a duplicate in training; the new chain gets 0.887 there).
       - Earlier: 0.84 with one ResNet18 move net and no frame-shift averaging, 0.82 with the HUD-only detector, 0.79 with the attacker crop alone.
   - On the 720p30 copies of the old test replays (`degrade_eval.py`):
-    - the new detector finds 0.957 at 0.943 precision;
-    - the rest of the new chain is not measured yet;
-    - the previous chain lost almost nothing: starts 0.95 at 0.93, category 0.93, button/stance 0.94, exact move 0.93, counter/punish/neither 0.96, whole chain 0.86.
+    - the new chain loses nothing: starts 0.947 at 0.943 precision, found and kept 0.94 with 0.98 of them real, characters right on every replay, category 0.93, exact move 0.945, counter/punish/neither 0.98, whole chain 0.888;
+    - the previous chain lost almost nothing too: starts 0.95 at 0.93, category 0.93, button/stance 0.94, exact move 0.93, counter/punish/neither 0.96, whole chain 0.86.
