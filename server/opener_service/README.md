@@ -19,19 +19,22 @@ web / app ──JWT──▶ FGCBackend /api/spaghetti-lab/openers ──secret�
 | `OPENERS_THREADS` | 2 | threads per analysis (torch, OpenMP, BLAS) |
 | `OPENERS_CPUS` | all | e.g. `2,3`: cores an analysis is pinned to (Linux), with ffmpeg and the HUD pipeline |
 | `OPENERS_TIMEOUT_S` | 1800 | an analysis is killed past this |
-| `OPENERS_LIGHT` | 1 | one move net, no frame-shift averaging (~1/3 of the CPU, ~1–2 points of accuracy) |
+| `OPENERS_LIGHT` | 1 | one move net, no frame-shift averaging: ~1/3 of the move nets' CPU; whole chain 0.878 vs 0.888 on the 720p30 test copies (`degrade_eval.py eval --light`) |
 | `OPENERS_MAX_UPLOAD_MB` | 600 | upload size |
 | `OPENERS_MAX_DURATION_S` | 900 | video length (one set, not a whole VOD) |
 | `OPENERS_TTL_H` | 24 | results are kept this long |
 | `OPENERS_URL_HOSTS` | none | hosts `/jobs/url` may fetch from (https only, no redirects), e.g. `fra1.digitaloceanspaces.com` |
 
-Analyses run niced (+10). With the defaults the service uses at most 2 cores and about 2–3 GB of
-RAM at any time, whatever the number of requests. The upload and the intermediate crops are
+Analyses run niced (+10). With the defaults the service uses at most 2 cores and up to about
+4.5 GB of RAM at any time, whatever the number of requests (each further concurrent analysis
+adds as much). The upload and the intermediate crops are
 deleted as soon as an analysis ends; only `openers.json` stays until the TTL.
 
-Measured on the development PC (CPU only, networks alone): about 1.1 s per opener light and 3 s
-full, so a 3-minute match (~30 openers) takes about 30 s to 1.5 min plus the HUD pipeline and
-decoding. A 4-core VPS core is slower: count on 1–3 min per match.
+Measured end to end through the service on the development PC, CPU only, light, 4 threads, on a
+3:16 match at 720p30 (51 openers): 4 min 15 s in all (HUD pipeline 1 min 50 s, the rest crops,
+move nets and banners), peak RAM 4.4 GB for the whole process tree. Slower VPS cores and 2 threads
+make it roughly 1.5–3× longer: count on 5–12 min per match, i.e. a queue of 8 clears in about
+an hour. The networks alone are about 1.1 s per opener light and 3 s full (OPENERS_LIGHT=0).
 
 ## Install (Linux VPS)
 
@@ -64,7 +67,7 @@ to their owner).
 - `POST /jobs`, multipart field `video` (.mp4/.mkv/.webm/.mov) → `202 {id, status: "queued", position, meta}`;
   `429` (the user already has one), `503` (queue full), `413` (too big/long), `415`, `422` (not a video, under 360p).
 - `POST /jobs/url`, JSON `{url, filename}`: a presigned link (FGCBackend sends the user's Spaghetti Lab file in Spaces). The link is fetched when the job's turn comes, so queued jobs take no disk; it is never echoed back.
-- `GET /jobs/{id}` → `{status: queued|running|done|failed|cancelled, stage: download|hud|detect|moves|done, position, error, meta}`.
+- `GET /jobs/{id}` → `{status: queued|running|done|failed|cancelled, stage: download|hud|moves|done, position, error, meta}`.
 - `GET /jobs/{id}/result` → `openers.json`: `characters`, and per opener `time_s`, `attacker`,
   `attacker_char`, `category`, `move` (+ `move_top3`), `normal`, `hit_kind` (counter/punish/none), and the probabilities.
 - `DELETE /jobs/{id}` → cancel.

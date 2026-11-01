@@ -133,7 +133,7 @@ def scene(stems, jobs):
             print(f"  scene {k + 1}/{len(stems)} {s} {n}", flush=True)
 
 
-def evaluate(stems, rows, moves="video_moves_test.pt"):
+def evaluate(stems, rows, moves="video_moves_test.pt", light=False):
     import pyarrow.parquet as pq
     import torch
     import video_moves as vm
@@ -144,7 +144,9 @@ def evaluate(stems, rows, moves="video_moves_test.pt"):
     items = vm.items_for(root, by_key, stems)
     chars_list = torch.load(OUT / "video_players_test.pt", map_location="cpu")["chars"]
     vch = vm.video_chars(root, stems, chars_list)
-    P = vm.predict(net, items, ck["voc"], vch)
+    if light:                                    # recognize.py --light: the first net, no frame-shift averaging
+        net = net[0] if isinstance(net, list) else net
+    P = vm.predict(net, items, ck["voc"], vch, shifts=[0] if light else vm.TTA)
     if (OUT / "banner_reader_test.pkl").exists():
         import banner_reader as br
         assert tuple(ck["voc"]["hit_kind"]) == br.CLASSES
@@ -152,7 +154,8 @@ def evaluate(stems, rows, moves="video_moves_test.pt"):
         P["hit_kind"] = np.where(np.isnan(Pb).any(1)[:, None], P["hit_kind"], Pb)
     res = vm.end_to_end(items, P, ck["voc"], vch, allrows, set(stems))
     exp = moves.startswith("video_moves_exp_")
-    save_json(res, OUT / (f"results_exp_degraded_{moves[16:-3]}.json" if exp else "results_degraded.json"))
+    save_json(res, OUT / (f"results_exp_degraded_{moves[16:-3]}.json" if exp else
+                          "results_degraded_light.json" if light else "results_degraded.json"))
     brief = {k: v for k, v in res.items() if k not in ("category", "hit_kind", "move_acc_by_char")}
     brief["category_acc"] = res["category"]["accuracy"]
     brief["hit_kind_acc"] = res["hit_kind"]["accuracy"]
@@ -164,6 +167,7 @@ def main():
     ap.add_argument("stages", nargs="+", choices=["encode", "analyze", "tiny", "detect", "crops", "scene", "banners", "eval"])
     ap.add_argument("--moves", default="video_moves_test.pt", help="move net weights for eval")
     ap.add_argument("--jobs", type=int, default=4)
+    ap.add_argument("--light", action="store_true", help="eval: as recognize.py --light (the opener service)")
     ap.add_argument("--limit", type=int, default=0, help="first N test replays only")
     ap.add_argument("--subset", default="old", choices=["old", "new", "all", "old_unleaked"], help="test replays (default: the frozen split's)")
     a = ap.parse_args()
@@ -177,7 +181,7 @@ def main():
         {"encode": lambda: encode(stems, video), "analyze": lambda: analyze(stems, a.jobs),
          "tiny": lambda: tiny(stems, a.jobs), "detect": lambda: detect(stems, rows), "crops": lambda: crops(stems), "scene": lambda: scene(stems, a.jobs),
          "banners": lambda: __import__("banner_reader").extract("degraded", a.jobs, stems),
-         "eval": lambda: evaluate(stems, rows, a.moves)}[st]()
+         "eval": lambda: evaluate(stems, rows, a.moves, a.light)}[st]()
         print(f"[{st}] {time.time() - t0:.0f}s", flush=True)
 
 

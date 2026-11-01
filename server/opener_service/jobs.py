@@ -25,8 +25,7 @@ QUEUED, RUNNING, DONE, FAILED, CANCELLED = "queued", "running", "done", "failed"
 ACTIVE = (QUEUED, RUNNING)
 
 # progress lines recognize.py prints, in order -> stage name
-STAGES = [("running the CV pipeline", "hud"), ("combo starts found", "detect"), ("banners read", "moves"),
-          ("openers ->", "done")]
+STAGES = [("running the CV pipeline", "hud"), ("combo starts found", "moves"), ("openers ->", "done")]
 
 
 MAX_DURATION_S = int(os.environ.get("OPENERS_MAX_DURATION_S", 900))
