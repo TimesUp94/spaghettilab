@@ -47,7 +47,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import (CAT6, DATA, OUT, TEST_FOLD, collapse_rare, label_category, label_hit_kind, label_normal,  # noqa: E402
+from common import (CAT6, DATA, OUT, TEST_FOLD, amp, collapse_rare, device, label_category, label_hit_kind, label_normal,  # noqa: E402
                     low_priority, replay_fold_map, report, save_json, subsample, test_subsets)
 
 WIN = list(range(-16, 5))
@@ -210,19 +210,19 @@ def prep(x, train, shift=16):
     import torch
     if x.ndim < 5:
         return None
-    x = x.cuda(non_blocking=True).permute(0, 1, 4, 2, 3).float().div(255)
+    x = x.to(device(), non_blocking=True).permute(0, 1, 4, 2, 3).float().div(255)
     if train:
         B = x.shape[0]
-        x = x * (0.8 + 0.4 * torch.rand(B, 1, 1, 1, 1, device="cuda")) + 0.1 * (torch.rand(B, 1, 1, 1, 1, device="cuda") - 0.5)
+        x = x * (0.8 + 0.4 * torch.rand(B, 1, 1, 1, 1, device=device())) + 0.1 * (torch.rand(B, 1, 1, 1, 1, device=device()) - 0.5)
         dx, dy = np.random.randint(-shift, shift + 1, 2)
         x = torch.roll(x, (int(dy), int(dx)), (3, 4))
-    return (x.clamp(0, 1) - torch.from_numpy(MEAN).cuda()) / torch.from_numpy(STD).cuda()
+    return (x.clamp(0, 1) - torch.from_numpy(MEAN).to(device())) / torch.from_numpy(STD).to(device())
 
 
 def loader(ds, train, bs):
     import torch
     return torch.utils.data.DataLoader(ds, batch_size=bs, shuffle=train, num_workers=int(os.environ.get("VM_WORKERS", "8")), persistent_workers=False,
-                                       drop_last=train, pin_memory=True)
+                                       drop_last=train, pin_memory=device() == "cuda")
 
 
 def warm_start(net, path, voc, backbone):
@@ -260,7 +260,7 @@ def fit(items, voc, epochs, backbone, bs=24, lr=3e-4, scene=None, frames=None, r
     micro-batches)."""
     import torch
     import torch.nn as nn
-    net = make_net(voc, backbone, scene).cuda()
+    net = make_net(voc, backbone, scene).to(device())
     if init is not None:
         warm_start(net, init, voc, backbone)
     ys = np.array([[targets(it, voc)[h] for h in HEADS] for it in items])
@@ -270,7 +270,7 @@ def fit(items, voc, epochs, backbone, bs=24, lr=3e-4, scene=None, frames=None, r
         w = np.where(cnt > 0, (cnt.sum() / np.maximum(cnt, 1)) ** 0.5, 0)
         # capped: torch applies class weights to the smoothing term too, so a rare class (category
         # 'other') with a huge weight pulls every sample towards itself
-        weights[h] = torch.tensor(np.minimum(w / w[w > 0].mean(), 4.0), dtype=torch.float32).cuda()
+        weights[h] = torch.tensor(np.minimum(w / w[w > 0].mean(), 4.0), dtype=torch.float32).to(device())
     opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=0.05)
     steps = epochs * (len(items) // bs)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, lr, total_steps=steps, pct_start=0.15)
@@ -280,11 +280,11 @@ def fit(items, voc, epochs, backbone, bs=24, lr=3e-4, scene=None, frames=None, r
         net.train()
         t0, tot, n = time.time(), 0.0, 0
         for x, xs, y, m in loader(ds, True, bs):
-            y, m = y.cuda(), m.cuda()
+            y, m = y.to(device()), m.to(device())
             opt.zero_grad()
             step_loss = 0.0
             for c in np.array_split(np.arange(len(y)), accum):
-                with torch.autocast("cuda", dtype=torch.float16):
+                with amp():
                     out = net(prep(x[c], True), prep(xs[c] if xs.ndim == 5 else xs, True, 8))
                     loss = 0
                     for k, h in enumerate(HEADS):
@@ -316,7 +316,7 @@ def load(path):
 
 
 def member(ck):
-    net = make_net(ck["voc"], ck.get("backbone", "resnet18"), ck.get("scene")).cuda()
+    net = make_net(ck["voc"], ck.get("backbone", "resnet18"), ck.get("scene")).to(device())
     net.load_state_dict(ck["state"])
     net.scene, net.frames, net.res = ck.get("scene"), ck.get("frames", FRAMES), ck.get("res", RES)
     return net
@@ -345,13 +345,13 @@ def predict_one(net, items, voc, chars, shift=0, flip=False):
     ds = Crops(items, voc, False, chars, getattr(net, "scene", None), shift, flip,
                getattr(net, "frames", None), getattr(net, "res", None))
     out = {h: [] for h in HEADS}
-    with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
+    with torch.no_grad(), amp():
         for x, xs, _, m in loader(ds, False, 48):
             o = net(prep(x, False), prep(xs, False))
             for h in HEADS:
                 lg = o[h].float()
                 if h == "move":
-                    lg = lg.masked_fill(~m.cuda(), -1e4)
+                    lg = lg.masked_fill(~m.to(device()), -1e4)
                 out[h].append(torch.softmax(lg, -1).cpu().numpy())
     return {h: np.concatenate(v) for h, v in out.items()}
 

@@ -15,6 +15,10 @@ dependencies = [
 ocr = ["easyocr>=1.7", "imageio-ffmpeg>=0.4"]
 viz = ["matplotlib>=3.8"]
 dev = ["pytest>=7.0"]
+# Opener service (server/opener_service): the opener chain on a CPU server. torch / torchvision
+# come from the CPU wheel index (see server/opener_service/README.md); scikit-learn must match the
+# version banner_reader_final.pkl was saved with
+server = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9", "scikit-learn==1.9.1"]
 
 [tool.setuptools.packages.find]
 include = ["replanal*"]

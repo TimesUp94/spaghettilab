@@ -13,12 +13,17 @@ Chain (final weights, trained on every logged replay):
 
     .venv/Scripts/python.exe tools/ggst_logger/model/recognize.py <video> [--out <dir>] [--analysis <dir>]
 
+Runs on the GPU when there is one, else on the CPU (GGST_DEVICE / --device to choose); weights from
+GGST_MODEL_DIR (default <GGST_DATA>/ggst_dataset/model). --light uses only the move ensemble's
+first net and no frame-shift averaging: about a third of the CPU time, a point or two of accuracy.
+
 -> <out>/openers.json (and the crops under <out>/crops, <out>/scene)
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -27,10 +32,10 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import OUT, low_priority  # noqa: E402
+from common import OUT, device, low_priority  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[3]
-PY = ROOT / ".venv" / "Scripts" / "python.exe"
+PY = Path(sys.executable)
 
 
 def analysis(video: Path, out: Path, given: Path | None) -> Path:
@@ -68,9 +73,16 @@ def main():
     ap.add_argument("video", type=Path)
     ap.add_argument("--out", type=Path)
     ap.add_argument("--analysis", type=Path, help="an existing analyze_replay output folder")
+    ap.add_argument("--device", choices=["cuda", "cpu"], help="default: the GPU when there is one")
+    ap.add_argument("--light", action="store_true", help="one move net, no frame-shift averaging (CPU servers)")
+    ap.add_argument("--threads", type=int, help="CPU threads for the networks (default: torch's)")
     a = ap.parse_args()
+    if a.device:
+        os.environ["GGST_DEVICE"] = a.device
     low_priority()
     import torch
+    if a.threads:
+        torch.set_num_threads(a.threads)
     import banner_reader as br
     import video_crops as vc
     import video_moves as vm
@@ -91,13 +103,16 @@ def main():
     lp = np.array(idx["chars_logp"])
     chars = (players_ck["chars"][int(lp[0].argmax())], players_ck["chars"][int(lp[1].argmax())])
     net, ck = vm.load(OUT / "video_moves_final.pt")
+    shifts = vm.TTA
+    if a.light:
+        net, shifts = (net[0] if isinstance(net, list) else net), [0]
     sdir = out / "scene"
     if ck.get("scene"):
         (sdir / "done").unlink(missing_ok=True)
         vs.process((a.video.stem, str(a.video), str(cdir), str(sdir)))
     items = [dict(stem="v", file=str(cdir / d["file"]), frame=d["frame"], side=d["side"], score=d["score"], row=None,
                   scene=str(sdir / d["file"])) for d in idx["dets"]]
-    P = vm.predict(net, items, ck["voc"], {"v": chars})
+    P = vm.predict(net, items, ck["voc"], {"v": chars}, shifts=shifts)
     voc = ck["voc"]
     hk = {(d["frame"], d["side"]): p for d, p in zip(dets, br.hit_kind(a.video, dets))}
     print(f"banners read ({time.time() - t0:.0f}s)", flush=True)
@@ -118,7 +133,8 @@ def main():
             hit_kind=br.CLASSES[int(hk[(it["frame"], it["side"])].argmax())],
             hit_kind_p=round(float(hk[(it["frame"], it["side"])].max()), 3),
         ))
-    doc = dict(video=str(a.video), fps=fps, size=[w, h], characters={"P1": chars[0], "P2": chars[1]}, openers=res)
+    doc = dict(video=str(a.video), fps=fps, size=[w, h], characters={"P1": chars[0], "P2": chars[1]},
+               device=device(), light=a.light, seconds=round(time.time() - t0, 1), openers=res)
     (out / "openers.json").write_text(json.dumps(doc, indent=1))
     print(f"{len(res)} openers -> {out / 'openers.json'} ({time.time() - t0:.0f}s)")
 

@@ -25,7 +25,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import DATA, OFFS, OUT, TEST_FOLD, low_priority, replay_fold_map, save_json  # noqa: E402
+from common import DATA, OFFS, OUT, TEST_FOLD, amp, device, low_priority, replay_fold_map, save_json  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[3]
 LABELS = OUT / "players_labels.npz"
@@ -248,7 +248,7 @@ def loader(items, train, bs=48):
 
 def fit(items, nchar, epochs, per_epoch=60000, lr=1e-3):
     import torch
-    net = make_net(nchar).cuda()
+    net = make_net(nchar).to(device())
     opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-4)
     rng = np.random.default_rng(0)
     steps = epochs * (per_epoch // 48)
@@ -259,8 +259,8 @@ def fit(items, nchar, epochs, per_epoch=60000, lr=1e-3):
         sub = [items[i] for i in rng.choice(len(items), per_epoch, replace=False)]
         tot, n, t0 = 0.0, 0, time.time()
         for x, y, c in loader(sub, True):
-            x, y, c = x.cuda(non_blocking=True), y.cuda(non_blocking=True), c.cuda(non_blocking=True)
-            with torch.autocast("cuda", dtype=torch.float16):
+            x, y, c = x.to(device(), non_blocking=True), y.to(device(), non_blocking=True), c.to(device(), non_blocking=True)
+            with amp():
                 out = net(x)
             loss = losses(out, y, c)
             opt.zero_grad()
@@ -281,9 +281,9 @@ def evaluate(net, items, chars, rows):
     P, Y, C, CT = [], [], [], []
     with torch.no_grad():
         for x, y, c in loader(items, False, 96):
-            with torch.autocast("cuda", dtype=torch.float16):
-                out = net(x.cuda())
-            pos, gl = decode(out, c.cuda())
+            with amp():
+                out = net(x.to(device()))
+            pos, gl = decode(out, c.to(device()))
             P.append(pos.cpu().numpy())
             Y.append(y.numpy())
             C.append(gl.exp().cpu().numpy())

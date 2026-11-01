@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import DATA, OUT, TEST_FOLD, low_priority, replay_fold_map, save_json, subsample, test_subsets  # noqa: E402
+from common import DATA, OUT, TEST_FOLD, amp, device, low_priority, replay_fold_map, save_json, subsample, test_subsets  # noqa: E402
 
 RUNS = DATA / "runs"
 STEP = 2            # video frames per pipeline sample
@@ -115,10 +115,11 @@ def make_net(tiny=False):
 
         def forward(self, im, chunk=8192):     # [B, T, H, W, 3] uint8 -> [B, T, TINY_DIM]
             B, T = im.shape[:2]
-            x = im.permute(0, 1, 4, 2, 3).half() / 255 - 0.5       # fp16, as autocast feeds the conv anyway
+            x = im.permute(0, 1, 4, 2, 3)
+            x = (x.half() if x.is_cuda else x.float()) / 255 - 0.5   # fp16 on the GPU, as autocast feeds the conv anyway
             d = torch.cat([torch.zeros_like(x[:, :1]), x[:, 1:] - x[:, :-1]], 1)
             x = torch.cat([x, d], 2).flatten(0, 1)
-            with torch.autocast("cuda", dtype=torch.float16):
+            with amp():
                 if torch.is_grad_enabled():
                     # recomputed in the backward pass: the activations of 24 x 600 frames took ~5 GB of
                     # GPU memory, which on Windows counts against the machine's commit limit
@@ -157,13 +158,13 @@ def train(data, epochs=30, win=600, bs=24, lr=2e-3, seed=0, tiny=False, init=Non
     import torch
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
-    net = make_net(tiny).cuda()
+    net = make_net(tiny).to(device())
     if init is not None:
         net.load_state_dict(init)
     opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-2)
     per_ep = sum(len(d[0]) for d in data) // (win * bs) + 1
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, lr, total_steps=epochs * per_ep, pct_start=0.1)
-    cw = torch.tensor([1.0, 20.0, 20.0]).cuda()
+    cw = torch.tensor([1.0, 20.0, 20.0]).to(device())
     lens = np.array([len(d[0]) for d in data], float)
 
     def batch():
@@ -194,8 +195,8 @@ def train(data, epochs=30, win=600, bs=24, lr=2e-3, seed=0, tiny=False, init=Non
         for _ in range(per_ep):
             xs, ys, ws, ims = nxt.result()
             nxt = pool.submit(batch)
-            x, y, w = (torch.from_numpy(v).cuda() for v in (xs, ys, ws))
-            logit = net(x, torch.from_numpy(ims).cuda() if tiny else None)
+            x, y, w = (torch.from_numpy(v).to(device()) for v in (xs, ys, ws))
+            logit = net(x, torch.from_numpy(ims).to(device()) if tiny else None)
             loss = (torch.nn.functional.cross_entropy(logit.reshape(-1, 3), y.reshape(-1), weight=cw, reduction="none")
                     * w.reshape(-1)).sum() / w.sum()
             opt.zero_grad()
@@ -213,8 +214,8 @@ def predict(net, X, im=None):
     import torch
     net.eval()
     with torch.no_grad():
-        im = torch.from_numpy(np.array(im)[None]).cuda() if net.tiny is not None else None
-        p = torch.softmax(net(torch.from_numpy(X[None]).cuda(), im), -1)[0].cpu().numpy()
+        im = torch.from_numpy(np.array(im)[None]).to(device()) if net.tiny is not None else None
+        p = torch.softmax(net(torch.from_numpy(X[None]).to(device()), im), -1)[0].cpu().numpy()
     return p
 
 
@@ -222,7 +223,7 @@ def load(path):
     """Net on the GPU from saved weights (a state dict; an image stream when it has 'tiny.' keys)."""
     import torch
     sd = torch.load(path, map_location="cpu")
-    net = make_net(any(k.startswith("tiny.") for k in sd)).cuda()
+    net = make_net(any(k.startswith("tiny.") for k in sd)).to(device())
     net.load_state_dict(sd)
     return net
 

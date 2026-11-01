@@ -26,12 +26,13 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from common import DATA, OUT, low_priority  # noqa: E402
+from common import DATA, OUT, amp, device, low_priority  # noqa: E402
 
 WIN = list(range(-16, 5))
 S, T = 640, 224
 FULL = (256, 144)
-FFMPEG = os.environ.get("GGST_FFMPEG", str(DATA.parent / "ggst_mod" / "dl" / "ffmpeg-9.0.2-essentials_build" / "bin" / "ffmpeg.exe"))
+_LOCAL_FFMPEG = DATA.parent / "ggst_mod" / "dl" / "ffmpeg-9.0.2-essentials_build" / "bin" / "ffmpeg.exe"
+FFMPEG = os.environ.get("GGST_FFMPEG") or (str(_LOCAL_FFMPEG) if _LOCAL_FFMPEG.exists() else "ffmpeg")
 FW, FH = 1920, 1080
 
 
@@ -96,16 +97,16 @@ def players(smalls, netfile):
     import torch
     import video_players as vp
     if _net is None:
-        ck = torch.load(netfile, map_location="cuda")
-        _net = vp.make_net(len(ck["chars"])).cuda().eval()
+        ck = torch.load(netfile, map_location=device())
+        _net = vp.make_net(len(ck["chars"])).to(device()).eval()
         _net.load_state_dict(ck["state"])
     mean = np.array([0.485, 0.456, 0.406], np.float32)
     std = np.array([0.229, 0.224, 0.225], np.float32)
     x = np.stack([(cv2.resize(s[:, :, ::-1], (vp.IN_W, vp.IN_H)).astype(np.float32) / 255 - mean) / std
                   for s in smalls]).transpose(0, 3, 1, 2)
     with torch.no_grad():
-        with torch.autocast("cuda", dtype=torch.float16):
-            out = _net(torch.from_numpy(np.ascontiguousarray(x)).cuda())
+        with amp():
+            out = _net(torch.from_numpy(np.ascontiguousarray(x)).to(device()))
         gl = torch.log_softmax(out["gchar"].float(), -1)
         chars = gl.sum(0).argmax(-1)[None].expand(len(smalls), 2)     # the window's characters, by vote
         pos, gl = vp.decode(out, chars, window=True)

@@ -10,14 +10,33 @@ from pathlib import Path
 import numpy as np
 
 DATA = Path(os.environ.get("GGST_DATA", r"G:\Projects\replanal-data")) / "ggst_dataset"
-OUT = DATA / "model"
+OUT = Path(os.environ["GGST_MODEL_DIR"]) if os.environ.get("GGST_MODEL_DIR") else DATA / "model"
 OFFS = list(range(-12, 1))
+
+
+def device() -> str:
+    """'cuda' or 'cpu': GGST_DEVICE, else the GPU when there is one (a server may have none)."""
+    d = os.environ.get("GGST_DEVICE")
+    if d:
+        return d
+    import torch
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def amp():
+    """fp16 autocast on the GPU; plain fp32 on the CPU, where fp16 convolutions are slow."""
+    import contextlib
+    import torch
+    return torch.autocast("cuda", dtype=torch.float16) if device() == "cuda" else contextlib.nullcontext()
 
 
 def low_priority():
     try:
-        k = ctypes.windll.kernel32
-        k.SetPriorityClass(k.GetCurrentProcess(), 0x4000)   # below normal
+        if os.name == "nt":
+            k = ctypes.windll.kernel32
+            k.SetPriorityClass(k.GetCurrentProcess(), 0x4000)   # below normal
+        else:
+            os.nice(10)
     except Exception:
         pass
 

@@ -56,6 +56,11 @@ python -m replanal.strive_export --out <dir> --count 10    # or --all / --since 
 python -m replanal.strive_export probe                     # ffmpeg/capture/encoder + current screen, no keys
 python -m replanal.strive_export calibrate --lang en       # reference screens for another UI language
 
+# Opener service (server/opener_service, see its README): the opener models behind FGCBackend on a
+# CPU server, one analysis at a time with a short queue; tests stub the models
+OPENERS_SECRET=x uvicorn --factory server.opener_service.app:make_app --port 10490
+pytest tests/test_opener_service.py
+
 # Release (from repo root)
 ./release.sh                      # auto-version YYYY.M.DD-preview.N
 ./release.sh 2026.4.1-preview.1   # explicit version

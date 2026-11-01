@@ -35,3 +35,6 @@ app/node_modules/
 Thumbs.db
 *.spag
 *.spagz
+
+# opener service jobs (uploads, results)
+server/opener_service/work/
