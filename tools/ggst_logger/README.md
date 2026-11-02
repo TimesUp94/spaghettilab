@@ -80,3 +80,60 @@ python tools/ggst_logger/dataset/build.py --idle
   - On the 720p30 copies of the old test replays (`degrade_eval.py`):
     - the new chain loses nothing: starts 0.947 at 0.943 precision, found and kept 0.94 with 0.98 of them real, characters right on every replay, category 0.93, exact move 0.945, counter/punish/neither 0.98, whole chain 0.888;
     - the previous chain lost almost nothing too: starts 0.95 at 0.93, category 0.93, button/stance 0.94, exact move 0.93, counter/punish/neither 0.96, whole chain 0.86.
+
+### Pretrained backbones (2026-11)
+
+ROADMAP point 1: frozen pretrained backbones against the v2 ResNet move ensemble, like for like.
+
+- Scripts: `model/backbone_feats.py` (extract pooled features per frame to `ggst_dataset/feats/<name>/`, fp16; train a small temporal head on them; `baseline`; `table`), `model/exp_bb_ensemble.py` (fixed 50/50 average with v2's test probabilities), `model/exp_bb_ft.py` (V-JEPA 2 fine-tune of the last blocks). Outputs are `exp_`-prefixed in `model/`.
+- Same items as `video_moves.py`: the chain's crops and whole frames (`vcrops_test`, `vscene_test`), 29,090 training items from the non-test folds, 7,354 test items. Same vocabulary (904 moves), labels, losses and character masks; scored through `video_moves.test_results` / `end_to_end` with the `banner_reader` hit kind. The v2 baseline reproduces `results_v2_chain.json` to every digit.
+- One fixed head setup for every backbone (30 epochs, AdamW 1e-3, wd 0.05, OneCycle, last epoch); 3 seeds, seed 0 reported, chain in brackets = 3-seed mean. Nothing selected on the test fold.
+- Frozen means: no image augmentation; V-JEPA 2 gets one clip (no frame-shift averaging) and its whole frame squashed to 256×256. This tilts the comparison against the backbones, not for them.
+
+Old 144 test replays (chain = all openers found with the right move; move = exact move given found; <5 = moves with <5 training examples; projectile / special = move given found, chain right):
+
+| | chain | move | category | <5 | projectile | special |
+|---|---|---|---|---|---|---|
+| v2 ResNet18+50 ensemble (fine-tuned) | 0.887 | 0.944 | 0.935 | 0.57 | 0.77 / 0.69 | 0.93 / 0.88 |
+| ResNet18 ImageNet, frozen (control) | 0.780 (0.780) | 0.837 | 0.879 | 0.26 | 0.66 / 0.59 | 0.86 / 0.80 |
+| SigLIP 2 base, frozen | 0.805 (0.805) | 0.863 | 0.893 | 0.30 | 0.73 / 0.65 | 0.87 / 0.81 |
+| DINOv2 base, frozen | 0.811 (0.812) | 0.867 | 0.899 | 0.37 | 0.73 / 0.65 | 0.88 / 0.82 |
+| V-JEPA 2 ViT-L, frozen | 0.844 (0.841) | 0.900 | 0.905 | 0.40 | 0.74 / 0.66 | 0.92 / 0.86 |
+| V-JEPA 2, last 8 blocks fine-tuned | running | | | | | |
+| v2 + DINOv2, 50/50 | 0.893 | 0.949 | 0.934 | 0.55 | 0.80 / 0.72 | |
+| v2 + SigLIP 2, 50/50 | 0.888 | 0.945 | 0.936 | 0.50 | 0.79 / 0.72 | |
+| v2 + V-JEPA 2, 50/50 | 0.889 | 0.945 | 0.937 | 0.53 | 0.78 / 0.71 | |
+
+New 76 test replays:
+
+| | chain | move | category | <5 | projectile | special |
+|---|---|---|---|---|---|---|
+| v2 ResNet18+50 ensemble (fine-tuned) | 0.855 | 0.915 | 0.949 | 0.59 | 0.75 / 0.72 | 0.91 / 0.82 |
+| ResNet18 ImageNet, frozen (control) | 0.729 (0.734) | 0.784 | 0.876 | 0.30 | 0.65 / 0.62 | 0.83 / 0.74 |
+| SigLIP 2 base, frozen | 0.760 (0.760) | 0.821 | 0.915 | 0.40 | 0.71 / 0.67 | 0.84 / 0.74 |
+| DINOv2 base, frozen | 0.764 (0.762) | 0.826 | 0.903 | 0.30 | 0.65 / 0.62 | 0.85 / 0.75 |
+| V-JEPA 2 ViT-L, frozen | 0.792 (0.791) | 0.854 | 0.923 | 0.45 | 0.71 / 0.67 | 0.88 / 0.78 |
+| V-JEPA 2, last 8 blocks fine-tuned | running | | | | | |
+| v2 + DINOv2, 50/50 | 0.853 | 0.914 | 0.951 | 0.49 | 0.75 / 0.72 | |
+| v2 + SigLIP 2, 50/50 | 0.847 | 0.907 | 0.957 | 0.52 | 0.75 / 0.72 | |
+| v2 + V-JEPA 2, 50/50 | 0.855 | 0.916 | 0.954 | 0.55 | 0.76 / 0.72 | |
+
+Costs (RTX 3090, 3 loader workers; one item = 21 frames × crop + whole frame):
+
+| | extract (1,090 replays) | ms/item | throughput | per frame | features | head |
+|---|---|---|---|---|---|---|
+| ResNet18 | 10 min | 16 | ~2,600 tiles/s | 512-d | 1.5 GB | 5 min |
+| DINOv2 base | 46 min | 76 | ~550 tiles/s | 768-d | 2.2 GB | 2 min |
+| SigLIP 2 base | 35 min | 58 | ~720 tiles/s | 768-d | 2.2 GB | 3 min |
+| V-JEPA 2 ViT-L | 92 min | 151 | ~290 frames/s at 256×256 | 1024-d per 2-frame tubelet | 1.5 GB | 3 min |
+| V-JEPA 2 fine-tune | – | ~130 (train) | – | – | – | ~64 min/epoch × 4, 9.4 GB GPU |
+
+- Ranking of the frozen features: V-JEPA 2 > DINOv2 ≈ SigLIP 2 > ImageNet ResNet18. V-JEPA 2 is +0.06 chain over the control and +0.03 over DINOv2 on both subsets (seed spread about ±0.004), closing a bit more than half the gap from frozen ImageNet to the fine-tuned v2. Its gain is largest on normals and the 5–19 bucket, where motion matters.
+- None is close to v2 frozen: V-JEPA 2 is 0.043 chain below on old, 0.063 on new.
+- The 50/50 averages with v2 are within noise on chain and move (old +0.001 to +0.006, new −0.008 to 0.000) and lower the <5 bucket; V-JEPA 2's lifts new projectile category recall from 0.74 to 0.81. Not worth a ViT pass at inference.
+- Caveats from the independent check (all metrics recomputed from the saved probabilities with a separate loop, every value matched):
+  - The <5 bucket has no class of its own for any of its moves (`collapse_rare` at 5): it scores picking the character's `(rare)` catch-all class, not the exact move. About 115 old / 87 new found openers, SE about 0.045, so the differences between frozen backbones there are noise; only the gap to v2 is real.
+  - Seed 0 happens to be V-JEPA 2's best seed on old (0.844 vs 0.841 mean).
+  - The head setup was fixed while the control's test numbers were visible; it is the same for every backbone and was run once, so the ranking holds.
+  - On `old_unleaked` (139 replays) nothing moves: v2 0.887, V-JEPA 2 0.843 chain.
+- Decision: **stay on the ResNets** for the opener chain (`*_final.pt` unchanged). Pending the V-JEPA 2 fine-tune (`exp_bb_ft.py`, results in `model/results_exp_bb_vjepa2_large_ft.json`): adopt it, alone or in the ensemble, only if it beats v2's chain on both subsets by more than the seed noise. V-JEPA 2 ViT-L is the backbone for the whole-match embeddings (ROADMAP point 2).

@@ -11,7 +11,7 @@ game-native HUD only, never the stream overlay; the frozen test fold (`model/fol
 yardstick and every step reports old / new / 720p30; the reverse engineering behind the log is
 never released; weights stay private until decided otherwise.
 
-## 1. Pretrained video backbones (in progress)
+## 1. Pretrained video backbones (frozen comparison done; fine-tune running)
 
 - **Goal:** better features than ImageNet ResNets, above all for rare moves (accuracy 0.46 with <5
   training examples vs 0.85 for common ones) and projectile vs special (0.69–0.72 right).
@@ -20,19 +20,38 @@ never released; weights stay private until decided otherwise.
   if frozen features look promising.
 - **Done when:** a table backbone × {move, category, rare-move buckets, projectile/special,
   chain} on the old and new test replays, and a decision: adopt, fine-tune, or stay on ResNets.
-- **Cost:** days. GPU 3090 (24 GB), PC near its commit limit, ~30 GB free on G:.
+- **Status 2026-11-02:** table in the README ("Pretrained backbones (2026-11)"). Frozen, whole
+  chain old / new: V-JEPA 2 ViT-L 0.844 / 0.792, DINOv2 base 0.811 / 0.764, SigLIP 2 base
+  0.805 / 0.760, ImageNet ResNet18 control 0.780 / 0.729, against v2's 0.887 / 0.855. The 50/50
+  averages with v2 are within noise. Decision: **stay on the ResNets** for openers. Running:
+  V-JEPA 2 with its last 8 blocks fine-tuned (`exp_bb_ft.py`, ~4.5 h); adopt it only if it beats
+  v2's chain on both subsets beyond seed noise (about ±0.004 old, ±0.01 new).
+- **Backbone for 2:** frozen **V-JEPA 2 ViT-L** (`facebook/vjepa2-vitl-fpc64-256`), the best frozen
+  features by +0.03 chain over DINOv2 and +0.06 over ImageNet, strongest where motion matters
+  (normals, 5–19 bucket). Measured on the 3090: ~290 frames/s at 256×256 through the encoder
+  (151 ms per 2 × 22-frame clip, 3 loader workers, pre-cut JPEG tiles, 1.2 GB GPU). Output: one
+  1024-d token per 2-frame tubelet after the mean over space, i.e. 512-d-equivalent per frame,
+  1 KB fp16 per tubelet.
+  - Affordable setting: **15 fps, 256×256**, one square whole-frame view (letterbox or two
+    square halves rather than the squash used for openers). A 3-minute match is 2,700 frames,
+    ~9 s of GPU; all 1,090 replays ~3 h plus video decode; ~3 MB per match, ~3 GB for all
+    mean-pooled (a 2×2 spatial grid: ~12 GB, near the budget). 30 fps doubles time and storage
+    (~6 h, ~6 GB).
+  - DINOv2 base per frame (~550 tiles/s, 768-d) is the fallback if the transcript needs per-frame
+    rather than per-tubelet resolution.
 
 ## 2. Full match transcript (next)
 
 - **Goal:** every move of both players, frame by frame: whiffs, blocked moves, combo routes,
   throws/techs, bursts, supers. Openers become a special case.
-- **How:** labels from the log for every frame; frame embeddings of the whole match (winner of 1,
-  at 15–30 fps); temporal action localisation (ActionFormer / TriDet-style, or a transformer over
+- **How:** labels from the log for every frame; frame embeddings of the whole match (frozen V-JEPA 2
+  ViT-L from 1, 15 fps, 256×256); temporal action localisation (ActionFormer / TriDet-style, or a transformer over
   the embeddings) per player; evaluation as action spotting (precision/recall at ±k frames, per
   category and move).
 - **Unlocks in the Lab:** wakeup habits, neutral whiffs, how often you get counter-hit by what,
   punish rates, combo route stats.
-- **Cost:** weeks. Storage: whole-match embeddings ~10–15 GB fp16.
+- **Cost:** weeks. Storage: whole-match embeddings ~3 GB fp16 mean-pooled at 15 fps, ~12 GB with a
+  2×2 spatial grid.
 
 ## 3. Inputs from video (inverse dynamics)
 
