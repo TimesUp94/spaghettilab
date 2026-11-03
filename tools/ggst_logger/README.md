@@ -99,7 +99,7 @@ Old 144 test replays (chain = all openers found with the right move; move = exac
 | SigLIP 2 base, frozen | 0.805 (0.805) | 0.863 | 0.893 | 0.30 | 0.73 / 0.65 | 0.87 / 0.81 |
 | DINOv2 base, frozen | 0.811 (0.812) | 0.867 | 0.899 | 0.37 | 0.73 / 0.65 | 0.88 / 0.82 |
 | V-JEPA 2 ViT-L, frozen | 0.844 (0.841) | 0.900 | 0.905 | 0.40 | 0.74 / 0.66 | 0.92 / 0.86 |
-| V-JEPA 2, last 8 blocks fine-tuned | running | | | | | |
+| V-JEPA 2, last 8 blocks fine-tuned | 0.869 | 0.925 | 0.923 | 0.41 | 0.77 / 0.69 | 0.92 / 0.86 |
 | v2 + DINOv2, 50/50 | 0.893 | 0.949 | 0.934 | 0.55 | 0.80 / 0.72 | |
 | v2 + SigLIP 2, 50/50 | 0.888 | 0.945 | 0.936 | 0.50 | 0.79 / 0.72 | |
 | v2 + V-JEPA 2, 50/50 | 0.889 | 0.945 | 0.937 | 0.53 | 0.78 / 0.71 | |
@@ -113,7 +113,7 @@ New 76 test replays:
 | SigLIP 2 base, frozen | 0.760 (0.760) | 0.821 | 0.915 | 0.40 | 0.71 / 0.67 | 0.84 / 0.74 |
 | DINOv2 base, frozen | 0.764 (0.762) | 0.826 | 0.903 | 0.30 | 0.65 / 0.62 | 0.85 / 0.75 |
 | V-JEPA 2 ViT-L, frozen | 0.792 (0.791) | 0.854 | 0.923 | 0.45 | 0.71 / 0.67 | 0.88 / 0.78 |
-| V-JEPA 2, last 8 blocks fine-tuned | running | | | | | |
+| V-JEPA 2, last 8 blocks fine-tuned | 0.835 | 0.896 | 0.938 | 0.55 | 0.73 / 0.68 | 0.92 / 0.83 |
 | v2 + DINOv2, 50/50 | 0.853 | 0.914 | 0.951 | 0.49 | 0.75 / 0.72 | |
 | v2 + SigLIP 2, 50/50 | 0.847 | 0.907 | 0.957 | 0.52 | 0.75 / 0.72 | |
 | v2 + V-JEPA 2, 50/50 | 0.855 | 0.916 | 0.954 | 0.55 | 0.76 / 0.72 | |
@@ -136,4 +136,52 @@ Costs (RTX 3090, 3 loader workers; one item = 21 frames × crop + whole frame):
   - Seed 0 happens to be V-JEPA 2's best seed on old (0.844 vs 0.841 mean).
   - The head setup was fixed while the control's test numbers were visible; it is the same for every backbone and was run once, so the ranking holds.
   - On `old_unleaked` (139 replays) nothing moves: v2 0.887, V-JEPA 2 0.843 chain.
-- Decision: **stay on the ResNets** for the opener chain (`*_final.pt` unchanged). Pending the V-JEPA 2 fine-tune (`exp_bb_ft.py`, results in `model/results_exp_bb_vjepa2_large_ft.json`): adopt it, alone or in the ensemble, only if it beats v2's chain on both subsets by more than the seed noise. V-JEPA 2 ViT-L is the backbone for the whole-match embeddings (ROADMAP point 2).
+- Decision: **stay on the ResNets** for the opener chain (`*_final.pt` unchanged). The V-JEPA 2 fine-tune (`exp_bb_ft.py`, 4 epochs, `model/results_exp_bb_vjepa2_large_ft.json`, frame-shift averaged) gets chain 0.869 / 0.835: +0.025 / +0.043 over frozen but still 0.018 / 0.020 below v2, so it is not adopted (its 50/50 with v2 was not run). Its loss went NaN through most of epoch 2 and recovered in epoch 3. V-JEPA 2 ViT-L, frozen, is the backbone for the whole-match embeddings (ROADMAP point 2, below).
+
+### Match transcript (2026-11)
+
+ROADMAP point 2: every move start of both players from the video alone, not only combo openers.
+
+- **Predicts**, per side, a list of events: start frame (60 fps), category (normal / special / super / throw / other = burst, RC, misc), button/stance for normals (15 classes), exact move (1,215 classes: `char:move`, moves with <5 training starts folded into `char:(rare)`), outcome (counter / hit / block / whiff / interrupted / teched / none), with scores.
+- **Labels** (`dataset/transcript_labels.py`, CPU, ~50 s): 169,383 move starts in the 1,090 v2 replays, from the game logs, mapped to video frames with build.py's alignment. Outcomes are derived (the log has no hit/block flag): damage state = hit; guard state plus hit-by change, chip or blockstop freeze = block; G2's hit-by field credits contacts to the move (summons, projectiles). On G2 the fallback without hit-by agrees on 98.7% of outcomes. 99.9% of `openers.parquet` rows link to a dense event, 99.3% with the same move. Limits: in G0 a repeated 5P 5P is one event; without hit-by (G0/G1) about 15% of object blocks are missed.
+- **Split and metric** (`model/transcript_eval.py stats | selftest | score preds.parquet --subset all|old|new`): test = frozen fold 0 (old 144 replays / 21,889 events, new 76 / 12,092); validation = 10% of the rest by name hash (93 replays), train 777 (`transcript_splits.json`). Action spotting per level: a prediction matches an unmatched true event of the same side and class within ±k frames (k = 2, 4, 8), greedy by |dt|; micro / macro P, R, F1 and mAP. `openers_recovered@k`: share of test openers whose dense event is matched at move level.
+- **Features** (`model/transcript_feats.py`, `model/transcript_feats_grid.py`): frozen V-JEPA 2 ViT-L at 15 fps, 16-frame clips, one token per 8-video-frame tubelet (7.5 Hz). Three 256×256 views: the whole frame squashed, and a 640 px square on each player (positions from `video_players_test.pt`, mirrored so the player faces the opponent). Each player square also keeps 2×2 quadrant tokens, PCA 1024 → 192 (94% of the variance, fitted on 24 training replays). Plus the CV pipeline's 23 HUD features at 30 Hz and the voted characters.
+- **Model** (`model/video_transcript.py train | eval | ensemble | predict`, final `ens5grid`): per side, conv stem + 4-layer local-window transformer (d 384, 6 heads, ±32 tubelets = ±4.3 s, relative-position bias), heads per tubelet for background + category, 8-way offset of the start inside the tubelet, move (restricted to the voted character), button/stance, outcome. 40 epochs, background weight 0.15, input/view dropout. 5 seeds averaged; epoch, threshold 0.65 and merge distance 8 frames chosen on validation.
+
+Test fold, micro F1 (old 144 / new 76):
+
+| level | k=2 | k=4 | k=8 | macro F1 k=4 | mAP k=4 |
+|---|---|---|---|---|---|
+| category | 0.749 / 0.722 | 0.815 / 0.798 | 0.840 / 0.825 | 0.812 / 0.792 | 0.795 / 0.759 |
+| button/stance | 0.656 / 0.619 | 0.712 / 0.685 | 0.729 / 0.704 | 0.642 / 0.605 | 0.530 / 0.491 |
+| exact move | 0.685 / 0.658 | 0.735 / 0.716 | 0.750 / 0.733 | 0.615 / 0.612 | 0.558 / 0.562 |
+| outcome | 0.705 / 0.686 | 0.770 / 0.760 | 0.795 / 0.790 | 0.693 / 0.713 | 0.599 / 0.648 |
+
+- At k=4: precision 0.855 / 0.845, recall 0.779 / 0.756 (category). Given a category match the outcome is right 0.925 / 0.931. The character vote is right on 439 of 440 test sides.
+- Per category (k=4, whole test fold): other 0.94, special 0.82, normal 0.80, super 0.79, throw 0.68 F1.
+- Found (any class, k=4) by true outcome: counter 0.93, hit 0.91, block 0.90, RC 0.94, interrupted 0.64, whiff 0.57. Move right when found: hit 0.93, block 0.94, whiff 0.82, interrupted 0.60.
+- Starts less than 8 frames after the previous one of the same side are found 0.47 of the time (one start per tubelet, merge 8).
+- The 2×2 grid tokens were the one kept improvement over the mean-pooled first model (`ens5`): move F1@4 0.697 → 0.735 old, 0.678 → 0.716 new; bootstrap over replays +0.038 [0.033, 0.042] old, +0.039 [0.033, 0.045] new. 95% interval on the absolute move F1@4 about ±0.014. One threshold per category (`ensemble --percat`) was within noise and is not used.
+- Versus the opener chain, like for like (the chain's 4,715 / 2,612 openers without bursts, the chain's ±6-frame tolerance): the transcript recovers 0.834 / 0.823 with the right move, the chain 0.887 / 0.855. The anchors differ (move start here, hit frame for the chain). Keep the chain for openers; the transcript adds every other move. Its own `openers_recovered@4` (dense openers incl. bursts) is 0.845 / 0.835.
+- By log generation (move F1@4): G0 old 0.807, G1 old 0.726, G2 old 0.716, G2 new 0.716, so the old/new gap is mostly composition.
+
+Costs (RTX 3090):
+- Features: 6.7 h for the three views of all 1,090 replays (98 sampled frames/s wall, GPU 99.8% busy, 1.6 GB GPU; median match 140 s → 62 s wall, 21 s of it V-JEPA 2 GPU time), plus 4.7 h for the grid pass (a second run of the two player views; one combined pass would not need it). Disk: 7.0 GB + 3.4 GB fp16 under `ggst_dataset/transcript/` (about 10 MB per match).
+- Training: about 12.5 min per net (15–19 s per epoch, all features held on the GPU, ~15 GB peak), 1.05 h for the 5 members. All training experiments: about 3.8 h for the first model's sweep, 2.2 h for the grid round (pilot, 5 nets, ensembles).
+- Inference per match (median 140 s match at 1080p60): the feature pass about 62 s wall, bound by the CPU decode (21 s of it on the GPU), plus about 15 s for the separate grid pass; then the 5-net head in about 3 s including loading. Weights `model/video_transcript_exp_ens5grid.pt` (191 MB, all members). Not tried on the CPU or on 720p30 copies.
+
+Verification caveats (independent check, CPU only):
+- Every headline number reproduces from `transcript/exp_tr_ens5grid_test_preds.parquet` with a separate matcher; optimal (Hungarian) matching gives the same F1.
+- No train/val/test overlap; no undetected duplicate among same-character replay pairs (move-sequence similarity < 0.5).
+- `video_players_test.pt` predates `duplicates.json`, so 5 old-test replays had a dropped copy in the player net's training. On `old_unleaked` (139) nothing moves: move F1@4 0.734, category 0.815.
+- Label/video alignment: on 4 test replays (G0, G1, G2 old, G2 new) the motion onset around the mover peaks at offset 0 from the labelled start.
+- The merge distance chose 8, the edge of its grid (4, 6, 8); larger was never tried.
+- Early runs and the per-category variant also scored the test fold; selection used validation only.
+
+Not solved yet:
+- Moves without contact: whiffs 0.57 and interrupted moves 0.64 found; interrupted moves get the right move 0.60 of the time.
+- Close starts (< 8 frames apart, e.g. 5P 5P, cancels): one start per 7.5 Hz tubelet. Next: 15 Hz tokens or two slots per tubelet.
+- Throws (0.68 F1) and button/stance (0.71 / 0.69) lag the other levels; rare moves are scored as the `(rare)` catch-all only.
+- Each 16-frame clip is encoded on its own (one-sided context at clip edges); the scene view is squashed, not letterboxed; during teleports, overlaps and cinematics both player squares can show the same player.
+- Labels: G0/G1 object blocks and contact credit are noisier; HC Sniper shots and some Ramlethal openers are mislabelled in `openers.parquet` (build/moves bugs, not fixed).
+- Not in `recognize.py`, the app or the CPU server; the feature pass needs a GPU (ROADMAP point 6).
