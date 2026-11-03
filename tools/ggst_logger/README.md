@@ -185,3 +185,160 @@ Not solved yet:
 - Each 16-frame clip is encoded on its own (one-sided context at clip edges); the scene view is squashed, not letterboxed; during teleports, overlaps and cinematics both player squares can show the same player.
 - Labels: G0/G1 object blocks and contact credit are noisier; HC Sniper shots and some Ramlethal openers are mislabelled in `openers.parquet` (build/moves bugs, not fixed).
 - Not in `recognize.py`, the app or the CPU server; the feature pass needs a GPU (ROADMAP point 6).
+
+### Inputs from video (2026-11)
+
+ROADMAP point 3: each player's held direction and button presses per video frame (60 fps), from the video alone.
+
+- **Labels** (`dataset/inputs_labels.py`, CPU, ~40 s): from the logs' `p*_rec` and `p*_face`, mapped to video frames with build.py's alignment like the transcript. Per frame and side: direction 1–9 relative to the facing, press edges and held bits of P/K/S/H/D, the log's state (move, idle, walk_f, walk_b, dash, guard, jump, hit) and a `live` flag (no round intro / win states). `ggst_dataset/inputs/labels/<stem>.npz` (26 MB for all 1,090), `inputs_motions.parquet` (the command read at every transcript event, like `verify_inputs.read_command`). On live frames: 5 is 42% of the frames, 4 19%, 1 17%, 6 12%; 467,762 presses.
+- **Metric** (`model/inputs_eval.py score | selftest | baseline`), test fold old / new, live frames, same splits as the transcript:
+  - direction accuracy per frame and per 7.5 Hz step, balanced, per state ("without a visible move" = every state but `move`);
+  - presses as spotting per side and button at ±1 / 2 / 4 frames (local maxima over ±2 frames above a threshold tuned on val); recall split by whether a move of that side starts within 10 frames after the press;
+  - commands (motion + button, read from the streams like `verify_inputs.read_command`: 236K, [4]6S, 2H) and the plain direction + button at the press, at the true move start (`oracle`) and at the start of the transcript prediction matched to the event at the move level within ±4 (`tr`, read at that start + 2 frames: 2 was best on val with the labels as predictions), against the move prior (the move's most common command in training). The reader on the labels agrees with the log-row reading on 98.7% of the events.
+- **Model** (`model/video_inputs.py`): the transcript's inputs (V-JEPA 2 tokens with the grid, HUD, positions, characters) plus the transcript's posteriors per tubelet (category, offset, normal, outcome, top-8 moves through a move embedding; both sides); the transcript's trunk (local-window transformer), then each tubelet expanded to its 8 frames and two 60 fps convolutions; heads for direction (softmax) and presses (sigmoid, target spread ±1 frame). Posteriors: val / test from `ens5grid`; training replays out-of-fold from 4 single transcript nets with ens5grid's member setup, each trained on 3/4 of the train split (`video_inputs.py oof`, `video_transcript_exp_in_oof0-3.pt`), since ens5grid's own posteriors on its training replays are over-confident. 30 epochs, epoch and press threshold chosen on val.
+
+Test fold (old 144 / new 76):
+
+| | dir/frame | balanced | no visible move | press F1 ±1 | ±2 | ±4 | press recall ±2: move / no move | cmd given move | dir+button given move |
+|---|---|---|---|---|---|---|---|---|---|
+| direction 5 + one press per transcript event (`transcript_only`) | 0.443 / 0.403 | 0.111 | 0.369 / 0.326 | 0.188 / 0.186 | 0.252 / 0.250 | 0.319 / 0.321 | 0.40 / 0.02 | 0.305 / 0.277 | 0.341 / 0.311 |
+| model without the posteriors (`nopost`) | 0.590 / 0.567 | 0.36 | 0.604 / 0.579 | 0.140 / 0.137 | 0.209 / 0.205 | 0.281 / 0.276 | 0.36 / 0.14 | 0.255 / 0.249 | 0.296 / 0.286 |
+| **model (`base`)** | **0.597 / 0.572** | 0.37 | **0.606 / 0.578** | **0.191 / 0.190** | **0.276 / 0.276** | **0.357 / 0.361** | 0.44 / 0.09 | 0.424 / 0.405 | 0.493 / 0.477 |
+| + event command head (`cmd`) | 0.594 / 0.564 | 0.35 | 0.601 / 0.569 | 0.162 / 0.169 | 0.237 / 0.246 | 0.312 / 0.323 | 0.44 / 0.11 | head 0.578 / 0.564 | head 0.641 / 0.633 |
+| the move's usual command (move prior) | | | | | | | | **0.593 / 0.576** | **0.653 / 0.650** |
+
+- Direction per state (base, old / new): idle 0.77 / 0.70, guard 0.75 / 0.73, walk back 0.74 / 0.72, dash 0.60 / 0.57, move 0.58 / 0.56, walk forward 0.54 / 0.57, hit 0.51 / 0.50, jump 0.44 / 0.44. Against each state's own most common direction (see the caveats below) the model adds little in idle and in moves and is far worse than the trivial rule while walking. Vertical part (up / neutral / down) 0.80, horizontal 0.70. Per 7.5 Hz step 0.600 / 0.575 (no better than per frame).
+- Presses per button, F1 ±2: S 0.32, H 0.28, D 0.26, K 0.24, P 0.19. 60% of the logged presses start no visible move within 10 frames (mashed, buffered, kara, cancelled into nothing); the model finds 9% of them.
+- Given a move the transcript spotted right (69% / 67% of the events with a command), its usual command beats everything read from the video: logged 236 and 214 motions 0.93 and 0.94 (old), but logged 41236 and 623 motions only 0.23 and 0.24 (players type 41236 for a 236 move, 6236 rolls into 623; the reading takes the longest motion). The per-move mode fitted on the test fold itself reaches only 0.60 (command) / 0.67 (direction + button): the remaining third is which variant the player typed, and nothing tried here sees it. Motion recognition for specials from the video equals move recognition.
+- The posteriors are what gives the presses (F1 ±2 0.209 → 0.276; command reading 0.255 → 0.424); the direction gains little from them (0.590 → 0.597).
+- Timing (`base`, transcript-matched moves, the press read at the matched start): within ±1 frame of the true press 0.48, ±2 0.69, ±4 0.89.
+
+Stage 2, per-frame features (`model/inputs_frame_feats.py`, `model/inputs_refine.py`):
+- 60 fps DINOv2-small CLS (384-d) of both player squares (cut and mirrored like the transcript's squares, positions interpolated from the 15 fps track), for val, test and 250 training replays (563): 2.4 h (4.9 M frames, ~570 frames/s wall: bound by the CPU decode and crop, 3 workers), 7.1 GB fp16 (`inputs/frame_feats/`). The features change sharply 1–2 frames before the labelled move start (the frame-to-frame change peaks at −2 and −1 for normals), so they carry frame-level timing.
+- Dense model on the 250 replays, with vs without them (`ff` vs `ffctl`): F1 ±1 0.122 vs 0.125, ±2 0.181 vs 0.183, direction 0.554 vs 0.553: no gain. Warm-started from `cmd` (`ffinit`, 15 epochs): same as `cmd`.
+- Window refiner around the transcript's matched starts (32 frames, both squares, conv; anchor jitter drawn from the transcript's start errors on val): start exactly right 0.336 → 0.376 / 0.346 → 0.378, within ±1 0.792 → 0.828 / 0.776 → 0.806, within ±2 0.933 → 0.925 / 0.919 → 0.912. The press is not improved (within ±1: 0.530 → 0.527): the press of a buffered move precedes its visible start by 0–8 frames. Trained with uniform ±6 jitter instead it is worse than the transcript (±1 0.740).
+
+Costs (RTX 3090): 4 OOF transcript nets 30 min; posteriors 2 min; a dense model 7 min (`cmd` 9 min) on all features held on the GPU (~15 GB), test inference 15 s for 220 replays; frame features 2.4 h; refiner 1 min. Total about 3.7 h of GPU. Disk 8.1 GB under `ggst_dataset/inputs/` (7.1 GB of it the frame features).
+
+Not solved:
+- Presses without a visible move (60% of presses) and which motion variant was typed: not visible in these features, likely not at all.
+- Directions inside moves, hitstun and jumps (0.44–0.58): the stick is not shown. Walks are not recognised either (0.54 / 0.74 where the state alone gives 0.99).
+- The dense model overfits after ~20 epochs on 777 replays; no ensemble or seeds; train-time posteriors are weaker OOF single nets while test uses `ens5grid`; frame features for only 250 training replays; not tried on 720p30 copies; not in `recognize.py`, the app or the CPU server.
+
+Verification caveats (independent check, CPU only, from the saved predictions):
+- Reproduced: direction 0.597 / 0.572 (always 5: 0.443 / 0.403), press F1 ±2 0.276 / 0.276, `nopost` 0.590 / 0.567 and 0.209 / 0.205, move prior on matched events 0.593 / 0.576 and 0.653 / 0.650. Nothing from the log reaches the model at inference; OOF nets, move prior, thresholds and epochs come from train / val only. The `nopost` threshold (0.2) is at the edge of its grid, but on val it beats 0.15 and 0.1.
+- Per state, model vs that state's most common direction (old / new): idle 0.77 / 0.70 vs 0.72 / 0.64 (always 5); move 0.58 / 0.56 vs 0.56 / 0.52; guard 0.75 / 0.73 vs 0.63 / 0.60 (always 1); dash 0.60 / 0.57 vs 0.37 / 0.40; jump 0.44 vs 0.25; hit 0.51 / 0.50 vs 0.36 / 0.32; walk forward 0.54 / 0.57 vs 0.99 / 1.00 (always 6); walk back 0.74 / 0.72 vs 0.99 (always 4). So "readable in neutral, not in the air or hitstun" is backwards: the gains are largest in jump, hit, dash and guard, and the model does not recognise walking.
+- The command ceiling above (0.60 / 0.67) is over all test events, the prior only over matched ones. On the same matched events the ceiling is 0.633 / 0.637 (command) and 0.687 / 0.706 (direction + button), so the prior is 0.04–0.06 below it. Over all test events with a command the prior gets 0.558 / 0.540.
+- Frame alignment: a 60 fps pixel check on 6 test replays puts the HUD HP change at label frame −1, 0 or +1 depending on the replay. The labels are right to about ±1 frame, which bounds the exact-frame numbers (refiner exact 0.34 → 0.38, press F1 ±1). The 1–2 frame lead of the DINOv2 features is within that, not a consistent offset.
+- The refiner's test input uses the logged event's category instead of the predicted one; only one move of 1,325 (Leo bt.P) has two categories, so the effect is negligible.
+
+### Search and state embeddings (2026-11)
+
+ROADMAP point 4: search over the transcript's events, a state embedding of the video, and habit groups. All of it uses only the video at inference; the log makes the labels and the scores. Test fold old 144 / new 76.
+
+**Event index** (`model/search_index.py build | query | eval | habits`, CPU, seconds):
+- One row per transcript event: replay, side, frame / time, character and opponent, category, move, button/stance, outcome, score, opener, the previous and next event of each side (move, outcome, gap), each side's state at the start and `after_kd` (frames since the side woke up). Two copies are built with the same fields: `pred` (the `ens5grid` predictions; `opener` = a cross-fitted `detections.json` combo start of that side 4 frames before to 40 after the start; state from the state embedding below) and `log` (the logged events, moves outside the vocabulary folded to `(rare)`). Output: `search/search_index_{pred,log}_test[_<state>].parquet`.
+- Queries: `query(ix, char="Sol", move="5H", outcome="whiff")`, `query(ix, char="Ky", opp_char="Sol", outcome="counter")` (Sol counter-hit by Ky), `query(ix, char="Sol", after=dict(who="own", outcome="block", within=40))`, `query(ix, side="P1", after_kd=True)`. The CLI prints the time in the recording and the neighbouring events.
+- Scoring: query families are built from the logged test events (every key with ≥ 5 logged results). Each query runs on both indexes. A returned moment counts as right if it matches a logged one (same replay and side, ±8 frames, one-to-one). Micro P / R / F1 over all returned moments, k = 8 (k = 4 in brackets):
+
+| family (queries old / new) | precision | recall | F1 (k=4) | mean per-query F1 | median count error |
+|---|---|---|---|---|---|
+| move + outcome, e.g. whiffed Sol 5H (1,352 / 753) | 0.822 / 0.831 | 0.756 / 0.750 | 0.787 / 0.788 (0.775 / 0.773) | 0.729 / 0.749 | 17% / 17% |
+| – whiff only | 0.659 / 0.682 | 0.463 / 0.478 | 0.544 / 0.562 | | |
+| – block / connected (hit or counter) / counter, old | 0.854 / 0.873 / 0.838 | 0.862 / 0.875 / 0.809 | 0.858 / 0.874 / 0.823 | | |
+| move (871 / 633) | 0.793 / 0.788 | 0.724 / 0.707 | 0.757 / 0.745 (0.741 / 0.728) | 0.682 / 0.696 | 18% / 17% |
+| X counter-hit by Y (184 / 103) | 0.854 / 0.872 | 0.818 / 0.829 | 0.836 / 0.850 (0.821 / 0.829) | 0.831 / 0.852 | 13% / 11% |
+| combo opener with move M (355 / 202) | 0.874 / 0.869 | 0.711 / 0.725 | 0.784 / 0.791 (0.766 / 0.772) | 0.717 / 0.722 | 14% / 20% |
+| next own move after a blocked one (34 / 30) | 0.822 / 0.843 | 0.859 / 0.842 | 0.840 / 0.842 (0.832 / 0.835) | 0.835 / 0.848 | 7% / 7% |
+| first move after a knockdown (34 / 31; state from `clip_sup`) | 0.824 / 0.790 | 0.678 / 0.664 | 0.744 / 0.721 (0.697 / 0.680) | 0.742 / 0.729 | 17% / 18% |
+
+- What works: hits, blocks, counter hits and openers come back at 0.8–0.87 F1. Counts are off by about 15% per query, which is good enough for "how often" stats. Whiff queries are the weak spot (recall 0.46–0.48), the transcript's own weak spot. Punish cannot be searched from the video: the transcript has no punish output (the chain's banner reader would add it).
+
+**State labels** (`model/state_embed.py labels`, CPU, 30 s; `search/state/<stem>.npz`): per 7.5 Hz tubelet, the log row at its middle frame:
+- per side: x, y, HP / 420, facing, and a class: knockdown (B/F/V Down loop/down/bound, QuickDown, the wake-up), hitstun (other damage states, throw tech), blockstun (guard states), attacking (any move), airborne, or neutral;
+- the distance, and whether each side is cornered (within 0.3 of a wall and nearer to it than the opponent).
+- Raw x drifts after wallbreaks: stage sections are centred on multiples of 1.6 (x 10^6 units), with walls at ±1.515. `stage_centre` picks the section by a Viterbi path over that grid. It agrees on 99.6% of the tubelets in segments where both walls are touched. Afterwards 0.1% of live tubelets fall outside the walls (players flying between sections in the wallbreak transition); those are dropped.
+- The logs have no tension or burst values, so those are not in the state. The HUD's tension reading is an input.
+
+**Model** (`model/state_embed.py train | eval | predict | similar`):
+- Video tower: per tubelet, the transcript's frozen V-JEPA 2 tokens (scene and both player squares, plus the 2×2 grid) and the HUD/position aux. They go through a 2-layer transformer over 16 tubelets (2.1 s) centred on the moment, and the centre token becomes a 128-d embedding.
+- State tower: an MLP over the state vector.
+- Loss: symmetric InfoNCE over batches of 1,024 training tubelets (CLIP-style); `--sup 1` adds supervised state heads on the video embedding.
+- Training: 40 × 300 steps, 4–6 min per run, with all training tokens held on the GPU (8.4 GB).
+- Checks on the test fold, against frozen embeddings:
+  - probes fitted on 150k tubelets of 200 training replays (linear, and a 2-layer MLP);
+  - situation retrieval: 4,000 query moments, their top-10 nearest test moments from other replays, and how often those share the query's logged joint class (P1 class, P2 class; random 0.084), corner state and distance. Nearest neighbours in the logged state vector itself get a joint class of 1.00.
+
+| embedding (old / new) | class per side (MLP probe) | balanced | who is hit | corner | distance MAE / R² (old) | retrieval@10: joint class | corner (old) | Δ distance (old) |
+|---|---|---|---|---|---|---|---|---|
+| raw tokens, PCA 256, no tower (`raw`) | 0.757 / 0.740 | 0.72 / 0.70 | 0.864 / 0.857 | 0.846 / 0.841 | 0.096 / 0.79 | 0.345 / 0.325 | 0.64 | 0.18 |
+| CLIP only (`clip`) | 0.868 / 0.852 | 0.84 / 0.83 | 0.963 / 0.958 | 0.927 / 0.926 | 0.049 / 0.94 | 0.553 / 0.537 | 0.86 | 0.08 |
+| supervised heads only (`sup`) | 0.899 / 0.885 | 0.88 / 0.87 | 0.971 / 0.967 | 0.935 / 0.933 | 0.055 / 0.93 | **0.752 / 0.721** | 0.91 | 0.16 |
+| **CLIP + supervised (`clip_sup`)** | **0.899 / 0.885** | 0.88 / 0.87 | **0.972 / 0.970** | **0.936 / 0.936** | 0.051 / 0.94 | 0.662 / 0.643 | 0.90 | **0.09** |
+| `clip_sup`, window 32 (batch 512) | 0.903 / 0.888 | 0.89 / 0.87 | 0.975 / 0.974 | 0.944 / 0.941 | 0.050 / 0.94 | 0.672 / 0.646 | 0.90 | 0.10 |
+| `clip_sup`, batch 512 (its control) | 0.896 / 0.883 | 0.88 / 0.86 | 0.971 / 0.969 | 0.935 / 0.936 | 0.051 / 0.93 | 0.667 / 0.642 | 0.90 | 0.09 |
+| `clip`, window 8 | 0.861 / 0.845 | 0.84 / 0.82 | 0.954 / 0.948 | 0.914 / 0.910 | 0.052 / 0.93 | 0.548 / 0.530 | 0.85 | 0.08 |
+
+- Per class (`clip_sup`, MLP probe, old, P1/P2): neutral 0.86, attacking 0.92, blockstun 0.91, hitstun 0.93, knockdown 0.87, airborne 0.80. Stage x R² 0.90, HP MAE 0.024 of the bar.
+- The tower is what does the work: a linear probe goes from 0.717 on the raw tokens to 0.899 with the tower.
+- CLIP alone gives the best distance retrieval. The supervised heads give the best class retrieval, but they lose the distance (Δ 0.16). Together they get close to the best of both.
+- `clip_sup` is the state stream used by the index and the habits. A 32-tubelet window adds about 0.005, within noise (validation tie).
+- `similar --name clip_sup --stem S --time m:ss.s` lists moments like the given one in other replays (val + test embeddings from `predict`, 90 MB). Example: P1 blocking in the corner at distance 0.18 returns five corner-blockstun moments at distance 0.16–0.25 and one P2-corner hitstun.
+
+**Habits** (`search_index.py habits --state clip_sup`, per character, test fold):
+- Wake-ups (from the state stream: the end of a knockdown that is not followed by another hit). The option is the side's first event from 8 frames before to 45 after, or, without one, what the state shows: blocks, jumps, gets hit or waits.
+  - The predicted wake-ups match the logged ones (±16 frames): precision 0.89, recall 0.85. On matched pairs the option is the same 0.67 of the time.
+- Blocked strings (≥ 2 consecutive blocked moves of one side, each within 40 frames). The option is the attacker's next move within 60 frames, or "stops".
+  - Found: precision 0.76, recall 0.83. Option the same on matched pairs 0.86.
+- Per character, predicted vs logged option shares, as total variation distance weighted by situations: wake-up 0.092 by category, 0.215 by move; blocked string 0.081 / 0.169. For scale: two random halves of the same character's logged replays differ by 0.33 / 0.44 (move). So the model's error is smaller than the spread between samples of players, though the halves are smaller samples.
+- Bias: the model reports "no move" after 0.63 of wake-ups where the log has 0.56 (old and new). It misses wake-up moves the way the transcript misses whiffs.
+- Examples (log / pred top options):
+  - Sol wake-up: blocks 0.34 / 0.30, waits 0.12 / 0.20, jumps 0.09 (log), 2P 0.07 (pred).
+  - Chipp after a blocked string: stops 0.30 / 0.33, 236S 236K 0.17 / 0.17, 236S 236S 0.15 / 0.15.
+  - A.B.A after a blocked string: 214K 0.26 / 0.24.
+  - Timestamps per option: `model/results_exp_se_habits_clip_sup.json`.
+
+Costs: about 1 GPU-hour for all of point 4 (9 trainings, 4–6 min each, plus evaluations of about 30 s); no new feature extraction. Disk: 104 MB under `ggst_dataset/search/`, 10 MB per tower checkpoint.
+
+Not solved:
+- Whiff search (recall 0.46–0.48) and wake-up moves are limited by the transcript, not by the index.
+- Neutral, walking and dashing are one class here (the inputs model does not split them reliably: it reads walks worse than the walk state alone would).
+- There is no tension or burst in the state: the log has neither.
+- Habits are per character, not per player: the test fold has no player ids. Groups are option shares, not learned clusters.
+- No punish key; the index is test-fold only (no index over unlabeled VODs yet); not in the app.
+- The index and state stream cover only val / test; no pipeline for unlabeled VODs; not in `recognize.py`, the app or the CPU server; not tried on 720p30 copies; single seed. `state_meta.json` still holds an unused `wall` value from the first absolute-x estimate (corners come from `stage_centre` / `load_state`).
+
+Verification caveats (independent check, CPU only):
+- Reproduced: move + outcome F1 0.787 / 0.788 over 1,352 / 753 queries; `clip_sup` joint-class retrieval@10 0.658 / 0.647 with all test replays as the pool (reported 0.662 / 0.643). No leakage found (probes fitted on training replays, positions from the player net that never saw the test replays).
+- The index F1 is optimistic: only keys with ≥ 5 logged results become queries, so wrong predictions under rare or log-absent keys are never counted. Over all (character, move, outcome) keys, `(rare)` excluded: P 0.788 / 0.789, R 0.726 / 0.711, **F1 0.756 / 0.748**.
+- The random baseline (0.08) is weak. Random tubelets from other replays with the same joint class predicted by the `sup` heads already reach 0.597 / 0.604, so the embedding adds about 0.05 over its own class heads.
+- The 0.899 / 0.885 class accuracy is an MLP probe. The class stream the index and habits actually use (the `sup` heads) is right 0.855 / 0.848 per side (P1 / P2) on old and 0.845 / 0.836 on new.
+- Habits: the split-half TV (0.33 / 0.44) is not a noise floor for predicted-vs-logged TV (0.22 / 0.17): the halves have half the samples, and predicted and logged shares are measured on largely the same situations. It does not show that the habit shares are accurate; the matched-pair agreement (0.67 wake-up, 0.86 blocked string) is the better number.
+
+### Language layer (2026-11)
+
+ROADMAP point 5, local part: match facts, prompts in Italian and English, and a grounding checker for LLM answers. No network, no GPU; it reads predictions that already exist. Which LLM provider (if any) may receive the facts is not decided.
+
+- **Scripts:** `model/lang_summary.py facts | run | check | verify` (pure Python, no torch); `model/lang_testdata.py` (CPU only, GPU hidden) rebuilds an `openers.json` in `recognize.py`'s schema for test-fold replays from the saved chain outputs (detector starts, v2 move-ensemble test probabilities, voted characters, banner reader), never the detections' log link, and copies that replay's transcript predictions and HUD parquet. Tests: `tests/test_lang_summary.py` (14, synthetic data, 0.2 s).
+- **Facts** (`facts.json`, `facts_<lang>.md`): rounds and winners from the HUD, opener timeline with damage, KO and counter / punish per opener, each player's opener mix, top opening moves and biggest combos. With the transcript: attack outcome rates, most used attacks, what counter-hit each player and what they were doing, habits (next move after their own combo, after getting comboed, after blocking, blocked strings, each with n). Every fact has m:ss.s video timestamps; the facts record every timestamp, move, percentage and count they show (a test checks it equals the rendering).
+- **Uncertain marks** (thresholds set by hand, not tuned): move p < 0.5, category p < 0.6 (alternatives listed), banner p < 0.6 ("unclear"), rare-class moves; rounds without a clean KO, with hearts disagreeing, a near double KO or an impossible first-to-2 sequence. Uncertain openers are left out of the top-move counts.
+- **Prompts** (`prompt_<lang>.json / .txt`): system prompt + facts, asking for a 2–4 sentence summary and 3–5 numbered coaching notes, each citing [m:ss.s]; no frame data, no moves or characters outside the facts, no new numbers. 6.7k–8.5k characters, about 2,000–2,570 input tokens per match (chars / 3.3 estimate, no tokenizer offline, ±30%).
+- **Providers:** `provider="none"` (the only one the CLI offers) writes the prompt. `ClaudeProvider` is a stub (model `claude-opus-5-5`, max_tokens, effort, server-side fallback configurable) that raises unless built with `enabled=True` **and** `GGST_LANG_ALLOW_NETWORK=1` is set; it has never been called, and the `anthropic` package is not installed. It sets `cache_control`, which is harmless but useless here: the ~400-token system prompt is below the minimum cacheable prefix.
+- **Checker** (`check_answer`, CLI `check <answer.md> <facts.json>`). Errors: timestamps not in the facts (±1.5 s), characters not in the match, moves not in the facts (notation, Throw / Burst / RC, English names incl. short forms), frame-data claims, percentages not in the facts, coaching notes without a timestamp, and a move named next to a timestamp where the facts have another move (one move and one time in the sentence). Warnings: counts not in the facts, the move / time mismatch with several moves or times in a sentence, the note count.
+
+Run on 6 test-fold replays (3 old, 3 new; `ggst_dataset/lang/<stem>/`, 1.6 MB), scored against the log (`verify`):
+- Round winners right on all 6. Openers without an uncertain mark match the logged opener and move within ±6 frames 146 of 170 (86%); uncertain ones 10 of 15, so on these 6 the p < 0.5 mark does not separate good from bad readings well.
+- Round winner rules on the whole HUD: train + val (870 replays, never looked at) 831 / 870 replays fully right; rounds without an uncertain mark 1,914 / 1,921 (99.6%), uncertain rounds 156 / 191. On the test fold 202 / 220 replays and 474 / 480 unmarked rounds, but the rules were changed while looking at test errors, so that is not a clean number.
+- Checker on hand-written answers for one replay: good en and good it pass with 0 errors; a bad en answer fails with 10 errors (invented 2:30.0, Sol, 6H twice, Gun Flame, "-5 on block", 55%, Throw at 0:22.4 and 6H at 1:12.5 where the facts have other moves, a note without a timestamp) and 1 warning.
+
+Verification caveats (independent check): no network call is possible and the tests pass. The checker catches invented m:ss timestamps (bracketed or not), invented notation (236236H), another character's move names (Volcanic Viper), a wrong move at a cited time and unknown characters. It misses:
+- lowercase or case-varied names ("gun flame", "sol badguy"), slang ("DP", "super") and other notations ("5HS", "6HS", "cS");
+- times written in seconds ("225 seconds in"), "N percent", numbers in words;
+- frame-data claims without numbers ("very unsafe, punish it");
+- a wrong match result or score in the summary ("P1 Asuka won 2-0" passes).
+
+Not solved:
+- The provider decision (what may leave the machine, which model); no real LLM answer has been generated or checked yet.
+- The checker gaps above, which matter before any real answer is shown to a user.
+- The uncertain threshold (p < 0.5) is not calibrated; recalibrate on val.
+- One prompt for a whole set (citations like [M2 1:23.4]) is not built; nothing is wired into `recognize.py`, the app or the CPU server.
