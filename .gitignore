@@ -38,3 +38,6 @@ Thumbs.db
 
 # opener service jobs (uploads, results)
 server/opener_service/work/
+
+# Gitea Actions build output
+dist-installer/

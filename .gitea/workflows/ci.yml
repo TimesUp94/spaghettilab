@@ -1,0 +1,45 @@
+# Gitea Actions CI on the self-hosted Windows runner (Vandelay, host mode: tools from the host).
+# Python uses the host's dev venv (C:\Projects\replanal\.venv) for its packages, with PYTHONPATH on
+# this checkout so the code under test is the checkout's, not the dev tree's editable install.
+# The Rust tests are skipped: they read the live C:/Projects/replanal/output/analysis.db.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  python:
+    runs-on: windows
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: pytest
+        shell: pwsh
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          $env:PYTHONPATH = "$PWD"
+          & C:\Projects\replanal\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
+
+  app:
+    runs-on: windows
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: npm ci
+        shell: pwsh
+        working-directory: app
+        run: npm ci --no-audit --no-fund
+      - name: TypeScript
+        shell: pwsh
+        working-directory: app
+        run: npx tsc --noEmit
+      - name: cargo check
+        shell: pwsh
+        working-directory: app/src-tauri
+        env:
+          CARGO_TARGET_DIR: C:\Projects\gitearunner\cache\spaghettilab-target
+        run: cargo check --locked

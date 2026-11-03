@@ -1,0 +1,41 @@
+# Signed Windows installer (NSIS) + updater files, built on the self-hosted Windows runner (Vandelay).
+# Manual, or on a v* tag. The updater signing key is read from the runner host
+# (%USERPROFILE%\.tauri\spaghettilab.key, as release.sh does), or from the TAURI_SIGNING_PRIVATE_KEY
+# secret when the repo has one. The installer and its .sig are uploaded as a run artifact; publishing
+# a release (latest.json, GitHub release) stays with release.sh.
+name: Build Windows installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  nsis:
+    runs-on: windows
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: npm ci
+        shell: pwsh
+        working-directory: app
+        run: npm ci --no-audit --no-fund
+      - name: tauri build
+        shell: pwsh
+        working-directory: app
+        env:
+          CARGO_TARGET_DIR: C:\Projects\gitearunner\cache\spaghettilab-target
+          SECRET_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if ($env:SECRET_KEY) { $env:TAURI_SIGNING_PRIVATE_KEY = $env:SECRET_KEY }
+          else { $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw "$env:USERPROFILE\.tauri\spaghettilab.key" }
+          $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ""
+          npm run tauri build -- --bundles nsis
+          New-Item -ItemType Directory -Force ..\dist-installer | Out-Null
+          Copy-Item "$env:CARGO_TARGET_DIR\release\bundle\nsis\*" ..\dist-installer\
+          Get-ChildItem ..\dist-installer
+      - uses: actions/upload-artifact@v3
+        with:
+          name: spaghetti-lab-windows
+          path: dist-installer/
+          retention-days: 30
