@@ -68,53 +68,45 @@ def detect(video: Path, parquet: Path, fps: float):
             for i, s, sc in vo.peaks(vo.predict(net, X, im), vo.THR)]
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("video", type=Path)
-    ap.add_argument("--out", type=Path)
-    ap.add_argument("--analysis", type=Path, help="an existing analyze_replay output folder")
-    ap.add_argument("--device", choices=["cuda", "cpu"], help="default: the GPU when there is one")
-    ap.add_argument("--light", action="store_true", help="one move net, no frame-shift averaging (CPU servers)")
-    ap.add_argument("--threads", type=int, help="CPU threads for the networks (default: torch's)")
-    a = ap.parse_args()
-    if a.device:
-        os.environ["GGST_DEVICE"] = a.device
-    low_priority()
+def run_chain(video: Path, out: Path, given: Path | None = None, light: bool = False, stage=None) -> tuple[dict, Path]:
+    """The whole opener chain on one video -> (the openers.json document, the HUD parquet path); writes
+    <out>/openers.json. stage(name) is called as each part starts: hud, detect, moves."""
     import torch
-    if a.threads:
-        torch.set_num_threads(a.threads)
     import banner_reader as br
     import video_crops as vc
     import video_moves as vm
     import video_scene as vs
-    out = a.out or a.video.with_suffix("")
+    stage = stage or (lambda name: None)
     out.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
-    fps, w, h = vc.video_format(a.video)
-    pq_path = analysis(a.video, out, a.analysis)
-    dets = detect(a.video, pq_path, fps)
+    fps, w, h = vc.video_format(video)
+    stage("hud")
+    pq_path = analysis(video, out, given)
+    stage("detect")
+    dets = detect(video, pq_path, fps)
     print(f"{len(dets)} combo starts found ({time.time() - t0:.0f}s)", flush=True)
+    stage("moves")
     cdir = out / "crops"
     if (cdir / "index.json").exists():
         (cdir / "index.json").unlink()
-    vc.process((a.video.stem, str(a.video), dets, str(cdir), str(OUT / "video_players_final.pt")))
+    vc.process((video.stem, str(video), dets, str(cdir), str(OUT / "video_players_final.pt")))
     idx = json.loads((cdir / "index.json").read_text())
     players_ck = torch.load(OUT / "video_players_final.pt", map_location="cpu")
     lp = np.array(idx["chars_logp"])
     chars = (players_ck["chars"][int(lp[0].argmax())], players_ck["chars"][int(lp[1].argmax())])
     net, ck = vm.load(OUT / "video_moves_final.pt")
     shifts = vm.TTA
-    if a.light:
+    if light:
         net, shifts = (net[0] if isinstance(net, list) else net), [0]
     sdir = out / "scene"
     if ck.get("scene"):
         (sdir / "done").unlink(missing_ok=True)
-        vs.process((a.video.stem, str(a.video), str(cdir), str(sdir)))
+        vs.process((video.stem, str(video), str(cdir), str(sdir)))
     items = [dict(stem="v", file=str(cdir / d["file"]), frame=d["frame"], side=d["side"], score=d["score"], row=None,
                   scene=str(sdir / d["file"])) for d in idx["dets"]]
     P = vm.predict(net, items, ck["voc"], {"v": chars}, shifts=shifts)
     voc = ck["voc"]
-    hk = {(d["frame"], d["side"]): p for d, p in zip(dets, br.hit_kind(a.video, dets))}
+    hk = {(d["frame"], d["side"]): p for d, p in zip(dets, br.hit_kind(video, dets))}
     print(f"banners read ({time.time() - t0:.0f}s)", flush=True)
     res = []
     for i, it in enumerate(items):
@@ -133,10 +125,29 @@ def main():
             hit_kind=br.CLASSES[int(hk[(it["frame"], it["side"])].argmax())],
             hit_kind_p=round(float(hk[(it["frame"], it["side"])].max()), 3),
         ))
-    doc = dict(video=str(a.video), fps=fps, size=[w, h], characters={"P1": chars[0], "P2": chars[1]},
-               device=device(), light=a.light, seconds=round(time.time() - t0, 1), openers=res)
+    doc = dict(video=str(video), fps=fps, size=[w, h], characters={"P1": chars[0], "P2": chars[1]},
+               device=device(), light=light, seconds=round(time.time() - t0, 1), openers=res)
     (out / "openers.json").write_text(json.dumps(doc, indent=1))
-    print(f"{len(res)} openers -> {out / 'openers.json'} ({time.time() - t0:.0f}s)")
+    print(f"{len(res)} openers -> {out / 'openers.json'} ({time.time() - t0:.0f}s)", flush=True)
+    return doc, pq_path
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("video", type=Path)
+    ap.add_argument("--out", type=Path)
+    ap.add_argument("--analysis", type=Path, help="an existing analyze_replay output folder")
+    ap.add_argument("--device", choices=["cuda", "cpu"], help="default: the GPU when there is one")
+    ap.add_argument("--light", action="store_true", help="one move net, no frame-shift averaging (CPU servers)")
+    ap.add_argument("--threads", type=int, help="CPU threads for the networks (default: torch's)")
+    a = ap.parse_args()
+    if a.device:
+        os.environ["GGST_DEVICE"] = a.device
+    low_priority()
+    import torch
+    if a.threads:
+        torch.set_num_threads(a.threads)
+    run_chain(a.video, a.out or a.video.with_suffix(""), a.analysis, a.light)
 
 
 if __name__ == "__main__":

@@ -63,7 +63,7 @@ never released; weights stay private until decided otherwise.
   - whiffs (found 0.57) and interrupted moves (0.64);
   - starts < 8 frames apart (0.47): one start per tubelet;
   - throws (0.68 F1);
-  - not wired into `recognize.py` or the app.
+  - wired into `model/lab_analyze.py` (`lab_result.json`, `model/LAB_RESULT.md`) for GPU machines; not on the CPU server.
   - Next candidates: 15 Hz tokens or two slots per tubelet; a finer grid or a crop around the
     attacker; one combined feature pass instead of two.
 

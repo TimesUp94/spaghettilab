@@ -184,7 +184,7 @@ Not solved yet:
 - Throws (0.68 F1) and button/stance (0.71 / 0.69) lag the other levels; rare moves are scored as the `(rare)` catch-all only.
 - Each 16-frame clip is encoded on its own (one-sided context at clip edges); the scene view is squashed, not letterboxed; during teleports, overlaps and cinematics both player squares can show the same player.
 - Labels: G0/G1 object blocks and contact credit are noisier; HC Sniper shots and some Ramlethal openers are mislabelled in `openers.parquet` (build/moves bugs, not fixed).
-- Not in `recognize.py`, the app or the CPU server; the feature pass needs a GPU (ROADMAP point 6).
+- Wired into `model/lab_analyze.py` (2026-11-04: `lab_result.json`, see `model/LAB_RESULT.md`): it runs on a single new video only with a GPU, so not on the CPU server; the feature pass needs a GPU (ROADMAP point 6). For a new video the feature pass reproduces the dataset features (cosine 1.000, checked on the first 2 s of a test replay); the head on the CPU reproduces the saved test predictions event for event.
 
 ### Inputs from video (2026-11)
 
@@ -306,7 +306,7 @@ Not solved:
 - There is no tension or burst in the state: the log has neither.
 - Habits are per character, not per player: the test fold has no player ids. Groups are option shares, not learned clusters.
 - No punish key; the index is test-fold only (no index over unlabeled VODs yet); not in the app.
-- The index and state stream cover only val / test; no pipeline for unlabeled VODs; not in `recognize.py`, the app or the CPU server; not tried on 720p30 copies; single seed. `state_meta.json` still holds an unused `wall` value from the first absolute-x estimate (corners come from `stage_centre` / `load_state`).
+- The index covers only val / test. `lab_analyze.py` computes the state stream of a new video with the transcript (GPU only), and the UIs filter its events with the presets of `model/LAB_RESULT.md`. There is no index over many VODs yet; not tried on 720p30 copies; single seed. `state_meta.json` still holds an unused `wall` value from the first absolute-x estimate (corners come from `stage_centre` / `load_state`).
 
 Verification caveats (independent check, CPU only):
 - Reproduced: move + outcome F1 0.787 / 0.788 over 1,352 / 753 queries; `clip_sup` joint-class retrieval@10 0.658 / 0.647 with all test replays as the pool (reported 0.662 / 0.643). No leakage found (probes fitted on training replays, positions from the player net that never saw the test replays).
@@ -341,4 +341,4 @@ Not solved:
 - The provider decision (what may leave the machine, which model); no real LLM answer has been generated or checked yet.
 - The checker gaps above, which matter before any real answer is shown to a user.
 - The uncertain threshold (p < 0.5) is not calibrated; recalibrate on val.
-- One prompt for a whole set (citations like [M2 1:23.4]) is not built; nothing is wired into `recognize.py`, the app or the CPU server.
+- One prompt for a whole set (citations like [M2 1:23.4]) is not built. The facts and prompts of one match are in `lab_analyze.py`'s `lab_result.json` (CPU server included); no LLM is called.

@@ -3,7 +3,8 @@
 that is refused at once (the caller gets a retry hint) instead of piling up: the server's CPU is
 shared with the rest of the platform, so the cap is the point.
 
-Each job runs as a subprocess (the opener chain, `recognize.py`), niced, pinned to `cpus` when
+Each job runs as a subprocess (`lab_analyze.py`: the opener chain, the facts, and the match transcript when
+the service has it, see `capabilities`), niced, pinned to `cpus` when
 given (Linux: the pin is inherited by ffmpeg and the pipeline too) and limited to `threads`
 threads, and is killed past `timeout_s`. Job state is kept in memory and in `<workdir>/<id>/job.json`,
 so finished results survive a restart; jobs that were queued or running at a restart fail.
@@ -24,8 +25,11 @@ from pathlib import Path
 QUEUED, RUNNING, DONE, FAILED, CANCELLED = "queued", "running", "done", "failed", "cancelled"
 ACTIVE = (QUEUED, RUNNING)
 
-# progress lines recognize.py prints, in order -> stage name
+# lab_analyze.py prints `stage: <name>`; the older recognize.py markers are still understood
+STAGE_PREFIX = "stage: "
+STAGE_NAMES = ("hud", "detect", "moves", "transcript", "facts", "done")
 STAGES = [("running the CV pipeline", "hud"), ("combo starts found", "moves"), ("openers ->", "done")]
+RESULT_FILES = ("lab_result.json", "openers.json")      # what a job keeps; the first that exists is the result
 
 
 MAX_DURATION_S = int(os.environ.get("OPENERS_MAX_DURATION_S", 900))
@@ -49,6 +53,7 @@ class Limits:
     timeout_s: int = 1800
     ttl_s: int = 24 * 3600
     light: bool = True
+    transcript: bool = False        # OPENERS_TRANSCRIPT=1: run the transcript when there is a GPU
 
     @classmethod
     def from_env(cls) -> "Limits":
@@ -58,7 +63,7 @@ class Limits:
                    per_owner=int(e("OPENERS_PER_OWNER", 1)), threads=int(e("OPENERS_THREADS", 2)),
                    cpus=[int(c) for c in cpus.split(",")] if cpus else None,
                    timeout_s=int(e("OPENERS_TIMEOUT_S", 1800)), ttl_s=int(float(e("OPENERS_TTL_H", 24)) * 3600),
-                   light=e("OPENERS_LIGHT", "1") != "0")
+                   light=e("OPENERS_LIGHT", "1") != "0", transcript=e("OPENERS_TRANSCRIPT", "0") == "1")
 
 
 @dataclass
@@ -82,17 +87,54 @@ class Job:
         return d
 
 
-def chain_command(video: Path, out: Path, limits: Limits) -> list[str]:
-    """The opener chain for one video (CPU, light unless OPENERS_LIGHT=0)."""
-    script = Path(__file__).resolve().parents[2] / "tools" / "ggst_logger" / "model" / "recognize.py"
-    cmd = [sys.executable, str(script), str(video), "--out", str(out), "--device", os.environ.get("GGST_DEVICE", "cpu"),
-           "--threads", str(limits.threads)]
+MODEL_DIR = Path(__file__).resolve().parents[2] / "tools" / "ggst_logger" / "model"
+TRANSCRIPT_WEIGHTS = ("video_transcript_exp_ens5grid.pt", "video_players_test.pt", "state_embed_exp_se_clip_sup.pt",
+                      "transcript_grid_pca.npz")
+_GPU: bool | None = None
+
+
+def gpu_available() -> bool:
+    """A CUDA GPU torch can use (checked once, in a subprocess: the service itself never imports torch)."""
+    global _GPU
+    if _GPU is None:
+        import subprocess
+        try:
+            r = subprocess.run([sys.executable, "-c", "import torch; print(torch.cuda.is_available())"],
+                               capture_output=True, text=True, timeout=120)
+            _GPU = r.stdout.strip().endswith("True")
+        except Exception:
+            _GPU = False
+    return _GPU
+
+
+def transcript_weights() -> bool:
+    """The transcript's weights are in GGST_MODEL_DIR. Without GGST_MODEL_DIR (the development PC's data
+    folder) lab_analyze checks for itself and falls back to no transcript."""
+    d = os.environ.get("GGST_MODEL_DIR")
+    return not d or all((Path(d) / f).exists() for f in TRANSCRIPT_WEIGHTS)
+
+
+def capabilities(limits: Limits) -> dict:
+    """What a job of this service produces (lab_result.json `capabilities`): the transcript only with
+    OPENERS_TRANSCRIPT=1, its weights and a GPU."""
+    return dict(openers=True, transcript=bool(limits.transcript and transcript_weights() and gpu_available()),
+                facts=True)
+
+
+def chain_command(video: Path, out: Path, limits: Limits, transcript: bool = False) -> list[str]:
+    """lab_analyze for one video: openers (light unless OPENERS_LIGHT=0) and facts, on the CPU; with the
+    transcript, everything on the GPU (GGST_DEVICE overrides)."""
+    dev = os.environ.get("GGST_DEVICE") or ("cuda" if transcript else "cpu")
+    cmd = [sys.executable, str(MODEL_DIR / "lab_analyze.py"), str(video), "--out", str(out), "--device", dev,
+           "--threads", str(limits.threads), "--transcript", "on" if transcript else "off"]
     return cmd + (["--light"] if limits.light else [])
 
 
 class Queue:
-    def __init__(self, workdir: Path, limits: Limits, command=chain_command):
+    def __init__(self, workdir: Path, limits: Limits, command=chain_command, caps: dict | None = None):
+        """command(video, out, limits, transcript) -> argv; caps: the capabilities (default: probed once)."""
         self.workdir, self.limits, self.command = Path(workdir), limits, command
+        self._caps = caps
         self.workdir.mkdir(parents=True, exist_ok=True)
         self.jobs: dict[str, Job] = {}
         self.waiting: asyncio.Queue[str] = asyncio.Queue()
@@ -132,6 +174,11 @@ class Queue:
         return dict(running=n[RUNNING], queued=n[QUEUED], max_concurrent=self.limits.max_concurrent,
                     max_queue=self.limits.max_queue)
 
+    def capabilities(self) -> dict:
+        if self._caps is None:
+            self._caps = capabilities(self.limits)
+        return dict(self._caps)
+
     def view(self, job_id: str) -> dict | None:
         job = self.jobs.get(job_id)
         if job is None:
@@ -140,9 +187,11 @@ class Queue:
         return job.public(q.index(job.id) + 1 if job.id in q else None)
 
     def result_path(self, job_id: str) -> Path | None:
+        """lab_result.json of a finished job (openers.json for a job finished before lab_analyze)."""
         job = self.jobs.get(job_id)
-        p = self.workdir / job_id / "out" / "openers.json"
-        return p if job and job.status == DONE and p.exists() else None
+        if not job or job.status != DONE:
+            return None
+        return next((p for n in RESULT_FILES if (p := self.workdir / job_id / "out" / n).exists()), None)
 
     # ---- admission ---------------------------------------------------------------------------
 
@@ -228,12 +277,13 @@ class Queue:
             if job.status == CANCELLED:
                 return
         out = self.workdir / job.id / "out"
+        transcript = (await asyncio.to_thread(self.capabilities))["transcript"]
         log = open(self.workdir / job.id / "chain.log", "wb")
         env = dict(os.environ, OMP_NUM_THREADS=str(self.limits.threads), MKL_NUM_THREADS=str(self.limits.threads),
                    OPENBLAS_NUM_THREADS=str(self.limits.threads), VM_WORKERS="0", PYTHONUNBUFFERED="1",
                    PYTHONIOENCODING="utf-8")
         proc = await asyncio.create_subprocess_exec(
-            *self.command(Path(job.video), out, self.limits), stdout=asyncio.subprocess.PIPE,
+            *self.command(Path(job.video), out, self.limits, transcript), stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT, env=env, preexec_fn=_limit_fn(self.limits) if os.name != "nt" else None,
             start_new_session=os.name != "nt")
         self.procs[job.id] = proc
@@ -250,11 +300,15 @@ class Queue:
             log.close()
         if job.status == CANCELLED:
             return
-        if rc == 0 and (out / "openers.json").exists():
+        res = next((p for n in RESULT_FILES if (p := out / n).exists()), None)
+        if rc == 0 and res is not None:
             job.status, job.stage = DONE, "done"
             try:
-                doc = json.loads((out / "openers.json").read_text())
+                doc = json.loads(res.read_text(encoding="utf-8"))
                 job.meta.update(openers=len(doc.get("openers", [])), characters=doc.get("characters"))
+                if "capabilities" in doc:
+                    job.meta.update(capabilities=doc["capabilities"],
+                                    events=len((doc.get("transcript") or {}).get("events", [])))
             except Exception:
                 pass
         else:
@@ -263,7 +317,13 @@ class Queue:
     async def _follow(self, job: Job, proc, log):
         async for line in proc.stdout:
             log.write(line)
-            text = line.decode("utf-8", "replace")
+            text = line.decode("utf-8", "replace").strip()
+            if text.startswith(STAGE_PREFIX):
+                stage = text[len(STAGE_PREFIX):].strip()
+                if stage in STAGE_NAMES and stage != job.stage:
+                    job.stage = stage
+                    self._save(job)
+                continue
             for marker, stage in STAGES:
                 if marker in text:
                     job.stage = stage
@@ -277,7 +337,7 @@ class Queue:
                 continue
             if p.name == "out":
                 for q in p.iterdir():
-                    if q.name != "openers.json":
+                    if q.name not in RESULT_FILES:
                         shutil.rmtree(q, ignore_errors=True) if q.is_dir() else q.unlink(missing_ok=True)
             else:
                 shutil.rmtree(p, ignore_errors=True) if p.is_dir() else p.unlink(missing_ok=True)

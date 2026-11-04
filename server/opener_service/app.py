@@ -1,4 +1,6 @@
-"""Opener service: combo openers of a Guilty Gear Strive match video, on a CPU server.
+"""Opener service: the Spaghetti Lab analysis of a Guilty Gear Strive match video (lab_analyze.py: combo
+openers, match facts, and the move transcript when the server has a GPU and OPENERS_TRANSCRIPT=1), on a CPU
+server.
 
 Not public: it trusts the caller (FGCBackend) to have authenticated the user. The backend sends
 the shared secret in X-Openers-Secret and the user's id in X-Owner-Id; it also keeps the
@@ -9,12 +11,13 @@ per-user daily quota. This service keeps the CPU cap (see jobs.py).
 POST   /jobs              multipart `video` -> 202 {id, status, position}; 429 / 503 + Retry-After
 POST   /jobs/url          {"url", "filename"}: a presigned link (OPENERS_URL_HOSTS), fetched when the job starts
 GET    /jobs/{id}         status, stage, position in the queue, error
-GET    /jobs/{id}/result  openers.json of a finished job
+GET    /jobs/{id}/result  lab_result.json of a finished job (spaghetti-lab-result/1, tools/ggst_logger/model/LAB_RESULT.md)
 DELETE /jobs/{id}         cancel a queued or running job
-GET    /health            queue load (no secret needed)
+GET    /health            queue load and capabilities (no secret needed)
 """
 from __future__ import annotations
 
+import asyncio
 import hmac
 import os
 import shutil
@@ -47,6 +50,7 @@ def make_app(queue: Queue | None = None, secret: str | None = None) -> FastAPI:
     async def lifespan(app):
         app.state.queue = queue or Queue(WORKDIR, Limits.from_env())
         app.state.queue.start()
+        asyncio.get_running_loop().run_in_executor(None, app.state.queue.capabilities)   # probe the GPU once, off the loop
         yield
         await app.state.queue.stop()
 
@@ -72,7 +76,8 @@ def make_app(queue: Queue | None = None, secret: str | None = None) -> FastAPI:
 
     @app.get("/health")
     async def health(request: Request):
-        return request.app.state.queue.stats()
+        q: Queue = request.app.state.queue
+        return dict(q.stats(), capabilities=await asyncio.to_thread(q.capabilities))
 
     @app.post("/jobs", status_code=202)
     async def create(request: Request, video: UploadFile, owner: str = Depends(caller)):

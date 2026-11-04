@@ -339,7 +339,7 @@ def infer(net, store, r):
         acc = None
         for m in nets:
             m.eval()
-            with torch.autocast("cuda", dtype=torch.bfloat16):
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=DEV == "cuda"):
                 out = m(V[None], A[None], cme, cop)
             pr = {k: F.softmax(v[0].float(), -1) for k, v in out.items()}
             acc = pr if acc is None else {k: acc[k] + pr[k] for k in acc}
@@ -360,7 +360,8 @@ def candidates(net, store, voc, chars, min_p=0.05):
                                 category=cat, char_move=mv, char=chars[store.vote[r, s]],
                                 normal=NORMALS[int(P["normal"][t].argmax())] if cat == "normal" else None,
                                 outcome=OUTCOMES[int(P["outcome"][t].argmax())],
-                                p_cat=float(P["cat"][t, 1:].max() / max(pe[t], 1e-6)), p_move=float(P["move"][t].max())))
+                                p_cat=float(P["cat"][t, 1:].max() / max(pe[t], 1e-6)), p_move=float(P["move"][t].max()),
+                                p_out=float(P["outcome"][t].max())))
     return out
 
 
