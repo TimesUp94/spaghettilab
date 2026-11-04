@@ -31,7 +31,7 @@ web / app ──JWT──▶ FGCBackend /api/spaghetti-lab/openers ──secret�
 | `OPENERS_MAX_DURATION_S` | 900 | video length (one set, not a whole VOD) |
 | `OPENERS_TTL_H` | 24 | results are kept this long |
 | `OPENERS_URL_HOSTS` | none | hosts `/jobs/url` may fetch from (https only, no redirects), e.g. `fra1.digitaloceanspaces.com` |
-| `GGST_LANG_PROVIDER` | none | `claude`: an AI summary + coaching notes per match (Claude Opus 5.5, Italian and English) from the facts document only, with `ANTHROPIC_API_KEY` set. Every answer is checked against the facts and withheld if it cites anything that isn't there (`ai_summary` in the result). About 2.5k input + 2–4k output tokens (thinking included) per language: roughly $0.05–0.09 per language at $4/$20 per MTok |
+| `GGST_LANG_PROVIDER` | none | `claude`: an AI summary + coaching notes per match (Claude Opus 5.5, Italian and English) from the facts document only, with `ANTHROPIC_API_KEY` set. Every answer is checked against the facts; a failed draft gets one repair call, and is withheld if it still cites anything that isn't there (`ai_summary` in the result). Non-match videos and runs with no openers make no call. About 2.5k input + 2–4k output tokens (thinking included) per language: roughly $0.05–0.09 per language at $4/$20 per MTok |
 | `OPENERS_TRANSCRIPT` | 0 | `1`: run the transcript too, when torch sees a CUDA GPU and the transcript weights are in `GGST_MODEL_DIR` (checked once at start, in a subprocess; `/health` shows the result). Then the whole analysis runs on the GPU |
 
 Analyses run niced (+10). With the defaults the service uses at most 2 cores and up to about

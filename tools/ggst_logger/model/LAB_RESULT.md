@@ -195,6 +195,8 @@ with `ANTHROPIC_API_KEY` on the server); `capabilities.ai_summary` is true when 
   `note_without_timestamp`, `move_time_mismatch`, ...), or a plain string when the call itself failed. Readers must
   handle both.
 - One call per language, from the facts document only (the same prompt as `prompts.<lang>`).
+- A draft that fails the check gets one repair call with the problems listed (`repaired: true`, `usage_all` lists both calls). A run with no openers makes no call and has no `ai_summary`.
+- A video with under 5 s of round-timer readings isn't a match: `lab_analyze.py` exits with code 3 right after the HUD pass, before the models and the summary, so the job ends `failed` and the analysis is given back.
 - Every answer goes through `lang_summary.check_answer`: an answer that cites a timestamp, move, character,
   percentage or frame data that isn't in the facts is **withheld** (`text: null`, `grounded: false`, the
   problems in `errors`). UIs show `text` only when `grounded` is true, label it as AI-written, and keep the

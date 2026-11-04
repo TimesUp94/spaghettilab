@@ -204,3 +204,52 @@ def test_ai_summary_grounding_gate():
     res = la.ai_summary(doc, "claude", langs=("en",), prov=Fake({"en": RuntimeError("refused: cyber")}))
     assert not res["langs"]["en"]["grounded"] and "refused" in res["langs"]["en"]["errors"][0]
     assert la.ai_summary(doc, "none") is None
+
+
+def test_ai_summary_repair_and_skip():
+    """A failed draft gets one repair call; a second failure is withheld; no openers means no call at all."""
+    import json as _json
+    from pathlib import Path as _P
+    import lab_analyze as la
+    doc = _json.loads((_P(la.__file__).parent / "fixtures" / "lab_result_sample.json").read_text(encoding="utf-8"))
+    t = doc["facts"]["index"]["times"]
+    a = t[0]["t"] if "t" in t[0] else la.ls.ts(t[0]["t_s"])
+    good = f"## Coaching notes\n1. Note [{a}].\n2. Note [{a}].\n3. Note [{a}].\n"
+    bad = f"## Coaching notes\n1. At [59:59.0] nothing happened.\n"
+
+    class Seq:
+        model = "fake"
+        def __init__(self, *answers): self.answers, self.calls, self.prompts = list(answers), 0, []
+        def complete(self, prompt, out_dir=None):
+            self.calls += 1
+            self.prompts.append(prompt["user"])
+            return self.answers.pop(0)
+
+    p = Seq(bad, good)
+    r = la.ai_summary(doc, "claude", langs=("en",), prov=p)["langs"]["en"]
+    assert p.calls == 2 and r["grounded"] and r["repaired"] and "59:59" in p.prompts[1]
+    p = Seq(bad, bad)
+    r = la.ai_summary(doc, "claude", langs=("en",), prov=p)["langs"]["en"]
+    assert p.calls == 2 and not r["grounded"] and r["text"] is None
+    p = Seq(good)
+    r = la.ai_summary(doc, "claude", langs=("en",), prov=p)["langs"]["en"]
+    assert p.calls == 1 and r["grounded"] and not r["repaired"]
+    p = Seq()
+    assert la.ai_summary(dict(doc, openers=[]), "claude", langs=("en",), prov=p) is None and p.calls == 0
+
+
+def test_require_match(tmp_path):
+    import pyarrow as pa, pyarrow.parquet as pq, pytest
+    import lab_analyze as la
+
+    def parquet(name, n, timer_every):
+        p = tmp_path / name
+        pq.write_table(pa.table({"timestamp_ms": [i * 1000 / 30 for i in range(n)],
+                                 "timer_value": [(99 if timer_every and i % timer_every == 0 else None) for i in range(n)]}), p)
+        return p
+    with pytest.raises(SystemExit) as e:
+        la.require_match(parquet("pattern.parquet", 300, 0))     # 10 s, no timer: a test pattern
+    assert e.value.code == la.NOT_A_MATCH_EXIT
+    la.require_match(parquet("clip.parquet", 2700, 2))            # 90 s clip, half the frames read
+    with pytest.raises(SystemExit):
+        la.require_match(parquet("empty.parquet", 1, 0))

@@ -72,9 +72,10 @@ def detect(video: Path, parquet: Path, fps: float):
             for i, s, sc in vo.peaks(vo.predict(net, X, im), vo.THR)]
 
 
-def run_chain(video: Path, out: Path, given: Path | None = None, light: bool = False, stage=None) -> tuple[dict, Path]:
+def run_chain(video: Path, out: Path, given: Path | None = None, light: bool = False, stage=None, check_hud=None) -> tuple[dict, Path]:
     """The whole opener chain on one video -> (the openers.json document, the HUD parquet path); writes
-    <out>/openers.json. stage(name) is called as each part starts: hud, detect, moves."""
+    <out>/openers.json. stage(name) is called as each part starts: hud, detect, moves. check_hud(parquet) runs
+    right after the HUD pass and may raise, before the models spend any CPU."""
     import torch
     import banner_reader as br
     import video_crops as vc
@@ -86,6 +87,8 @@ def run_chain(video: Path, out: Path, given: Path | None = None, light: bool = F
     fps, w, h = vc.video_format(video)
     stage("hud")
     pq_path = analysis(video, out, given)
+    if check_hud:
+        check_hud(pq_path)
     stage("detect")
     dets = detect(video, pq_path, fps)
     print(f"{len(dets)} combo starts found ({time.time() - t0:.0f}s)", flush=True)

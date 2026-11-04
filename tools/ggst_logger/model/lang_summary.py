@@ -676,7 +676,7 @@ Rules:
 - Name moves exactly as they appear in the facts (notation, optionally the name given in brackets). Never mention a move or a character that is not in the facts.
 - Every coaching note cites at least one timestamp from the facts in square brackets, e.g. [1:23.4], so the player can jump to it in the video. Cite only timestamps that appear in the facts.
 - Facts marked uncertain may be wrong: either leave them out or say they are uncertain.
-- Numbers (percentages, counts) only as written in the facts; do not compute new ones.
+- Numbers only as written in the facts. Never compute a share or a percentage yourself: write a % only if that exact figure is in the facts, otherwise give the counts ("8 of 14").
 - Whiffs are under-counted by the transcript; do not draw conclusions from a low whiff share.
 - Be concrete and brief. No generic advice that the facts do not support.""",
     "it": """Sei un coach di Guilty Gear -Strive- e scrivi per il giocatore che ha appena giocato questa partita.
@@ -687,7 +687,7 @@ Regole:
 - Chiama le mosse esattamente come compaiono nei fatti (notazione, eventualmente il nome tra parentesi). Non citare mai mosse o personaggi che non sono nei fatti.
 - Ogni nota di coaching cita almeno un timestamp dei fatti tra parentesi quadre, es. [1:23.4], così il giocatore può saltare a quel punto del video. Cita solo timestamp presenti nei fatti.
 - I fatti segnati come incerti possono essere sbagliati: tralasciali o dì che sono incerti.
-- Numeri (percentuali, conteggi) solo come scritti nei fatti; non calcolarne di nuovi.
+- Numeri solo come scritti nei fatti. Non calcolare mai quote o percentuali: scrivi una % solo se quella cifra esatta è nei fatti, altrimenti dai i conteggi ("8 su 14").
 - La trascrizione conta meno whiff di quelli reali; non trarre conclusioni da una quota di whiff bassa.
 - Sii concreto e breve. Niente consigli generici che i fatti non sostengono.""",
 }
@@ -699,14 +699,14 @@ TASK = {
 Two to four sentences: who won and how (rounds, the openers and combos that decided it), with timestamps.
 
 ## Coaching notes
-3 to 5 numbered notes for {who}. Each note: what happened (with [timestamps]), why it matters, one concrete thing to try. If the facts do not support 3 notes, write fewer and say so.""",
+3 to 5 numbered notes for {who}, as a plain numbered list (1. 2. 3.) with each note a single paragraph and no sub-bullets. Each note: what happened (with [timestamps]), why it matters, one concrete thing to try. If the facts do not support 3 notes, write fewer and say so.""",
     "it": """Scrivi in italiano, in questo formato:
 
 ## Riepilogo
 Da due a quattro frasi: chi ha vinto e come (round, aperture e combo decisive), con i timestamp.
 
 ## Note di coaching
-Da 3 a 5 note numerate per {who}. Ogni nota: cosa è successo (con [timestamp]), perché conta, una cosa concreta da provare. Se i fatti non bastano per 3 note, scrivine meno e dillo.""",
+Da 3 a 5 note numerate per {who}, come semplice elenco numerato (1. 2. 3.) con ogni nota in un solo paragrafo e senza sotto-elenchi. Ogni nota: cosa è successo (con [timestamp]), perché conta, una cosa concreta da provare. Se i fatti non bastano per 3 note, scrivine meno e dillo.""",
 }
 
 
@@ -720,6 +720,19 @@ def build_prompt(doc: dict, lang: str = "en", player: str | None = None) -> dict
     facts = render_md(doc, lang)
     lead = "Match facts:" if lang == "en" else "Fatti della partita:"
     return dict(lang=lang, system=SYSTEM[lang], user=f"{lead}\n\n{facts}\n---\n{TASK[lang].format(who=who)}")
+
+
+REPAIR = {
+    "en": "A draft of this answer failed the fact check. Rewrite it, keeping what is right and removing or correcting exactly these problems. Reply with the full corrected answer only.\n\nDraft:\n{draft}\n\nProblems:\n{problems}",
+    "it": "Una bozza di questa risposta non ha superato il controllo dei fatti. Riscrivila, tenendo ciò che è giusto e togliendo o correggendo esattamente questi problemi. Rispondi solo con la risposta completa corretta.\n\nBozza:\n{draft}\n\nProblemi:\n{problems}",
+}
+
+
+def repair_prompt(prompt: dict, draft: str, errors: list[dict]) -> dict:
+    """The same prompt plus a failed draft and what the check found: one fresh call, no conversation state."""
+    problems = "\n".join(f"- {e['kind']}: {e['text']}" for e in errors)
+    extra = REPAIR[prompt["lang"]].format(draft=draft, problems=problems)
+    return dict(prompt, user=f"{prompt['user']}\n\n---\n{extra}")
 
 
 def estimate_tokens(text: str) -> int:
@@ -799,7 +812,7 @@ TS_RE = re.compile(r"(?<![\d:])(\d{1,2}:\d{2}(?:\.\d+)?)(?![\d:])")
 NOTATION_RE = re.compile(r"(?<![\w.])((?:j\.|c\.|f\.)?[1-9]{1,7}[PKSHD](?:~[1-9]*[PKSHD])?|[cfj]\.[PKSHD]|(?:j\.)?Throw|Burst|RC)(?![\w])")
 FRAME_RE = re.compile(
     r"(?i)(\b\d+\s*(?:frames?|fotogramm[ia]|f)\b|[+-]\d+\s*(?:on block|on hit|in parata|a segno|frames?|f\b)|"
-    r"\b(?:startup|recovery|active frames|frame advantage|frame data|vantaggio di frame|svantaggio|frame trap)\b)")
+    r"\b(?:startup|recovery|active frames|frame advantage|frame data|(?:s?vantaggio) di frame|frame trap)\b)")
 PCT_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*%")
 COUNT_RE = re.compile(r"(?i)\b(\d+)\s+(?:times|volte|openers?|aperture|combos?|combo|counter[- ]?hits?|counters?|throws?|prese|lanci)\b")
 NOTES_HEAD = re.compile(r"(?im)^#+\s*(coaching notes|note di coaching)\s*$")
@@ -880,7 +893,12 @@ def check_answer(answer: str, doc: dict, tol: float = TOL_S) -> dict:
     pcts = ix["percentages"]
     for m in PCT_RE.finditer(answer):
         v = float(m.group(1).replace(",", "."))
-        if not any(abs(v - p) <= 1.0 for p in pcts):
+        if any(abs(v - p) <= 1.0 for p in pcts):
+            continue
+        if any(0 < a <= b and abs(v - 100.0 * a / b) <= 1.0 for b in ix["counts"] for a in ix["counts"]):
+            # a share of two counts in the facts: not a figure of the facts, but it can be true
+            warnings.append(dict(kind="derived_percentage", text=m.group(0)))
+        else:
             errors.append(dict(kind="unsupported_percentage", text=m.group(0)))
     for m in COUNT_RE.finditer(answer):
         if int(m.group(1)) not in ix["counts"]:
@@ -914,7 +932,14 @@ def check_answer(answer: str, doc: dict, tol: float = TOL_S) -> dict:
         body = answer[mh.end():]
         nxt = re.search(r"(?m)^#+\s", body)
         body = body[:nxt.start()] if nxt else body
-        notes = [n for n in re.split(r"(?m)^\s*(?:\d+[.)]|[-*])\s+", body) if n.strip()]
+        # numbered items are the notes (their continuation lines and sub-bullets belong to them, and a
+        # lead-in before "1." is no note); a plain bullet list only counts when nothing is numbered
+        numbered = list(re.finditer(r"(?m)^\s*(?:\*\*)?\d+[.)](?:\*\*)?\s+", body))
+        if numbered:
+            ends = [m.start() for m in numbered[1:]] + [len(body)]
+            notes = [body[m.end():e] for m, e in zip(numbered, ends)]
+        else:
+            notes = [n for n in re.split(r"(?m)^\s*[-*]\s+", body)[1:] if n.strip()]
         for k, n in enumerate(notes, 1):
             if not TS_RE.search(n):
                 errors.append(dict(kind="note_without_timestamp", text=f"note {k}: {n.strip()[:60]}"))

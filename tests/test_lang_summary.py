@@ -215,3 +215,50 @@ def test_openers_only_first_version():
     md = ls.render_md(d, "it")
     assert "[0:40.0]" in md and "236K (Bandit Revolver)" in md
     assert ls.check_answer("## Note di coaching\n1. 236K [0:40.0]\n2. 5H [0:10.0]\n3. Throw [0:30.0]\n", d)["ok"]
+
+
+def _times(doc, n=2):
+    return [x["t"] if "t" in x else ls.ts(x["t_s"]) for x in doc["index"]["times"][:n]]
+
+
+def test_check_multiline_notes_and_lead_in(doc):
+    """Continuation lines and sub-bullets belong to their numbered note; a lead-in before "1." is no note."""
+    a, b = _times(doc)
+    answer = (f"## Summary\nA short summary [{a}].\n\n## Coaching notes\nFor both players:\n\n"
+              f"1. What happened at [{a}].\n   Why it matters goes on a second line.\n   - Try something else.\n"
+              f"2. **Second note** at [{b}].\n\n   Its advice is in another paragraph.\n"
+              f"3. Third note [{b}].\n")
+    chk = ls.check_answer(answer, doc)
+    assert not [e for e in chk["errors"] if e["kind"] == "note_without_timestamp"], chk["errors"]
+    assert not [w for w in chk["warnings"] if w["kind"] == "note_count"]
+    # a numbered note with no timestamp at all still fails
+    chk = ls.check_answer(f"## Coaching notes\n1. Fine [{a}].\n2. No time here.\n", doc)
+    assert [e for e in chk["errors"] if e["kind"] == "note_without_timestamp"]
+
+
+def test_check_percentages_derived_from_counts(doc):
+    counts = [c for c in doc["index"]["counts"] if c > 0]
+    a, b = min(counts), max(counts)
+    if a == b:
+        pytest.skip("needs two different counts")
+    share = round(100 * a / b)
+    if any(abs(share - p) <= 1 for p in doc["index"]["percentages"]):
+        pytest.skip("that share is a figure of the facts")
+    chk = ls.check_answer(f"Used {share}% of the time.", doc)
+    assert not [e for e in chk["errors"] if e["kind"] == "unsupported_percentage"]
+    assert [w for w in chk["warnings"] if w["kind"] == "derived_percentage"]
+    # a figure no two counts can give stays an error
+    bad = next(v for v in (97.3, 83.7, 71.3, 61.9, 43.1, 37.7) if not any(abs(v - p) <= 1 for p in doc["index"]["percentages"])
+               and not any(0 < x <= y and abs(v - 100 * x / y) <= 1 for y in doc["index"]["counts"] for x in doc["index"]["counts"]))
+    assert [e for e in ls.check_answer(f"Used {bad}% of the time.", doc)["errors"] if e["kind"] == "unsupported_percentage"]
+
+
+def test_check_italian_behind_is_not_frame_data(doc):
+    assert not [e for e in ls.check_answer("P1 era in svantaggio nel secondo round.", doc)["errors"] if e["kind"] == "frame_data_claim"]
+    assert [e for e in ls.check_answer("Hai 3 di svantaggio di frame.", doc)["errors"] if e["kind"] == "frame_data_claim"]
+
+
+def test_repair_prompt_lists_the_problems(doc):
+    p = ls.build_prompt(doc, "it")
+    r = ls.repair_prompt(p, "BOZZA", [dict(kind="unsupported_percentage", text="57%")])
+    assert r["system"] == p["system"] and r["user"].startswith(p["user"]) and "BOZZA" in r["user"] and "57%" in r["user"]

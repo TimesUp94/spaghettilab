@@ -197,22 +197,55 @@ def assemble(video: str, duration_s: float, fps: float, openers_doc: dict, preds
                 facts=facts, prompts=prompts, timings_s=timings)
 
 
+# A match shows the round timer: of 1,103 real replays the lowest had 21.7 s of readings. A test pattern
+# has none, and its health bars still read 71% of the frames, so the bars can't tell.
+MIN_TIMER_S = 5.0
+NOT_A_MATCH_EXIT = 3
+
+
+def timer_seconds(parquet) -> float:
+    """Seconds of round-timer readings in the pipeline's frames parquet (about 30 samples a second)."""
+    import pyarrow.parquet as pq
+    c = pq.read_table(parquet, columns=["timer_value", "timestamp_ms"]).to_pydict()
+    t, v = c["timestamp_ms"], c["timer_value"]
+    return sum(v_ is not None for v_ in v) / (len(t) / max((t[-1] - t[0]) / 1000.0, 1e-3)) if len(t) > 1 else 0.0
+
+
+def require_match(parquet):
+    """Stop before the models when the video isn't a Strive match: the job fails, and the analysis is given back."""
+    s = timer_seconds(parquet)
+    if s < MIN_TIMER_S:
+        print(f"not a match: {s:.1f} s of round timer readings (needs {MIN_TIMER_S:.0f})", flush=True)
+        raise SystemExit(NOT_A_MATCH_EXIT)
+
+
 def ai_summary(doc: dict, name: str, langs=LANGS, prov=None) -> dict | None:
     """Summary + coaching notes written by an LLM from the facts (lang_summary prompts), one call per
-    language, each answer checked against the facts (lang_summary.check_answer). An answer that fails the
-    check is withheld: text None, the problems kept. name "none" -> None (nothing leaves the machine)."""
-    if name in (None, "", "none"):
+    language, each answer checked against the facts (lang_summary.check_answer). A failed answer gets one
+    repair call with the problems listed; if that fails too it is withheld: text None, the problems kept.
+    name "none" -> None (nothing leaves the machine); no openers -> None (nothing to write about)."""
+    if name in (None, "", "none") or not doc.get("openers"):
         return None
     os.environ.setdefault("GGST_LANG_ALLOW_NETWORK", "1")     # choosing a provider is the opt-in
     prov = prov or ls.provider(name, enabled=True)
     out = dict(provider=name, model=getattr(prov, "model", None), langs={})
     for lang in langs:
         try:
-            text = prov.complete(ls.build_prompt(doc["facts"], lang))
+            prompt = ls.build_prompt(doc["facts"], lang)
+            text = prov.complete(prompt)
             chk = ls.check_answer(text or "", doc["facts"])
+            usage = [getattr(prov, "last_usage", None)]
+            first = list(chk.get("errors", []))
+            if text and first:
+                text = prov.complete(ls.repair_prompt(prompt, text, first))
+                chk = ls.check_answer(text or "", doc["facts"])
+                usage.append(getattr(prov, "last_usage", None))
             ok = bool(text) and not chk.get("errors")
+            print(f"ai summary {lang}: {'grounded' if ok else 'withheld'}, calls {len(usage)}, "
+                  f"first draft problems {sorted({e['kind'] for e in first})}", flush=True)
             out["langs"][lang] = dict(text=text if ok else None, grounded=ok, errors=chk.get("errors", []),
-                                      warnings=chk.get("warnings", []), usage=getattr(prov, "last_usage", None))
+                                      warnings=chk.get("warnings", []), repaired=len(usage) > 1, usage=usage[-1],
+                                      usage_all=[u for u in usage if u])
         except Exception as e:                     # the rest of the result still comes out
             out["langs"][lang] = dict(text=None, grounded=False, errors=[f"{type(e).__name__}: {e}"[:300]], warnings=[])
     return out
@@ -416,7 +449,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     st = Stages()
     duration, fps = video_info(a.video)
-    openers_doc, pq_path = rec.run_chain(a.video, out, a.analysis, a.light, stage=st)
+    openers_doc, pq_path = rec.run_chain(a.video, out, a.analysis, a.light, stage=st, check_hud=require_match)
     preds = states = None
     if want_transcript(a.transcript):
         st("transcript")
@@ -439,6 +472,8 @@ def main():
         t_s = time.time()
         doc["ai_summary"] = ai_summary(doc, a.llm)
         doc["capabilities"]["ai_summary"] = bool(doc["ai_summary"] and any(v["grounded"] for v in doc["ai_summary"]["langs"].values()))
+        if doc["ai_summary"] is None:
+            doc.pop("ai_summary")
         doc["timings_s"]["summary"] = round(time.time() - t_s, 1)
     doc["timings_s"]["total"] = round(time.time() - st.t0, 1)
     write_json(doc, out / "lab_result.json")
