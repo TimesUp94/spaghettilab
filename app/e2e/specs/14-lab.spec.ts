@@ -262,6 +262,121 @@ test("summary: facts in English and Italian, copy prompt, timestamps seek", asyn
   await page.getByRole("group", { name: "Summary language" }).getByRole("button", { name: "English" }).click();
 });
 
+/** The fixture with an AI summary (LAB_RESULT.md "ai_summary"): English grounded, Italian withheld. */
+function withAiSummary() {
+  const d = fixture();
+  const ts = /\b\d{1,2}:\d{2}\.\d\b/.exec(d.facts.md.en)![0];
+  d.capabilities.ai_summary = true;
+  d.ai_summary = {
+    provider: "claude",
+    model: "claude-opus-5-5",
+    langs: {
+      en: {
+        text: `## Summary
+${d.characters.P1} took the set, the key opener at [${ts}].
+
+## Coaching notes
+1. **Watch** the opener at [${ts}].
+2. A second note.`,
+        grounded: true,
+        errors: [],
+        warnings: ["note 2 cites no timestamp"],
+        usage: { model: "claude-opus-5-5", input_tokens: 4000, output_tokens: 300 },
+      },
+      it: { text: null, grounded: false, errors: ["timestamp 9:59.9 is not in the facts", "move 6H is not in the facts"], warnings: [] },
+    },
+  };
+  return { d, ts };
+}
+
+test("summary: the AI summary above the facts, only when grounded", async ({ app }) => {
+  const { d, ts } = withAiSummary();
+  writeCache(d);
+  await openLab(app);
+  const { page } = app;
+  await section(app, "Summary").click();
+  const lang = (name: string) => page.getByRole("group", { name: "Summary language" }).getByRole("button", { name }).click();
+  const h1 = (md: string) => md.split("\n").find((l) => l.startsWith("# "))!.slice(2);
+
+  // English: grounded, labelled as AI, above the facts (which stay), timestamps seek
+  await lang("English");
+  const ai = page.getByTestId("lab-ai-summary");
+  await expect(ai).toContainText("Written by AI from the match facts");
+  await expect(ai.getByRole("heading", { name: "Coaching notes" })).toBeVisible();
+  await expect(ai.locator("ol > li")).toHaveCount(2);
+  await expect(ai.locator("strong", { hasText: "Watch" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: h1(d.facts.md.en) })).toBeVisible();
+  const aiBox = (await ai.boundingBox())!;
+  const factsBox = (await page.getByRole("heading", { name: h1(d.facts.md.en) }).boundingBox())!;
+  expect(aiBox.y).toBeLessThan(factsBox.y);
+  await expect(page.getByTestId("lab-ai-withheld")).toHaveCount(0);
+  await ai.getByRole("button", { name: ts, exact: true }).first().click();
+  const [mm, ss] = ts.split(":");
+  await expectSeekedTo(app, Number(mm) * 60 + Number(ss));
+  await expect(ai.getByText("Check warnings (1)")).toBeVisible();
+
+  // Italian: withheld, no text, the errors in a collapsed detail, the facts still there
+  await lang("Italiano");
+  await expect(page.getByTestId("lab-ai-summary")).toHaveCount(0);
+  const withheld = page.getByTestId("lab-ai-withheld");
+  await expect(withheld).toContainText("non corrispondeva ai fatti");
+  await expect(withheld.getByText("move 6H is not in the facts")).toBeHidden();
+  await withheld.getByText("Dettagli (2)").click();
+  await expect(withheld.getByText("move 6H is not in the facts")).toBeVisible();
+  await expect(page.getByRole("heading", { name: h1(d.facts.md.it) })).toBeVisible();
+
+  // a missing API key gets a hint
+  d.ai_summary.langs.it.errors = ["AuthenticationError: Could not resolve authentication method. Expected the api_key to be set."];
+  writeCache(d);
+  await openLab(app);
+  await section(app, "Summary").click();
+  await lang("Italiano");
+  await expect(page.getByTestId("lab-ai-withheld")).toContainText("ANTHROPIC_API_KEY");
+  await lang("English");
+});
+
+test("summary: no ai_summary, no AI block", async ({ app }) => {
+  writeCache(fixture());
+  await openLab(app);
+  const { page } = app;
+  await section(app, "Summary").click();
+  await expect(page.getByText(/no AI wrote them and nothing is sent anywhere/)).toBeVisible();
+  await expect(page.getByTestId("lab-ai-summary")).toHaveCount(0);
+  await expect(page.getByTestId("lab-ai-withheld")).toHaveCount(0);
+});
+
+test("run option: the AI summary (Claude) is off by default and passes llm", async ({ app }) => {
+  writeCache(null);
+  await openLab(app);
+  const { page } = app;
+  await page.evaluate(() => {
+    const e2e = (window as any).__e2e;
+    e2e.handlers["run_lab_analysis"] = () =>
+      new Promise((resolve, reject) => {
+        e2e.labRun = { resolve, reject };
+      });
+  });
+  const box = page.getByRole("checkbox", { name: "AI summary (Claude)" });
+  await expect(box).not.toBeChecked();
+  await page.getByRole("button", { name: "Run lab analysis" }).click();
+  expect((await app.calls("run_lab_analysis")).at(-1)!.args.options).toMatchObject({ llm: "none" });
+  await page.evaluate(() => (window as any).__e2e.labRun.reject("Cancelled"));
+  await expect(page.getByTestId("lab-progress")).toHaveCount(0);
+
+  await box.check();
+  await page.getByRole("button", { name: "Run lab analysis" }).click();
+  expect((await app.calls("run_lab_analysis")).at(-1)!.args.options).toMatchObject({ llm: "claude" });
+  const progress = page.getByTestId("lab-progress");
+  await expect(progress.getByText("AI summary", { exact: true })).toBeVisible();
+  await app.emit("lab-progress", { replay_id: REPLAY_ID, stage: "summary", line: "summary" });
+  await expect(progress.getByText("AI summary", { exact: true })).toBeVisible();
+  await page.evaluate((d) => (window as any).__e2e.labRun.resolve(d), withAiSummary().d);
+  await expect(progress).toHaveCount(0);
+  await section(app, "Summary").click();
+  await page.getByRole("group", { name: "Summary language" }).getByRole("button", { name: "English" }).click();
+  await expect(page.getByTestId("lab-ai-summary")).toBeVisible();
+});
+
 test("without the transcript: openers only, with the GPU hint", async ({ app }) => {
   const doc = withoutTranscript();
   writeCache(doc);

@@ -5,12 +5,12 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { listen } from "@tauri-apps/api/event";
 import {
   FlaskConical, Play, Square, Trash2, RefreshCw, Swords, ListTree, Search, FileText, Copy, Check,
-  AlertTriangle, Cpu, Settings2, Info,
+  AlertTriangle, Cpu, Settings2, Info, Sparkles,
 } from "lucide-react";
 import { Badge, Button, EmptyState, Spinner } from "./ui";
 import { cancelLabAnalysis, deleteLabResult, getLabResult, labAnalysisRunning, runLabAnalysis } from "../api";
 import {
-  NOT_INSTALLED, OUTCOME_COLOR, OUTCOMES, clockTenths, freeFilter, initialLang, isUncertain, loadModelsDir,
+  NOT_INSTALLED, OUTCOME_COLOR, aiSummaryFor, OUTCOMES, clockTenths, freeFilter, initialLang, isUncertain, loadModelsDir,
   moveChoices, presetAfterBlock, presetAfterKnockdown, presetCounterBy, presetMoveOutcome, saveLang, saveModelsDir,
   searchEvents, seekBefore, stageLabel, stageSteps, wakeUps,
   type Hit, type LabEvent, type LabLang, type LabOpener, type LabOptions, type LabProgress, type LabResult,
@@ -455,7 +455,8 @@ function SearchPanel({ r, onSeek }: { r: LabResult; onSeek: (ms: number) => void
   );
 }
 
-/** facts.md: headings, bullets and bold; every m:ss.s timestamp seeks the video. */
+/** facts.md and the AI summary: headings, bullets, numbered lists and bold, as React nodes (never HTML);
+ * every m:ss.s timestamp seeks the video. */
 function Markdown({ text, onSeek }: { text: string; onSeek: (ms: number) => void }) {
   const inline = (s: string, key: string): ReactNode[] => {
     const out: ReactNode[] = [];
@@ -485,16 +486,25 @@ function Markdown({ text, onSeek }: { text: string; onSeek: (ms: number) => void
   };
   const blocks: ReactNode[] = [];
   let bullets: ReactNode[] = [];
+  let ordered = false;
   const flush = (k: number) => {
-    if (bullets.length) blocks.push(<ul key={`u${k}`} className="list-disc pl-4 flex flex-col gap-1 marker:text-text-muted">{bullets}</ul>);
+    if (bullets.length)
+      blocks.push(
+        ordered
+          ? <ol key={`o${k}`} className="list-decimal pl-4 flex flex-col gap-1 marker:text-text-muted">{bullets}</ol>
+          : <ul key={`u${k}`} className="list-disc pl-4 flex flex-col gap-1 marker:text-text-muted">{bullets}</ul>
+      );
     bullets = [];
   };
   text.split(/\r?\n/).forEach((line, k) => {
     const l = line.trimEnd();
     const h = /^(#{1,4})\s+(.*)$/.exec(l);
     const b = /^\s*[-*]\s+(.*)$/.exec(l);
-    if (b) {
-      bullets.push(<li key={k}>{inline(b[1], `l${k}`)}</li>);
+    const n = /^\s*\d{1,2}[.)]\s+(.*)$/.exec(l);
+    if (b || n) {
+      if (bullets.length && ordered !== !!n) flush(k);
+      ordered = !!n;
+      bullets.push(<li key={k}>{inline((b ?? n)![1], `l${k}`)}</li>);
       return;
     }
     flush(k);
@@ -527,11 +537,78 @@ async function copyText(text: string) {
   ta.remove();
 }
 
+const AI_LABEL: Record<LabLang, string> = {
+  it: "Scritto dall'IA dai fatti della partita",
+  en: "Written by AI from the match facts",
+};
+const AI_TEXT: Record<LabLang, { withheld: string; auth: string; details: string }> = {
+  it: {
+    withheld: "Il riepilogo dell'IA è stato nascosto: non corrispondeva ai fatti della partita. I fatti qui sotto restano validi.",
+    auth: "Nessun riepilogo dell'IA: la chiave API di Claude manca o è stata rifiutata. Imposta ANTHROPIC_API_KEY nell'ambiente da cui parte l'app, poi riesegui.",
+    details: "Dettagli",
+  },
+  en: {
+    withheld: "The AI summary was withheld: it didn't match the match facts. The facts below are unaffected.",
+    auth: "No AI summary: the Claude API key is missing or was refused. Set ANTHROPIC_API_KEY in the environment the app starts from, then run again.",
+    details: "Details",
+  },
+};
+
+/** The AI summary of one language (LAB_RESULT.md "ai_summary"): its text only when grounded, else why it
+ * was withheld. Nothing when the result has none. */
+function AiSummaryBlock({ r, lang, onSeek }: { r: LabResult; lang: LabLang; onSeek: (ms: number) => void }) {
+  const ai = aiSummaryFor(r, lang);
+  if (!ai) return null;
+  if (ai.kind === "withheld") {
+    return (
+      <div className="flex flex-col gap-1.5 rounded-lg bg-surface-2/60 border border-surface-4/60 px-2.5 py-2 text-[11px] text-text-secondary" data-testid="lab-ai-withheld">
+        <div className="flex items-start gap-2">
+          <Sparkles size={13} className="mt-0.5 shrink-0 text-text-muted" />
+          <span>
+            {ai.authHint
+              ? AI_TEXT[lang].auth
+              : AI_TEXT[lang].withheld}
+          </span>
+        </div>
+        {ai.errors.length > 0 && (
+          <details className="pl-5">
+            <summary className="cursor-pointer text-text-muted hover:text-text-primary">{AI_TEXT[lang].details} ({ai.errors.length})</summary>
+            <ul className="list-disc pl-4 mt-1 flex flex-col gap-0.5 font-mono text-[10px] break-words">
+              {ai.errors.map((e, i) => <li key={i}>{e}</li>)}
+            </ul>
+          </details>
+        )}
+      </div>
+    );
+  }
+  return (
+    <section className="flex flex-col gap-2 rounded-lg bg-accent-purple/5 border border-accent-purple/25 px-2.5 py-2" data-testid="lab-ai-summary" aria-label="AI summary">
+      <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider font-semibold text-accent-purple">
+        <Sparkles size={12} />
+        <span>{AI_LABEL[lang]}</span>
+        {ai.model && <span className="ml-auto normal-case tracking-normal font-normal text-text-muted">{ai.model}</span>}
+      </div>
+      <Markdown text={ai.text} onSeek={onSeek} />
+      {ai.warnings.length > 0 && (
+        <details className="text-[10px] text-text-muted">
+          <summary className="cursor-pointer hover:text-text-primary">
+            {lang === "it" ? "Avvisi del controllo" : "Check warnings"} ({ai.warnings.length})
+          </summary>
+          <ul className="list-disc pl-4 mt-1 flex flex-col gap-0.5 break-words">
+            {ai.warnings.map((w, i) => <li key={i}>{w}</li>)}
+          </ul>
+        </details>
+      )}
+    </section>
+  );
+}
+
 function SummaryPanel({ r, onSeek }: { r: LabResult; onSeek: (ms: number) => void }) {
   const [lang, setLang] = useState<LabLang>(initialLang);
   const [copied, setCopied] = useState(false);
   const md = r.facts?.md?.[lang] ?? r.facts?.md?.en ?? r.facts?.md?.it ?? "";
   const prompt = r.prompts?.[lang] ?? r.prompts?.en ?? "";
+  const hasAi = !!r.ai_summary;
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center gap-2 flex-wrap">
@@ -550,12 +627,19 @@ function SummaryPanel({ r, onSeek }: { r: LabResult; onSeek: (ms: number) => voi
           {copied ? "Copied" : "Copy prompt"}
         </Button>
       </div>
+      <AiSummaryBlock r={r} lang={lang} onSeek={onSeek} />
       <div className="flex items-start gap-2 rounded-lg bg-surface-2/60 border border-surface-4/60 px-2.5 py-2 text-[11px] text-text-secondary">
         <Info size={13} className="mt-0.5 shrink-0 text-text-muted" />
-        <span>
-          These are the facts the models read from the video; no AI wrote them and nothing is sent anywhere. "Copy prompt"
-          copies them with instructions, to paste into a chatbot of your choice for a written summary.
-        </span>
+        {hasAi ? (
+          <span>
+            The facts the models read from the video, the source of truth for the AI summary above; no AI wrote them.
+          </span>
+        ) : (
+          <span>
+            These are the facts the models read from the video; no AI wrote them and nothing is sent anywhere. "Copy prompt"
+            copies them with instructions, to paste into a chatbot of your choice for a written summary.
+          </span>
+        )}
       </div>
       {md ? <Markdown text={md} onSeek={onSeek} /> : <div className="text-xs text-text-muted">No summary in this result.</div>}
     </div>
@@ -584,9 +668,10 @@ export function LabPanel({ lab, onSeek, canRun }: { lab: LabState; onSeek: (ms: 
   const [light, setLight] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [modelsDir, setModelsDir] = useState(loadModelsDir);
+  const [aiSummary, setAiSummary] = useState(false);
   const r = lab.result;
 
-  const start = () => lab.run({ transcript, light, models_dir: modelsDir.trim() || undefined });
+  const start = () => lab.run({ transcript, light, llm: aiSummary ? "claude" : "none", models_dir: modelsDir.trim() || undefined });
 
   const notInstalled = lab.error?.startsWith(NOT_INSTALLED);
 
@@ -602,6 +687,13 @@ export function LabPanel({ lab, onSeek, canRun }: { lab: LabState; onSeek: (ms: 
         <label className="flex items-center gap-1.5 text-[11px] text-text-secondary cursor-pointer" title="Smaller models: faster on a CPU, a little less accurate">
           <input type="checkbox" checked={light} onChange={(e) => setLight(e.target.checked)} className="accent-[#e8c840]" />
           Light
+        </label>
+        <label
+          className="flex items-center gap-1.5 text-[11px] text-text-secondary cursor-pointer"
+          title="Also a written summary and coaching notes by Claude, from the facts only (sends the facts to Anthropic; needs ANTHROPIC_API_KEY in the environment)"
+        >
+          <input type="checkbox" checked={aiSummary} onChange={(e) => setAiSummary(e.target.checked)} className="accent-[#e8c840]" />
+          AI summary (Claude)
         </label>
         <button onClick={() => setShowSettings((s) => !s)} className="ml-auto text-text-muted hover:text-text-primary cursor-pointer" aria-label="Lab settings" title="Models folder">
           <Settings2 size={14} />
@@ -633,7 +725,7 @@ export function LabPanel({ lab, onSeek, canRun }: { lab: LabState; onSeek: (ms: 
         <Button size="sm" variant="ghost" icon={Square} className="ml-auto" onClick={lab.cancel}>Cancel</Button>
       </div>
       <ol className="flex flex-col gap-1">
-        {stageSteps(transcript !== "off").map((s) => {
+        {stageSteps(transcript !== "off", aiSummary).map((s) => {
           const seen = lab.stages.includes(s);
           const current = lab.stages[lab.stages.length - 1] === s;
           return (

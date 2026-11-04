@@ -45,13 +45,49 @@ export interface LabResult {
   duration_s?: number;
   fps?: number;
   characters: { P1: string; P2: string };
-  capabilities: { openers: boolean; transcript: boolean; facts: boolean };
+  capabilities: { openers: boolean; transcript: boolean; facts: boolean; ai_summary?: boolean };
   openers: LabOpener[];
   transcript: { events: LabEvent[] } | null;
   states: { hz: number; P1: StateClass[]; P2: StateClass[] } | null;
   facts: { md?: { it?: string; en?: string }; caveats?: unknown; [k: string]: unknown } | null;
   prompts?: { it?: string; en?: string };
   timings_s?: Record<string, number>;
+  /** optional: an LLM's summary + coaching notes from the facts, checked against them (LAB_RESULT.md "ai_summary") */
+  ai_summary?: AiSummary | null;
+}
+
+export interface AiSummaryLang {
+  /** only when grounded */
+  text: string | null;
+  grounded: boolean;
+  errors: string[];
+  warnings: string[];
+  usage?: { model?: string; input_tokens?: number; output_tokens?: number } | null;
+}
+
+export interface AiSummary {
+  provider: string;
+  model?: string | null;
+  langs: Partial<Record<LabLang, AiSummaryLang>>;
+}
+
+/** The AI summary of one language, as the UI shows it: the text only when grounded. */
+export type AiShown =
+  | { kind: "grounded"; text: string; warnings: string[]; model: string | null }
+  | { kind: "withheld"; errors: string[]; authHint: boolean };
+
+/** Errors meaning the API key is missing or refused (the run needs ANTHROPIC_API_KEY). */
+export const isAuthError = (e: string) => /api[_ -]?key|authenticat|unauthori[sz]ed|\b401\b|x-api-key/i.test(e);
+
+/** null when the result has no AI summary for this language (then nothing is shown). */
+export function aiSummaryFor(r: LabResult, lang: LabLang): AiShown | null {
+  const l = r.ai_summary?.langs?.[lang];
+  if (!l) return null;
+  const errors = Array.isArray(l.errors) ? l.errors.map(String) : [];
+  if (l.grounded === true && typeof l.text === "string" && l.text.trim()) {
+    return { kind: "grounded", text: l.text, warnings: Array.isArray(l.warnings) ? l.warnings.map(String) : [], model: r.ai_summary?.model ?? null };
+  }
+  return { kind: "withheld", errors, authHint: errors.some(isAuthError) };
 }
 
 export interface LabOptions {
@@ -62,6 +98,8 @@ export interface LabOptions {
   models_dir?: string;
   /** match title in the facts (the replay's name) */
   title?: string;
+  /** "claude": also an AI summary from the facts (needs ANTHROPIC_API_KEY); "none": never */
+  llm?: "none" | "claude";
 }
 
 export interface LabProgress {
@@ -89,13 +127,14 @@ export const OUTCOME_COLOR: Record<string, string> = {
   none: "#444458",
 };
 
-/** The stages lab_analyze.py prints (`stage: hud|detect|moves|transcript|facts|done`), as the UI names them. */
+/** The stages lab_analyze.py prints (`stage: hud|detect|moves|transcript|facts|summary|done`), as the UI names them. */
 export const STAGES: { key: string; label: string }[] = [
   { key: "hud", label: "Reading the HUD" },
   { key: "detect", label: "Recognising moves" },
   { key: "moves", label: "Recognising moves" },
   { key: "transcript", label: "Transcript" },
   { key: "facts", label: "Summary" },
+  { key: "summary", label: "AI summary" },
   { key: "done", label: "Done" },
 ];
 
@@ -104,10 +143,11 @@ export function stageLabel(stage: string): string {
 }
 
 /** The ordered, de-duplicated steps shown in the progress list. */
-export function stageSteps(withTranscript: boolean): string[] {
+export function stageSteps(withTranscript: boolean, withAi = false): string[] {
   const steps = ["Reading the HUD", "Recognising moves"];
   if (withTranscript) steps.push("Transcript");
   steps.push("Summary");
+  if (withAi) steps.push("AI summary");
   return steps;
 }
 

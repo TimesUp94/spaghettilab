@@ -6,6 +6,9 @@
 // in the app data dir (`<data dir>/SpaghettiLab/lab/<replay_id>/lab_result.json`), outside the
 // analysis DB: no schema change, so .spag / .spagz files and the web app are unaffected.
 //
+// AI summary: opt-in per run (`llm: "claude"` -> `--llm claude`). The script reads ANTHROPIC_API_KEY
+// from the environment it inherits; the app never reads, stores or logs the key.
+//
 // Progress: the script's `stage: <name> ...` stdout lines go to the UI as "lab-progress" events
 // ({replay_id, stage, line}); every other line is only logged. Cancelling kills the process tree.
 
@@ -40,6 +43,10 @@ pub struct LabOptions {
     pub models_dir: Option<String>,
     /// The match title in the facts and prompts (the replay's name); the replay id when absent
     pub title: Option<String>,
+    /// "claude": also an AI summary + coaching notes from the facts (`--llm claude`; the script needs
+    /// ANTHROPIC_API_KEY in the environment, which the app passes through untouched and never reads);
+    /// "none": never. Absent: the script's default (GGST_LANG_PROVIDER, else none).
+    pub llm: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -162,6 +169,13 @@ pub fn lab_args(video: &str, out: &str, analysis: Option<&str>, o: &LabOptions) 
         }
         a.push("--device".into());
         a.push(d.into());
+    }
+    if let Some(l) = o.llm.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
+        if !matches!(l, "none" | "claude") {
+            return Err(format!("unknown llm provider '{}'", l));
+        }
+        a.push("--llm".into());
+        a.push(l.into());
     }
     if let Some(an) = analysis {
         a.push("--analysis".into());
@@ -421,6 +435,18 @@ mod tests {
     }
 
     #[test]
+    fn ai_summary_is_kept() {
+        // optional field (LAB_RESULT.md "ai_summary"): passed to the UI as it is
+        let mut v = parse_lab_result(&fixture()).unwrap();
+        v["ai_summary"] = serde_json::json!({"provider": "claude", "model": "claude-opus-5-5", "langs": {
+            "en": {"text": "## Summary\nP1 won.", "grounded": true, "errors": [], "warnings": []},
+            "it": {"text": null, "grounded": false, "errors": ["timestamp 9:99.9 not in the facts"], "warnings": []}}});
+        let back = parse_lab_result(&v.to_string()).unwrap();
+        assert_eq!(back["ai_summary"]["langs"]["en"]["grounded"], true);
+        assert!(back["ai_summary"]["langs"]["it"]["text"].is_null());
+    }
+
+    #[test]
     fn cache_round_trip() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
@@ -453,6 +479,13 @@ mod tests {
             ["v.mp4", "--out", "out", "--transcript", "off", "--light", "--device", "cpu", "--analysis", "an", "--title", "Jason vs Enero"]
         );
         assert!(lab_args("v", "o", None, &LabOptions { transcript: Some("x".into()), ..Default::default() }).is_err());
+        // the AI summary is opt-in: off is an explicit `--llm none`, on is `--llm claude`
+        let ai = |l: &str| lab_args("v.mp4", "out", None, &LabOptions { llm: Some(l.into()), ..Default::default() });
+        assert_eq!(ai("claude").unwrap(), ["v.mp4", "--out", "out", "--transcript", "auto", "--llm", "claude"]);
+        assert_eq!(ai("none").unwrap(), ["v.mp4", "--out", "out", "--transcript", "auto", "--llm", "none"]);
+        assert_eq!(ai(" ").unwrap(), ["v.mp4", "--out", "out", "--transcript", "auto"]);
+        assert!(ai("openai").is_err());
+        assert!(ai("claude --x").is_err());
         assert_eq!(parse_stage("stage: openers 2/5"), Some(("openers".into(), "openers 2/5".into())));
         assert_eq!(parse_stage("  stage:hud"), Some(("hud".into(), "hud".into())));
         assert_eq!(parse_stage("stage: transcript: 40%"), Some(("transcript".into(), "transcript: 40%".into())));
