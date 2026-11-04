@@ -298,6 +298,11 @@ export async function cancelLabAnalysisRemote(replayId: string): Promise<{ phase
   return invoke("cancel_lab_analysis_remote", { replayId });
 }
 
+/** What a cancel means right now: asks the server, because the refund depends on the job's status at that moment. */
+export async function labRemoteCancelPhase(replayId: string): Promise<{ phase: RemoteRunning["phase"] }> {
+  return invoke("lab_remote_cancel_phase", { replayId });
+}
+
 export async function labRemoteRunning(): Promise<RemoteRunning | null> {
   return invoke("lab_remote_running");
 }

@@ -8,10 +8,13 @@
 // - Presenting an already-rotated refresh token ends the whole session on the server, so refresh is
 //   serialized behind one mutex, runs in its own task (a cancelled caller can't lose the answer),
 //   writes the new token to the store before anything uses it, and never blindly retries a request
-//   that may have reached the server. A lost answer means signing in again.
+//   that may have reached the server. A lost answer means signing in again. Only one instance of the
+//   app uses a session: lib.rs keeps it single-instance, and an isolated one (SPAGHETTI_LAB_DATA_DIR)
+//   gets its own credential-store service (lab_api::keyring_service).
 
 use crate::lab_api::{self as api, Answer, Player, RemoteError, TokenResponse};
 use base64::Engine as _;
+use futures_util::stream::{FuturesUnordered, StreamExt as _};
 use rand::RngCore as _;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -28,6 +31,8 @@ const ACCOUNT_PLAYER: &str = "player";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
 /// Refresh before an access token gets this close to its end.
 const ACCESS_MARGIN: Duration = Duration::from_secs(60);
+/// One connection to the login listener gets this long to send its request, in all.
+const CALLBACK_READ: Duration = Duration::from_secs(5);
 
 // ── credential store ────────────────────────────────────────────────────────
 
@@ -76,11 +81,16 @@ impl TokenStore for KeyringStore {
 pub struct MemoryStore {
     pub values: Mutex<HashMap<String, String>>,
     pub fail_writes: std::sync::atomic::AtomicBool,
+    pub fail_reads: std::sync::atomic::AtomicBool,
+    pub fail_deletes: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(test)]
 impl TokenStore for MemoryStore {
     fn get(&self, account: &str) -> Result<Option<String>, String> {
+        if self.fail_reads.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("store unavailable".into());
+        }
         Ok(self.values.lock().unwrap().get(account).cloned())
     }
     fn set(&self, account: &str, value: &str) -> Result<(), String> {
@@ -91,6 +101,9 @@ impl TokenStore for MemoryStore {
         Ok(())
     }
     fn del(&self, account: &str) -> Result<(), String> {
+        if self.fail_deletes.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("store unavailable".into());
+        }
         self.values.lock().unwrap().remove(account);
         Ok(())
     }
@@ -106,6 +119,9 @@ pub struct Account {
     pub avatar: Option<String>,
     /// The OS credential store failed: this session ends when the app closes.
     pub session_only: bool,
+    /// The OS credential store can't be read right now, so whether a sign-in is kept there is unknown:
+    /// not the same as signed out. Saved jobs wait, and nothing is forgotten.
+    pub store_unavailable: bool,
 }
 
 #[derive(Default)]
@@ -148,8 +164,8 @@ impl Auth {
     }
 
     fn account_of(&self, s: &Session) -> Account {
-        let stored = self.store.get(ACCOUNT_REFRESH).ok().flatten().is_some();
-        let signed_in = s.access.is_some() || s.memory_refresh.is_some() || stored;
+        let stored = self.store.get(ACCOUNT_REFRESH);
+        let signed_in = s.access.is_some() || s.memory_refresh.is_some() || matches!(stored, Ok(Some(_)));
         let player = if signed_in { s.player.clone().or_else(|| self.stored_player()) } else { None };
         Account {
             signed_in,
@@ -157,6 +173,7 @@ impl Auth {
             // only an https image: it goes straight into an <img>
             avatar: player.as_ref().and_then(|p| p.avatar.clone()).filter(|a| a.starts_with("https://")),
             session_only: s.session_only,
+            store_unavailable: stored.is_err(),
         }
     }
 
@@ -198,16 +215,19 @@ impl Auth {
         s.not_before = None;
     }
 
-    fn forget(&self, s: &mut Session) {
+    fn forget(&self, s: &mut Session) -> Result<(), String> {
         *s = Session::default();
-        let _ = self.store.del(ACCOUNT_REFRESH);
+        let refresh = self.store.del(ACCOUNT_REFRESH);
         let _ = self.store.del(ACCOUNT_PLAYER);
+        refresh
     }
 
     /// The server said this session is over (or the user disconnected this PC on the website).
     pub async fn clear(&self) {
         let mut s = self.session.lock().await;
-        self.forget(&mut s);
+        if let Err(e) = self.forget(&mut s) {
+            eprintln!("[LAB] the credential store kept an ended sign-in: {}", api::scrub(&e));
+        }
     }
 
     /// One refresh, the session lock held. Connection failures that never reached the server are
@@ -254,7 +274,9 @@ impl Auth {
             // Expired, reused, or disconnected from the website's list of PCs
             400 => {
                 if a.error() == Some("invalid_grant") {
-                    self.forget(s);
+                    if let Err(e) = self.forget(s) {
+                        eprintln!("[LAB] the credential store kept an ended sign-in: {}", api::scrub(&e));
+                    }
                     return Err(RemoteError::signed_out());
                 }
                 Err(RemoteError::unavailable())
@@ -275,11 +297,21 @@ impl Auth {
     /// rotating again. The work runs in its own task: dropping this future (cancel) can't lose the
     /// answer of a refresh that reached the server.
     pub async fn access_token(self: &Arc<Self>, used: Option<String>) -> Result<String, RemoteError> {
+        self.token_lasting(used, ACCESS_MARGIN).await
+    }
+
+    /// Refresh now if the access token wouldn't last this long. For a request that takes a long time
+    /// and is checked only at its end: the proxy may hold a whole upload before the backend sees it.
+    pub async fn ensure_lasting(self: &Arc<Self>, need: Duration) -> Result<(), RemoteError> {
+        self.token_lasting(None, need).await.map(|_| ())
+    }
+
+    async fn token_lasting(self: &Arc<Self>, used: Option<String>, need: Duration) -> Result<String, RemoteError> {
         let me = self.clone();
         tauri::async_runtime::spawn(async move {
             let mut s = me.session.lock().await;
             if let (Some(a), Some(exp)) = (s.access.clone(), s.expires_at) {
-                if exp > Instant::now() + ACCESS_MARGIN && used.as_deref() != Some(a.as_str()) {
+                if exp > Instant::now() + need && used.as_deref() != Some(a.as_str()) {
                     return Ok(a);
                 }
             }
@@ -323,7 +355,8 @@ impl Auth {
         .await
     }
 
-    /// Exchange the login's code. A rejected code is a failed sign-in, not the end of a session.
+    /// Exchange the login's code. A rejected code is a failed sign-in, not the end of a session. A
+    /// sign-in this one replaces is revoked, so it doesn't stay on the website's list of PCs.
     pub async fn exchange(&self, code: &str, verifier: &str) -> Result<Account, RemoteError> {
         let body = serde_json::json!({"grant_type": "authorization_code", "code": code, "code_verifier": verifier});
         let r = self.client.post(self.url(api::PATH_TOKEN)).json(&body).timeout(Duration::from_secs(60)).send().await.map_err(api::net_error)?;
@@ -332,8 +365,15 @@ impl Auth {
             200 => {
                 let t: TokenResponse = a.parse().ok_or_else(|| RemoteError::new("login_failed", "The server's sign-in answer could not be read. Please try again."))?;
                 let mut s = self.session.lock().await;
+                let old = if s.session_only { s.memory_refresh.clone() } else { self.store.get(ACCOUNT_REFRESH).ok().flatten() };
+                let new_token = t.refresh_token.clone();
                 self.adopt(&mut s, t);
-                Ok(self.account_of(&s))
+                let account = self.account_of(&s);
+                drop(s);
+                if let Some(old) = old.filter(|o| *o != new_token) {
+                    self.revoke(&old).await;
+                }
+                Ok(account)
             }
             400 => Err(RemoteError::new("login_failed", "The sign-in didn't complete. Please try again.")),
             401 | 404 => Err(RemoteError::login_unavailable()),
@@ -342,19 +382,27 @@ impl Auth {
         }
     }
 
-    /// Sign out here: tell the server if it can be reached, and forget the session either way.
-    pub async fn sign_out(&self) {
+    async fn revoke(&self, token: &str) {
+        let body = serde_json::json!({"refresh_token": token});
+        match self.client.post(self.url(api::PATH_REVOKE)).json(&body).timeout(Duration::from_secs(20)).send().await {
+            Ok(r) if r.status().is_success() => {}
+            Ok(r) => eprintln!("[LAB] revoke answered {}; going on anyway", r.status().as_u16()),
+            Err(_) => eprintln!("[LAB] revoke failed; going on anyway"),
+        }
+    }
+
+    /// Sign out here: tell the server if it can be reached, and forget the session either way. If the
+    /// OS store won't let go of the token, say so: the app would still look signed in.
+    pub async fn sign_out(&self) -> Result<(), RemoteError> {
         let mut s = self.session.lock().await;
         let token = if s.session_only { s.memory_refresh.clone() } else { self.store.get(ACCOUNT_REFRESH).ok().flatten() };
         if let Some(token) = token {
-            let body = serde_json::json!({"refresh_token": token});
-            match self.client.post(self.url(api::PATH_REVOKE)).json(&body).timeout(Duration::from_secs(20)).send().await {
-                Ok(r) if r.status().is_success() => {}
-                Ok(r) => eprintln!("[LAB] revoke answered {}; signing out here anyway", r.status().as_u16()),
-                Err(_) => eprintln!("[LAB] revoke failed; signing out here anyway"),
-            }
+            self.revoke(&token).await;
         }
-        self.forget(&mut s);
+        self.forget(&mut s).map_err(|e| {
+            eprintln!("[LAB] the credential store kept the sign-in: {}", api::scrub(&e));
+            RemoteError::new("credential_store", "The sign-in ended on the server, but the system's credential store didn't remove it from this PC. Please try signing out again.")
+        })
     }
 }
 
@@ -407,20 +455,25 @@ async fn reply(stream: &mut tokio::net::TcpStream, status: &str, body: &str) {
     let _ = stream.shutdown().await;
 }
 
-/// The target of a GET on this connection (a bounded read; a silent client gets nothing).
+/// The target of a GET on this connection. The time is for the whole request, so a client sending one
+/// byte at a time gets no longer than a silent one.
 async fn read_target(stream: &mut tokio::net::TcpStream) -> Option<String> {
     let mut buf = vec![0u8; 8192];
     let mut n = 0;
-    while n < buf.len() {
-        let got = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf[n..])).await.ok()?.ok()?;
-        if got == 0 {
-            break;
+    let read = async {
+        while n < buf.len() {
+            let got = stream.read(&mut buf[n..]).await.ok()?;
+            if got == 0 {
+                break;
+            }
+            n += got;
+            if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
         }
-        n += got;
-        if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
-        }
-    }
+        Some(())
+    };
+    tokio::time::timeout(CALLBACK_READ, read).await.ok()??;
     let text = String::from_utf8_lossy(&buf[..n]);
     let mut first = text.lines().next()?.split_whitespace();
     if first.next()? != "GET" {
@@ -429,40 +482,56 @@ async fn read_target(stream: &mut tokio::net::TcpStream) -> Option<String> {
     first.next().map(str::to_string)
 }
 
-/// Wait for `GET /callback`. Other paths get a 404 and don't end the wait, so a stray favicon or a
-/// local probe can't use up the single callback. Query values are percent-decoded before comparing.
-/// A wrong `state` ends the login.
+/// What one connection means for the login: None is anything but the real callback, so the wait goes on.
+async fn callback_answer(mut stream: tokio::net::TcpStream, state: &str) -> Option<Result<String, RemoteError>> {
+    let Some(target) = read_target(&mut stream).await else {
+        reply(&mut stream, "400 Bad Request", "").await;
+        return None;
+    };
+    let Ok(u) = url::Url::parse(&format!("http://127.0.0.1{}", target)) else {
+        reply(&mut stream, "400 Bad Request", "").await;
+        return None;
+    };
+    if u.path() != "/callback" {
+        reply(&mut stream, "404 Not Found", "").await;
+        return None;
+    }
+    let q: HashMap<String, String> = u.query_pairs().into_owned().collect();
+    if q.get("state").map(String::as_str) != Some(state) {
+        reply(&mut stream, "400 Bad Request", &page("Sign-in refused", "This sign-in link doesn't match the one the app opened. Go back to Spaghetti Lab and open the page again from there.")).await;
+        return None;
+    }
+    if q.contains_key("error") {
+        reply(&mut stream, "200 OK", &page("Sign-in cancelled", "You can close this tab and go back to Spaghetti Lab.")).await;
+        return Some(Err(RemoteError::new("login_denied", "The sign-in was cancelled in the browser.")));
+    }
+    let Some(code) = q.get("code").filter(|c| !c.is_empty()) else {
+        reply(&mut stream, "400 Bad Request", &page("Sign-in failed", "Please start again from Spaghetti Lab.")).await;
+        return Some(Err(RemoteError::new("login_failed", "The sign-in answer had no code. Please try again.")));
+    };
+    reply(&mut stream, "200 OK", &page("Signed in", "You can close this tab and go back to Spaghetti Lab.")).await;
+    Some(Ok(code.clone()))
+}
+
+/// Wait for `GET /callback` with this login's `state`. Query values are percent-decoded before comparing.
+/// Other paths get a 404 and a wrong `state` a 400, and neither ends the wait: anything on this PC can
+/// reach the port, and it must not be able to end someone's login. Connections are served side by side,
+/// so a silent or slow one can't hold up the browser's.
 pub async fn wait_for_callback(listener: tokio::net::TcpListener, state: &str, timeout: Duration, mut cancel: watch::Receiver<bool>) -> Result<String, RemoteError> {
     let wait = async {
+        let mut conns = FuturesUnordered::new();
         loop {
-            let (mut stream, _) = listener.accept().await.map_err(|e| RemoteError::new("login_failed", e.to_string()))?;
-            let Some(target) = read_target(&mut stream).await else {
-                reply(&mut stream, "400 Bad Request", "").await;
-                continue;
-            };
-            let Ok(u) = url::Url::parse(&format!("http://127.0.0.1{}", target)) else {
-                reply(&mut stream, "400 Bad Request", "").await;
-                continue;
-            };
-            if u.path() != "/callback" {
-                reply(&mut stream, "404 Not Found", "").await;
-                continue;
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted.map_err(|e| RemoteError::new("login_failed", e.to_string()))?;
+                    conns.push(callback_answer(stream, state));
+                }
+                Some(answer) = conns.next(), if !conns.is_empty() => {
+                    if let Some(answer) = answer {
+                        return answer;
+                    }
+                }
             }
-            let q: HashMap<String, String> = u.query_pairs().into_owned().collect();
-            if q.get("state").map(String::as_str) != Some(state) {
-                reply(&mut stream, "400 Bad Request", &page("Sign-in refused", "This sign-in link doesn't match the one the app opened. Please start again from Spaghetti Lab.")).await;
-                return Err(RemoteError::new("login_state", "The sign-in answer didn't match this request, so it was refused. Please try again."));
-            }
-            if q.contains_key("error") {
-                reply(&mut stream, "200 OK", &page("Sign-in cancelled", "You can close this tab and go back to Spaghetti Lab.")).await;
-                return Err(RemoteError::new("login_denied", "The sign-in was cancelled in the browser."));
-            }
-            let Some(code) = q.get("code").filter(|c| !c.is_empty()) else {
-                reply(&mut stream, "400 Bad Request", &page("Sign-in failed", "Please start again from Spaghetti Lab.")).await;
-                return Err(RemoteError::new("login_failed", "The sign-in answer had no code. Please try again."));
-            };
-            reply(&mut stream, "200 OK", &page("Signed in", "You can close this tab and go back to Spaghetti Lab.")).await;
-            return Ok(code.clone());
         }
     };
     tokio::select! {
@@ -599,7 +668,7 @@ pub async fn lab_sign_out() -> Result<Account, RemoteError> {
     }
     let auth = auth()?;
     crate::lab_remote::retry_pending_deletes(&auth, &crate::lab_remote::lab_root_dir()).await;
-    auth.sign_out().await;
+    auth.sign_out().await?;
     Ok(auth.account().await)
 }
 
@@ -746,17 +815,63 @@ pub mod tests {
         });
     }
 
+    /// Anything on this PC can reach the port: a wrong state is refused and can't end the login.
     #[test]
-    fn lab_callback_refuses_a_wrong_state() {
+    fn lab_callback_refuses_a_wrong_state_and_keeps_waiting() {
         run(async {
             let (l, port) = listener().await;
             let (_tx, rx) = no_cancel();
             let w = tauri::async_runtime::spawn(async move { wait_for_callback(l, "S1", Duration::from_secs(5), rx).await });
             let bad = http_get(port, "/callback?code=abc&state=WRONG").await;
             assert!(bad.starts_with("HTTP/1.1 400"));
-            assert_eq!(w.await.unwrap().unwrap_err().code, "login_state");
+            // a denial with the wrong state isn't a cancel either
+            assert!(http_get(port, "/callback?error=access_denied&state=other").await.starts_with("HTTP/1.1 400"));
+            assert!(http_get(port, "/callback?code=good&state=S1").await.starts_with("HTTP/1.1 200"));
+            assert_eq!(w.await.unwrap().unwrap(), "good");
             // the listener is closed: nothing else can reach it
             assert!(tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_err());
+        });
+    }
+
+    /// A silent client and one sending a byte at a time don't hold up the browser's request.
+    #[test]
+    fn lab_callback_is_not_held_up_by_slow_connections() {
+        run(async {
+            let (l, port) = listener().await;
+            let (_tx, rx) = no_cancel();
+            let w = tauri::async_runtime::spawn(async move { wait_for_callback(l, "S1", Duration::from_secs(30), rx).await });
+            let _silent = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            let mut slow = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            slow.write_all(b"G").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let started = Instant::now();
+            assert!(http_get(port, "/callback?code=c&state=S1").await.starts_with("HTTP/1.1 200"));
+            assert_eq!(w.await.unwrap().unwrap(), "c");
+            assert!(started.elapsed() < Duration::from_secs(2));
+        });
+    }
+
+    #[test]
+    fn lab_a_callback_request_has_one_deadline_however_slowly_it_trickles() {
+        run(async {
+            let (l, port) = listener().await;
+            let client = tauri::async_runtime::spawn(async move {
+                let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+                // never a gap near the deadline, and never the end of the request
+                for _ in 0..80 {
+                    if s.write_all(b"x").await.is_err() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            });
+            let (mut stream, _) = l.accept().await.unwrap();
+            let started = Instant::now();
+            assert_eq!(read_target(&mut stream).await, None);
+            let took = started.elapsed();
+            assert!(took >= CALLBACK_READ - Duration::from_millis(200) && took < CALLBACK_READ + Duration::from_secs(1), "{:?}", took);
+            drop(stream);
+            client.abort();
         });
     }
 
@@ -768,13 +883,6 @@ pub mod tests {
             let w = tauri::async_runtime::spawn(async move { wait_for_callback(l, "a/b", Duration::from_secs(5), rx).await });
             assert!(http_get(port, "/callback?error=access_denied&state=a%2Fb").await.starts_with("HTTP/1.1 200"));
             assert_eq!(w.await.unwrap().unwrap_err().code, "login_denied");
-
-            // a denial with the wrong state is a wrong state, not a cancel
-            let (l, port) = listener().await;
-            let (_tx, rx) = no_cancel();
-            let w = tauri::async_runtime::spawn(async move { wait_for_callback(l, "S1", Duration::from_secs(5), rx).await });
-            http_get(port, "/callback?error=access_denied&state=other").await;
-            assert_eq!(w.await.unwrap().unwrap_err().code, "login_state");
 
             let (l, _) = listener().await;
             let (_tx, rx) = no_cancel();
@@ -799,7 +907,7 @@ pub mod tests {
             let store = Arc::new(MemoryStore::default());
             let a = Auth::new(m.url.clone(), store.clone());
             let acc = a.exchange("c", "v").await.unwrap();
-            assert_eq!(acc, Account { signed_in: true, nickname: Some("Nick".into()), avatar: None, session_only: false });
+            assert_eq!(acc, Account { signed_in: true, nickname: Some("Nick".into()), avatar: None, session_only: false, store_unavailable: false });
             assert_eq!(store.get(ACCOUNT_REFRESH).unwrap().unwrap(), "sslab_rt_1");
             assert!(!serde_json::to_string(&acc).unwrap().contains("sslab_"));
             assert_eq!(store.values.lock().unwrap().len(), 2, "only the refresh token and the player are stored");
@@ -972,10 +1080,73 @@ pub mod tests {
                 (500, r#"{"error":"unavailable"}"#.into())
             });
             let (a, store) = signed_in_auth(&m.url);
-            a.sign_out().await;
+            a.sign_out().await.unwrap();
             assert_eq!(store.get(ACCOUNT_REFRESH).unwrap(), None);
             assert!(!a.account().await.signed_in);
             assert_eq!(m.calls.lock().unwrap().len(), 1);
+        });
+    }
+
+    /// The UI must not go on showing a sign-in the server just revoked as if nothing had happened.
+    #[test]
+    fn lab_sign_out_says_so_when_the_store_keeps_the_token() {
+        run(async {
+            let m = mock(|_, _, _, _| (200, r#"{"ok":true}"#.into()));
+            let (a, store) = signed_in_auth(&m.url);
+            store.fail_deletes.store(true, Ordering::SeqCst);
+            assert_eq!(a.sign_out().await.unwrap_err().code, "credential_store");
+            store.fail_deletes.store(false, Ordering::SeqCst);
+            a.sign_out().await.unwrap();
+            assert!(!a.account().await.signed_in);
+        });
+    }
+
+    #[test]
+    fn lab_an_unreadable_store_is_not_signed_out() {
+        run(async {
+            let m = mock(|_, _, _, _| (200, token_json(1)));
+            let (a, store) = signed_in_auth(&m.url);
+            store.fail_reads.store(true, Ordering::SeqCst);
+            let acc = a.account().await;
+            assert!(acc.store_unavailable && !acc.signed_in);
+            assert_eq!(a.access_token(None).await.unwrap_err().code, "credential_store");
+            store.fail_reads.store(false, Ordering::SeqCst);
+            let acc = a.account().await;
+            assert!(acc.signed_in && !acc.store_unavailable);
+            assert_eq!(store.get(ACCOUNT_REFRESH).unwrap().as_deref(), Some("sslab_rt_0"), "nothing was forgotten");
+        });
+    }
+
+    #[test]
+    fn lab_a_new_sign_in_revokes_the_one_it_replaces() {
+        run(async {
+            let m = mock(|_, p, _, _| if p.ends_with("/token") { (200, token_json(1)) } else { (200, r#"{"ok":true}"#.into()) });
+            let (a, store) = signed_in_auth(&m.url);
+            a.exchange("c", "v").await.unwrap();
+            assert_eq!(store.get(ACCOUNT_REFRESH).unwrap().as_deref(), Some("sslab_rt_1"));
+            let calls = m.calls.lock().unwrap();
+            let revokes: Vec<_> = calls.iter().filter(|c| c.1 == "/api/desktop-auth/revoke").collect();
+            assert_eq!(revokes.len(), 1);
+            assert!(revokes[0].2.contains("sslab_rt_0"));
+        });
+    }
+
+    /// A proxy may hold an upload before the backend checks the token, so it must last the whole transfer.
+    #[test]
+    fn lab_a_token_can_be_required_to_last() {
+        run(async {
+            let m = mock(|_, _, _, _| (200, token_json(1)));
+            let (a, _) = signed_in_auth(&m.url);
+            {
+                let mut s = a.session.lock().await;
+                s.access = Some("sslab_at_0".into());
+                s.expires_at = Some(Instant::now() + Duration::from_secs(600));
+            }
+            a.ensure_lasting(Duration::from_secs(300)).await.unwrap();
+            assert_eq!(m.calls.lock().unwrap().len(), 0, "ten minutes are enough for five");
+            a.ensure_lasting(Duration::from_secs(1800)).await.unwrap();
+            assert_eq!(m.calls.lock().unwrap().len(), 1);
+            assert_eq!(a.access_token(None).await.unwrap(), "sslab_at_1");
         });
     }
 
@@ -1093,7 +1264,7 @@ pub mod tests {
             println!("made-up refresh token: {} error={:?}", b.status, b.error());
 
             // Revoke by the app's code path, then the refresh token must be dead
-            a.sign_out().await;
+            a.sign_out().await.unwrap();
             println!("signed out: signed_in={}", a.account().await.signed_in);
             let dead = serde_json::json!({"grant_type": "refresh_token", "refresh_token": t.refresh_token});
             let after = Answer::read(c.post(a.url(api::PATH_TOKEN)).json(&dead).send().await.unwrap()).await.unwrap();

@@ -5,9 +5,13 @@
 // "Hosted run"). Written for runs that take minutes to hours:
 // - The server decides where an analysis is charged; the app only reports it.
 // - A started job is saved per replay (remote_job.json, ids only), so closing the app loses nothing.
+//   A job is only forgotten after a stored result or a definite answer: a paid job isn't dropped on a
+//   gateway's error page, a full disk or a cancel nobody confirmed.
 // - The temp copy goes on every path (a guard), the uploaded file after the job ended. A delete that
 //   can't finish goes to pending_deletes.json and is retried at startup and at sign-in.
-// - The start POST is never aborted: an answer lost there would leave a charged job nobody knows of.
+// - A POST may charge even when its answer never arrives (a lost connection, a gateway's error page, the
+//   app closed with it in flight). `post_sent` is saved before it goes out, and the only way to learn
+//   about that job is the same POST again: a job on that file is reused for free.
 
 use crate::lab;
 use crate::lab_api::{self as api, Answer, JobView, Quota, RemoteError, UploadAnswer};
@@ -18,7 +22,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::Emitter;
@@ -36,7 +41,13 @@ const UPLOAD_STALL: Duration = Duration::from_secs(120);
 /// The answer only comes after the server copied the file to storage.
 const UPLOAD_ANSWER: Duration = Duration::from_secs(30 * 60);
 const START_RETRIES: usize = 6;
-const START_NETWORK_RETRIES: usize = 3;
+const START_LOST_RETRIES: usize = 3;
+/// Between attempts of a start POST and of a cancel.
+const SHORT_RETRY: Duration = Duration::from_secs(5);
+const CANCEL_TRIES: usize = 3;
+const RESULT_TRIES: usize = 5;
+/// The proxy may hold the whole upload before the backend checks the token.
+const UPLOAD_TOKEN_LIFE: Duration = Duration::from_secs(30 * 60);
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Default, Deserialize)]
@@ -70,7 +81,9 @@ pub struct RunningInfo {
     pub replay_id: String,
     pub stage: String,
     pub position: Option<i64>,
-    /// "before_charge", "queued" or "running": what a cancel would mean
+    /// What a cancel would mean as far as the app knows: "before_charge", "starting" (the POST is out, so
+    /// the job may exist and even be running), "queued", "running" or "unknown". `lab_remote_cancel_phase`
+    /// asks the server first, because the refund depends on the job's status at that moment.
     pub phase: String,
 }
 
@@ -81,8 +94,11 @@ struct RemoteRun {
 
 /// The hosted run going on (one at a time; the server allows one per user anyway).
 static RUN: Mutex<Option<RemoteRun>> = Mutex::new(None);
-static LAST_ERROR: Mutex<Option<(String, RemoteError)>> = Mutex::new(None);
+/// How the last run of a replay ended, if it failed, until the screen of that replay has shown it.
+static LAST_ERROR: Mutex<BTreeMap<String, RemoteError>> = Mutex::new(BTreeMap::new());
 static PENDING_LOCK: Mutex<()> = Mutex::new(());
+/// The ffmpeg encoding the temp copy. Process exit doesn't run drops, so `kill_on_drop` isn't enough.
+static FFMPEG_PID: AtomicU32 = AtomicU32::new(0);
 
 pub fn running_replay() -> Option<String> {
     RUN.lock().unwrap().as_ref().map(|r| r.info.replay_id.clone())
@@ -109,7 +125,28 @@ fn claim_run(id: &str) -> Result<(RunGuard, watch::Receiver<bool>), RemoteError>
         info: RunningInfo { replay_id: id.into(), stage: "check".into(), position: None, phase: "before_charge".into() },
         cancel: tx,
     });
+    drop(g);
+    LAST_ERROR.lock().unwrap().remove(id);
     Ok((RunGuard, rx))
+}
+
+/// What closing the window would cost: only a run that isn't on the server yet stops for good.
+pub fn close_warning() -> Option<&'static str> {
+    let g = RUN.lock().unwrap();
+    g.as_ref().filter(|r| r.info.phase == "before_charge").map(|_| {
+        "An analysis is being prepared and hasn't started on the server yet. If you close the app now it stops. Nothing has been spent, but you'll have to start it again."
+    })
+}
+
+/// The app is going away: runtime tasks aren't dropped, so ffmpeg would go on encoding with no parent.
+pub fn on_app_exit() {
+    let pid = FFMPEG_PID.swap(0, Ordering::SeqCst);
+    if pid != 0 {
+        lab::kill_tree(pid);
+    }
+    if running_replay().is_some() {
+        let _ = std::fs::remove_dir_all(lab::lab_root().join(".tmp"));
+    }
 }
 
 // ── pure pieces ─────────────────────────────────────────────────────────────
@@ -187,6 +224,8 @@ pub fn copy_args(input: &str, output: &str, encode: bool, limit: Option<u32>) ->
 pub enum StartOutcome {
     Started(JobView, Option<Quota>),
     Retry(u64),
+    /// A gateway's error page, a 5xx, an answer that can't be read: the POST may have gone through
+    Lost,
     Fail(RemoteError),
 }
 
@@ -201,7 +240,7 @@ pub fn classify_start(a: &Answer) -> StartOutcome {
     match a.status {
         200 | 202 => match a.parse::<JobView>() {
             Some(j) => StartOutcome::Started(j, quota),
-            None => StartOutcome::Fail(RemoteError::new("start_failed", "The server's answer could not be read.")),
+            None => StartOutcome::Lost,
         },
         409 if a.error() == Some("analysis_starting") => StartOutcome::Retry(a.retry_after.unwrap_or(5)),
         429 if a.error() == Some("quota_exhausted") => StartOutcome::Fail(with_quota(RemoteError::new("quota_exhausted", "You have no analyses left this week.")).retry(a.retry_after)),
@@ -210,8 +249,42 @@ pub fn classify_start(a: &Answer) -> StartOutcome {
         503 if a.detail().is_some() => StartOutcome::Fail(RemoteError::new("queue_full", "The analysis queue is full. Please try again later. Nothing was spent.").retry(a.retry_after)),
         413 => StartOutcome::Fail(RemoteError::new("too_long", a.sentence().unwrap_or_else(|| "The video is over 15 minutes: cut it to one match or set.".into()))),
         400 | 404 | 415 => StartOutcome::Fail(RemoteError::new("start_failed", a.sentence().unwrap_or_else(|| "The server refused this video.".into()))),
+        // The route's own 503, before any charge
+        503 if a.error().is_some() => StartOutcome::Fail(RemoteError::unavailable().retry(a.retry_after)),
+        s if s >= 500 => StartOutcome::Lost,
         _ => StartOutcome::Fail(RemoteError::unavailable().retry(a.retry_after)),
     }
+}
+
+/// These come from the route itself after it looked for a job on this file: none is running.
+fn start_refused(code: &str) -> bool {
+    matches!(code, "quota_exhausted" | "one_at_a_time" | "queue_full" | "too_long" | "start_failed")
+}
+
+/// Answers about the session or the app, not about this job: everything stays as it is.
+fn stops_without_answer(code: &str) -> bool {
+    matches!(code, "signed_out" | "credential_store" | "scope")
+}
+
+fn start_unconfirmed() -> RemoteError {
+    RemoteError::new(
+        "start_unconfirmed",
+        "The server didn't confirm that the analysis started. The app asks again the next time it starts, or when you press Try again; a job that already exists isn't charged twice.",
+    )
+}
+
+fn result_pending() -> RemoteError {
+    RemoteError::new(
+        "result_pending",
+        "The analysis is done, but its result didn't arrive. Nothing is lost: the server keeps it for 24 hours, and the app fetches it the next time it starts, or when you press Try again.",
+    )
+}
+
+fn cancel_unconfirmed() -> RemoteError {
+    RemoteError::new(
+        "cancel_unconfirmed",
+        "The server didn't confirm the cancel, so the analysis may still be going. The app tries again the next time it starts, or when you press Try again.",
+    )
 }
 
 /// The upload's answer: the file's id, or why not. Limit errors have mixed shapes on the server.
@@ -238,6 +311,19 @@ pub struct SavedJob {
     pub job_id: Option<String>,
     #[serde(default)]
     pub player_user_id: Option<String>,
+    /// A start POST may have gone out, so a job may exist although `job_id` is empty
+    #[serde(default)]
+    pub post_sent: bool,
+    /// The user cancelled and the server didn't confirm it: the next attempt cancels first
+    #[serde(default)]
+    pub cancel_requested: bool,
+}
+
+impl SavedJob {
+    /// The server may hold a job for this record (and a charge).
+    fn awaits_server(&self) -> bool {
+        self.job_id.is_some() || self.post_sent
+    }
 }
 
 fn job_path(root: &Path, id: &str) -> PathBuf {
@@ -248,15 +334,20 @@ fn read_job(root: &Path, id: &str) -> Option<SavedJob> {
     serde_json::from_str(&std::fs::read_to_string(job_path(root, id)).ok()?).ok()
 }
 
-fn save_job(root: &Path, id: &str, job: &SavedJob) {
+/// In one step: a crash halfway would otherwise leave a paid job nobody can read back.
+fn try_save_job(root: &Path, id: &str, job: &SavedJob) -> std::io::Result<()> {
     let p = job_path(root, id);
     if let Some(d) = p.parent() {
-        let _ = std::fs::create_dir_all(d);
+        std::fs::create_dir_all(d)?;
     }
-    if let Ok(t) = serde_json::to_string(job) {
-        if let Err(e) = std::fs::write(&p, t) {
-            eprintln!("[LAB] could not save the job: {}", e);
-        }
+    let tmp = p.with_extension("json.part");
+    std::fs::write(&tmp, serde_json::to_string(job)?)?;
+    std::fs::rename(&tmp, &p)
+}
+
+fn save_job(root: &Path, id: &str, job: &SavedJob) {
+    if let Err(e) = try_save_job(root, id, job) {
+        eprintln!("[LAB] could not save the job: {}", e);
     }
 }
 
@@ -324,9 +415,18 @@ async fn try_delete_file(auth: &Arc<Auth>, file_id: &str) -> bool {
     }
 }
 
-async fn delete_file(auth: &Arc<Auth>, root: &Path, file_id: &str) {
+/// `owner`, else the player signed in now, is read first: the request may end the session, and an entry
+/// without a player would never be retried.
+async fn delete_file(auth: &Arc<Auth>, root: &Path, file_id: &str, owner: Option<String>) {
+    let owner = match owner {
+        Some(o) => Some(o),
+        None => auth.player_id().await,
+    };
     if !try_delete_file(auth, file_id).await {
-        add_pending(root, file_id, auth.player_id().await);
+        match owner {
+            Some(o) => add_pending(root, file_id, Some(o)),
+            None => eprintln!("[LAB] an uploaded file couldn't be deleted and has no known owner"),
+        }
     }
 }
 
@@ -363,6 +463,12 @@ struct Ctx {
     cancel: watch::Receiver<bool>,
     poll: Duration,
     poll_error: Duration,
+}
+
+impl Ctx {
+    fn short_retry(&self) -> Duration {
+        self.poll_error.min(SHORT_RETRY)
+    }
 }
 
 fn set_run(id: &str, f: impl FnOnce(&mut RunningInfo)) {
@@ -440,6 +546,7 @@ async fn run_copy(ctx: &Ctx, ffmpeg: &str, args: &[String], seconds: f64, report
     let mut c = ffmpeg_command(ffmpeg);
     c.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     let mut child = c.spawn().map_err(|e| RemoteError::new("no_video", format!("Could not run ffmpeg: {}", e)))?;
+    FFMPEG_PID.store(child.id().unwrap_or(0), Ordering::SeqCst);
     let stdout = child.stdout.take().expect("piped stdout");
     let work = async {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
@@ -463,12 +570,16 @@ async fn run_copy(ctx: &Ctx, ffmpeg: &str, args: &[String], seconds: f64, report
         r = work => Some(r.map(|s| s.success()).unwrap_or(false)),
         _ = ctx.wait_cancel() => None,
     };
+    if ended.is_some() {
+        FFMPEG_PID.store(0, Ordering::SeqCst);
+    }
     match ended {
         Some(ok) => Ok(ok),
         None => {
             // Gone before the temp folder is removed: Windows keeps a running process's output locked
             let _ = child.start_kill();
             let _ = child.wait().await;
+            FFMPEG_PID.store(0, Ordering::SeqCst);
             Err(ctx.cancelled("before_charge"))
         }
     }
@@ -500,6 +611,7 @@ async fn prepare(ctx: &Ctx, ffmpeg: &str, video: &Path, info: VideoInfo, out: &P
 /// Streams from disk, never held in memory. Always named replay.mp4: the name becomes the facts'
 /// title on the server, and player names must stay out of it.
 async fn upload(ctx: &Ctx, file: &Path, total: u64) -> Result<String, RemoteError> {
+    ctx.auth.ensure_lasting(UPLOAD_TOKEN_LIFE).await?;
     let sent = Arc::new(AtomicU64::new(0));
     let touched = Arc::new(Mutex::new(Instant::now()));
     let url = ctx.auth.url(api::PATH_UPLOAD);
@@ -569,16 +681,34 @@ async fn upload(ctx: &Ctx, file: &Path, total: u64) -> Result<String, RemoteErro
     classify_upload(&a)
 }
 
+struct StartFail {
+    error: RemoteError,
+    /// A POST may have gone through, so a job may exist: its record must stay
+    maybe_job: bool,
+}
+
 /// POST the job. Runs to its answer even if the user cancels meanwhile; a second POST on the same file
-/// never charges twice, so a lost answer can be retried.
-async fn start_job(ctx: &Ctx, file_id: &str) -> Result<JobView, RemoteError> {
+/// never charges twice, so a lost answer can be retried. `earlier`: a POST of an earlier attempt may have
+/// landed. A cancel stops any further POST: it could only charge.
+async fn start_job(ctx: &Ctx, file_id: &str, earlier: bool) -> Result<JobView, StartFail> {
     ctx.stage("start", "Starting the analysis");
-    // From here the server may charge: a cancel is no longer "nothing spent"
-    set_run(&ctx.id, |i| i.phase = "queued".into());
     let url = ctx.auth.url(api::PATH_OPENERS);
     let body = json!({ "fileId": file_id });
-    let (mut starting, mut network) = (0, 0);
+    let (mut starting, mut lost) = (0, 0);
+    let mut landed = earlier;
+    // What can't tell us about a job: nothing is known if a POST may have gone through before it
+    let undecided = |error: RemoteError, landed: bool| {
+        let error = if landed && !stops_without_answer(&error.code) { start_unconfirmed() } else { error };
+        StartFail { error, maybe_job: landed }
+    };
     loop {
+        if ctx.is_cancelled() {
+            // Without an answer the job can't be found, and asking could charge. Its file goes, so a job
+            // still waiting fails and is given back. One already past the download can't be reached.
+            return Err(StartFail { error: ctx.cancelled(if landed { "unconfirmed" } else { "before_charge" }), maybe_job: false });
+        }
+        // From here the server may charge: a cancel is no longer "nothing spent"
+        set_run(&ctx.id, |i| i.phase = "starting".into());
         let (u, b) = (url.clone(), body.clone());
         let a = ctx.auth.send(move |c| {
             let (u, b) = (u.clone(), b.clone());
@@ -592,60 +722,119 @@ async fn start_job(ctx: &Ctx, file_id: &str) -> Result<JobView, RemoteError> {
                     }
                     return Ok(job);
                 }
+                // A charge in the last minutes without a job yet: a POST did land
                 StartOutcome::Retry(secs) if starting < START_RETRIES => {
                     starting += 1;
-                    if ctx.is_cancelled() {
-                        return Err(ctx.cancelled("queued"));
-                    }
+                    landed = true;
                     ctx.nap(Duration::from_secs(secs)).await;
                 }
-                StartOutcome::Retry(_) => {
-                    return Err(RemoteError::new("start_failed", "The analysis is still starting. Please try again in a moment."));
+                StartOutcome::Retry(_) => return Err(StartFail { error: start_unconfirmed(), maybe_job: true }),
+                StartOutcome::Lost if lost < START_LOST_RETRIES => {
+                    lost += 1;
+                    landed = true;
+                    ctx.nap(ctx.short_retry()).await;
                 }
-                StartOutcome::Fail(e) => return Err(e),
+                StartOutcome::Lost => return Err(StartFail { error: start_unconfirmed(), maybe_job: true }),
+                StartOutcome::Fail(e) if start_refused(&e.code) => return Err(StartFail { error: e, maybe_job: false }),
+                StartOutcome::Fail(e) => return Err(undecided(e, landed)),
             },
-            Err(e) if e.code == "network" && network < START_NETWORK_RETRIES => {
-                network += 1;
-                ctx.nap(Duration::from_secs(5)).await;
+            Err(e) if e.code == "network" && lost < START_LOST_RETRIES => {
+                lost += 1;
+                landed = true;
+                ctx.nap(ctx.short_retry()).await;
             }
-            Err(e) => return Err(e),
+            Err(e) if e.code == "network" => return Err(StartFail { error: start_unconfirmed(), maybe_job: true }),
+            Err(e) => return Err(undecided(e, landed)),
         }
     }
 }
 
-/// Fetch, validate and store the result. The previous result stays unless the new one is valid.
+/// Start the job of an uploaded file and follow it to its end. The record says a POST is going out before
+/// it does, so that closing the app or losing the answer can't leave a charged job nobody can find.
+async fn start_and_follow(ctx: &Ctx, mut saved: SavedJob, file_id: &str) -> Result<Value, RemoteError> {
+    let earlier = saved.post_sent;
+    saved.post_sent = true;
+    if let Err(e) = try_save_job(&ctx.root, &ctx.id, &saved) {
+        if !earlier {
+            delete_file(&ctx.auth, &ctx.root, file_id, saved.player_user_id.clone()).await;
+            remove_job(&ctx.root, &ctx.id);
+        }
+        return Err(RemoteError::new("start_failed", format!("Could not save the job on this PC, so the analysis wasn't started: {}", e)));
+    }
+    let job = match start_job(ctx, file_id, earlier).await {
+        Ok(j) => j,
+        Err(StartFail { error, maybe_job: true }) => return Err(error),
+        Err(StartFail { error, maybe_job: false }) => {
+            if stops_without_answer(&error.code) {
+                // Nothing went out, and the file can't be deleted now: the next start deletes it
+                saved.post_sent = false;
+                save_job(&ctx.root, &ctx.id, &saved);
+            } else {
+                delete_file(&ctx.auth, &ctx.root, file_id, saved.player_user_id.clone()).await;
+                remove_job(&ctx.root, &ctx.id);
+            }
+            return Err(error);
+        }
+    };
+    saved.job_id = Some(job.id.clone());
+    save_job(&ctx.root, &ctx.id, &saved);
+    ctx.progress(Progress {
+        stage: "start".into(),
+        line: job.analysis_source.clone().unwrap_or_else(|| "reused".into()),
+        source: job.analysis_source.clone(),
+        ..Default::default()
+    });
+    let phase = if job.status == "queued" { "queued" } else { "running" };
+    set_run(&ctx.id, |i| i.phase = phase.into());
+    finish_job(ctx, saved, &job.id).await
+}
+
+/// Fetch, validate and store the result. The previous result stays unless the new one is valid. Anything
+/// but a result or a definite 404 is temporary: the service keeps a result for 24 h, and it's paid for.
 async fn fetch_result(ctx: &Ctx, job_id: &str) -> Result<Value, RemoteError> {
     ctx.stage("result", "Getting the result");
     let path = api::path_job_result(job_id);
     let mut tries = 0;
     let a = loop {
         match ctx.auth.send_simple(Method::GET, &path, Duration::from_secs(300)).await {
-            Ok(a) if a.status == 200 => break a,
+            // Not JSON at all: a proxy's page, not this result
+            Ok(a) if a.status == 200 && a.json.is_object() => break a,
             Ok(a) if a.status == 404 => return Err(RemoteError::new("expired", "The server no longer has this analysis.")),
-            Err(e) if e.code == "signed_out" || e.code == "scope" => return Err(e),
-            _ if tries < 4 => {
-                tries += 1;
-                ctx.nap(ctx.poll_error).await;
-            }
-            Ok(_) => return Err(RemoteError::new("bad_result", "The server didn't return the result.")),
-            Err(e) => return Err(e),
+            Err(e) if stops_without_answer(&e.code) => return Err(e),
+            _ => {}
         }
+        tries += 1;
+        // A cancel wakes every nap at once, and the job is done: no point in burning the tries
+        if tries >= RESULT_TRIES || ctx.is_cancelled() {
+            return Err(result_pending());
+        }
+        ctx.nap(ctx.poll_error).await;
     };
     store_result(&ctx.root, &ctx.id, &a.text)
 }
 
-/// Validate first, then replace in one step.
+/// Validate first, then replace in one step. `bad_result` is final, and the text stays next to the cache,
+/// where a later version that can read it picks it up. `result_write` is this PC's trouble: the job stays.
 pub fn store_result(root: &Path, id: &str, text: &str) -> Result<Value, RemoteError> {
-    let value = lab::parse_lab_result(text).map_err(|e| RemoteError::new("bad_result", format!("The server's result can't be read by this version of the app: {}", e)))?;
-    let path = lab::lab_result_path_in(root, id).map_err(|e| RemoteError::new("bad_result", e))?;
-    let dir = path.parent().ok_or_else(|| RemoteError::new("bad_result", "No folder for the result"))?;
-    std::fs::create_dir_all(dir).map_err(|e| RemoteError::new("bad_result", e.to_string()))?;
+    let write_err = |e: String| RemoteError::new("result_write", format!("The result couldn't be saved on this PC ({}). The app fetches it again the next time it starts, or when you press Try again.", e));
+    let path = lab::lab_result_path_in(root, id).map_err(write_err)?;
+    let dir = path.parent().ok_or_else(|| write_err("no folder".into()))?;
+    std::fs::create_dir_all(dir).map_err(|e| write_err(e.to_string()))?;
+    let rejected = dir.join(lab::REJECTED_RESULT);
+    let value = match lab::parse_lab_result(text) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = std::fs::write(&rejected, text);
+            return Err(RemoteError::new("bad_result", format!("The server's result can't be read by this version of the app: {}", e)));
+        }
+    };
     let tmp = dir.join("lab_result.json.part");
-    std::fs::write(&tmp, text).map_err(|e| RemoteError::new("bad_result", e.to_string()))?;
+    std::fs::write(&tmp, text).map_err(|e| write_err(e.to_string()))?;
     std::fs::rename(&tmp, &path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
-        RemoteError::new("bad_result", e.to_string())
+        write_err(e.to_string())
     })?;
+    let _ = std::fs::remove_file(&rejected);
     Ok(value)
 }
 
@@ -657,30 +846,54 @@ fn job_failed(job: &JobView, quota: Option<Quota>) -> RemoteError {
     e
 }
 
-/// DELETE the job, then see how it ended. Paid for and finished anyway: keep the result.
+/// DELETE the job, then see how it ended. Paid for and finished anyway: keep the result. Cancelled is only
+/// reported once the server said so; the answer says nothing about a refund, so the quota tells.
 async fn cancel_job(ctx: &Ctx, job_id: &str, phase: &str) -> Result<Value, RemoteError> {
-    let answer = ctx.auth.send_simple(Method::DELETE, &api::path_job(job_id), CALL_TIMEOUT).await;
-    if let Ok(a) = &answer {
-        if a.status == 409 {
-            if let Ok(j) = ctx.auth.send_simple(Method::GET, &api::path_job(job_id), CALL_TIMEOUT).await {
+    let before = lab_auth::quota(&ctx.auth).await.ok().flatten();
+    for attempt in 0..CANCEL_TRIES {
+        if attempt > 0 {
+            // not a nap: the cancel that brought us here would end it at once
+            tokio::time::sleep(ctx.short_retry()).await;
+        }
+        match ctx.auth.send_simple(Method::DELETE, &api::path_job(job_id), CALL_TIMEOUT).await {
+            Ok(a) if a.ok() => {
+                let mut e = ctx.cancelled(phase);
+                if let (Some(b), Ok(Some(after))) = (before.as_ref(), lab_auth::quota(&ctx.auth).await) {
+                    e.refunded = Some(after.free_remaining + after.credits > b.free_remaining + b.credits);
+                    e.quota = Some(after);
+                }
+                return Err(e);
+            }
+            Ok(a) if a.status == 404 => return Err(ctx.cancelled(phase)),
+            Ok(a) if a.status == 409 => {
+                let Ok(j) = ctx.auth.send_simple(Method::GET, &api::path_job(job_id), CALL_TIMEOUT).await else { continue };
+                if j.status == 404 {
+                    return Err(ctx.cancelled(phase));
+                }
                 if let Some(job) = j.parse::<JobView>() {
                     match job.status.as_str() {
                         "done" => return fetch_result(ctx, job_id).await,
                         "failed" => return Err(job_failed(&job, None)),
+                        "cancelled" => return Err(ctx.cancelled(phase)),
                         _ => {}
                     }
                 }
             }
+            Err(e) if stops_without_answer(&e.code) => return Err(e),
+            _ => {}
         }
     }
-    Err(ctx.cancelled(phase))
+    Err(cancel_unconfirmed())
 }
 
 /// Poll until the job ends. No overall timeout: a job can wait in the queue for hours.
-async fn follow_job(ctx: &Ctx, job_id: &str) -> Result<Value, RemoteError> {
-    let mut phase = "queued".to_string();
+async fn follow_job(ctx: &Ctx, job_id: &str, cancel_first: bool) -> Result<Value, RemoteError> {
+    let mut phase = "unknown".to_string();
     let mut last: Option<(String, Option<i64>)> = None;
     let path = api::path_job(job_id);
+    if cancel_first {
+        return cancel_job(ctx, job_id, &phase).await;
+    }
     loop {
         if ctx.is_cancelled() {
             return cancel_job(ctx, job_id, &phase).await;
@@ -712,7 +925,7 @@ async fn follow_job(ctx: &Ctx, job_id: &str) -> Result<Value, RemoteError> {
                 }
             }
             Ok(a) if a.status == 404 => return Err(RemoteError::new("expired", "The server no longer has this analysis.")),
-            Err(e) if e.code == "signed_out" || e.code == "scope" || e.code == "credential_store" => return Err(e),
+            Err(e) if stops_without_answer(&e.code) => return Err(e),
             // Other answers and lost connections: keep polling, slower
             _ => wait = ctx.poll_error,
         }
@@ -720,23 +933,43 @@ async fn follow_job(ctx: &Ctx, job_id: &str) -> Result<Value, RemoteError> {
     }
 }
 
-/// From a started (or saved) job to its end, and the clean-up. A sign-out keeps the job saved for
-/// later: the file stays until the job can be collected.
+/// From a started (or saved) job to its end, and the clean-up. The record goes only after a stored result,
+/// a definite end or a definite 404. A job that may be alive keeps its file too: it may still need it.
 async fn finish_job(ctx: &Ctx, saved: SavedJob, job_id: &str) -> Result<Value, RemoteError> {
-    let out = follow_job(ctx, job_id).await;
-    if matches!(&out, Err(e) if e.code == "signed_out" || e.code == "credential_store") {
-        return out;
+    let out = follow_job(ctx, job_id, saved.cancel_requested).await;
+    if let Err(e) = &out {
+        if stops_without_answer(&e.code) {
+            return out;
+        }
+        if e.code == "cancel_unconfirmed" {
+            save_job(&ctx.root, &ctx.id, &SavedJob { cancel_requested: true, ..saved });
+            return out;
+        }
     }
     if let Some(f) = saved.file_id.as_deref() {
-        delete_file(&ctx.auth, &ctx.root, f).await;
+        delete_file(&ctx.auth, &ctx.root, f, saved.player_user_id.clone()).await;
     }
-    if matches!(&out, Err(e) if e.code == "network" || e.code == "unavailable") {
-        // The job is done and paid for, only its result didn't arrive: collect it later
+    if matches!(&out, Err(e) if e.code == "result_pending" || e.code == "result_write") {
+        // The job is done and paid for, only its result isn't here: collect it later
         save_job(&ctx.root, &ctx.id, &SavedJob { file_id: None, ..saved });
         return out;
     }
     remove_job(&ctx.root, &ctx.id);
     out
+}
+
+/// A record the server may hold a job for: follow the job, or ask with the same POST.
+async fn continue_saved(ctx: &Ctx, saved: SavedJob) -> Result<Value, RemoteError> {
+    if let Some(job_id) = saved.job_id.clone() {
+        // Nothing has been heard from the server yet: the app can't say what a cancel would mean
+        set_run(&ctx.id, |i| {
+            i.stage = "queued".into();
+            i.phase = "unknown".into();
+        });
+        return finish_job(ctx, saved, &job_id).await;
+    }
+    let file_id = saved.file_id.clone().unwrap_or_default();
+    start_and_follow(ctx, saved, &file_id).await
 }
 
 /// The whole run of a new analysis.
@@ -773,38 +1006,9 @@ async fn new_run(ctx: &Ctx, ffmpeg: &str, video: &Path) -> Result<Value, RemoteE
     let file_id = upload(ctx, &copy, total).await?;
     drop(tmp);
     let player = ctx.auth.player_id().await;
-    let mut saved = SavedJob { file_id: Some(file_id.clone()), job_id: None, player_user_id: player };
+    let saved = SavedJob { file_id: Some(file_id.clone()), player_user_id: player, ..Default::default() };
     save_job(&ctx.root, &ctx.id, &saved);
-
-    if ctx.is_cancelled() {
-        delete_file(&ctx.auth, &ctx.root, &file_id).await;
-        remove_job(&ctx.root, &ctx.id);
-        return Err(ctx.cancelled("before_charge"));
-    }
-
-    let job = match start_job(ctx, &file_id).await {
-        Ok(j) => j,
-        Err(e) => {
-            if e.code != "signed_out" {
-                // Without a job: nothing to wait for. If an earlier POST did reach the server, that job
-                // fails on the missing file and the analysis is given back.
-                delete_file(&ctx.auth, &ctx.root, &file_id).await;
-                remove_job(&ctx.root, &ctx.id);
-            }
-            return Err(e);
-        }
-    };
-    saved.job_id = Some(job.id.clone());
-    save_job(&ctx.root, &ctx.id, &saved);
-    ctx.progress(Progress {
-        stage: "start".into(),
-        line: job.analysis_source.clone().unwrap_or_else(|| "reused".into()),
-        source: job.analysis_source.clone(),
-        ..Default::default()
-    });
-    let phase = if job.status == "queued" { "queued" } else { "running" };
-    set_run(&ctx.id, |i| i.phase = phase.into());
-    finish_job(ctx, saved, &job.id).await
+    start_and_follow(ctx, saved, &file_id).await
 }
 
 /// What every ended run does last: a fresh quota (the server decides any give-back) on the error too.
@@ -863,6 +1067,10 @@ pub async fn run_lab_analysis_remote(app: tauri::AppHandle, db_path: String, rep
     }
     let root = lab::lab_root();
     let me = auth.player_id().await;
+    // Without knowing who is signed in, no saved job can be told apart: none may be touched
+    if me.is_none() {
+        return Err(RemoteError::new("credential_store", "The sign-in couldn't be read from the system's credential store. Please try again in a moment."));
+    }
     let mut saved = read_job(&root, &id);
     // Another player's job on this PC isn't ours to collect: its file is deleted when they sign in
     if let Some(other) = saved.as_ref().filter(|s| s.player_user_id != me) {
@@ -872,22 +1080,23 @@ pub async fn run_lab_analysis_remote(app: tauri::AppHandle, db_path: String, rep
         remove_job(&root, &id);
         saved = None;
     }
-    let has_job = saved.as_ref().map_or(false, |s| s.job_id.is_some());
-    if !has_job && !options.again.unwrap_or(false) && lab::lab_result_path_in(&root, &id).map_or(false, |p| p.is_file()) {
+    let waiting = saved.as_ref().map_or(false, SavedJob::awaits_server);
+    if !waiting && !options.again.unwrap_or(false) && lab::lab_result_path_in(&root, &id).map_or(false, |p| p.is_file()) {
         return Err(RemoteError::new("already_cached", "This replay already has a result. Analysing it again spends an analysis."));
     }
     let (_guard, cancel) = claim_run(&id)?;
     let ctx = app_ctx(&app, auth, &id, cancel);
 
-    // A job already paid for: collect it instead of spending again
-    if let Some(job_id) = saved.as_ref().and_then(|s| s.job_id.clone()) {
-        set_run(&id, |i| i.phase = "queued".into());
-        let out = finish_job(&ctx, saved.unwrap_or_default(), &job_id).await;
+    // A job already paid for, or one a lost answer may have started: never spend again before knowing
+    if let Some(s) = saved.as_ref().filter(|s| s.awaits_server()) {
+        let out = continue_saved(&ctx, s.clone()).await;
         return remember_error(&id, conclude(&ctx, out).await);
     }
     // An upload whose job never started: nothing will use that file
-    if let Some(f) = saved.as_ref().and_then(|s| s.file_id.as_deref()) {
-        delete_file(&ctx.auth, &ctx.root, f).await;
+    if let Some(s) = saved.as_ref() {
+        if let Some(f) = s.file_id.as_deref() {
+            delete_file(&ctx.auth, &ctx.root, f, s.player_user_id.clone()).await;
+        }
         remove_job(&ctx.root, &ctx.id);
     }
     let out = async {
@@ -908,11 +1117,16 @@ pub async fn run_lab_analysis_remote(app: tauri::AppHandle, db_path: String, rep
 
 /// The screen may have been closed meanwhile; it asks with `lab_remote_take_error` when it comes back.
 fn remember_error(id: &str, out: Result<Value, RemoteError>) -> Result<Value, RemoteError> {
-    if let Err(e) = &out {
-        if e.code != "cancelled" {
-            *LAST_ERROR.lock().unwrap() = Some((id.to_string(), e.clone()));
+    let mut g = LAST_ERROR.lock().unwrap();
+    match &out {
+        Err(e) => {
+            g.insert(id.to_string(), e.clone());
+        }
+        Ok(_) => {
+            g.remove(id);
         }
     }
+    drop(g);
     out
 }
 
@@ -922,13 +1136,32 @@ pub struct CancelAnswer {
 }
 
 /// Ask the run to stop; its command then ends with `cancelled`. Before the charge nothing was spent;
-/// a queued job is given back; a running one is not (the UI warned).
+/// a queued job is given back; a running one is not (the UI warned, from `lab_remote_cancel_phase`).
 #[tauri::command]
 pub fn cancel_lab_analysis_remote(replay_id: String) -> Result<CancelAnswer, RemoteError> {
     let g = RUN.lock().unwrap();
     let run = g.as_ref().filter(|r| r.info.replay_id == replay_id).ok_or_else(|| RemoteError::new("cancelled", "No analysis of this replay is running."))?;
     let _ = run.cancel.send(true);
     Ok(CancelAnswer { phase: run.info.phase.clone() })
+}
+
+/// What a cancel means right now: the refund depends on the job's status when the DELETE arrives, so a
+/// poll's answer from up to 30 s ago isn't good enough for the warning.
+#[tauri::command]
+pub async fn lab_remote_cancel_phase(replay_id: String) -> Result<CancelAnswer, RemoteError> {
+    let known = RUN.lock().unwrap().as_ref().filter(|r| r.info.replay_id == replay_id).map(|r| r.info.phase.clone());
+    let Some(known) = known else { return Err(RemoteError::new("cancelled", "No analysis of this replay is running.")) };
+    let id = lab::safe_id(&replay_id).map_err(|e| RemoteError::new("cancelled", e))?;
+    let Some(job_id) = read_job(&lab::lab_root(), &id).and_then(|j| j.job_id) else { return Ok(CancelAnswer { phase: known }) };
+    let answer = lab_auth::auth()?.send_simple(Method::GET, &api::path_job(&job_id), Duration::from_secs(15)).await;
+    let job = answer.ok().filter(|a| a.status == 200).and_then(|a| a.parse::<JobView>());
+    let phase = match job.as_ref().map(|j| j.status.as_str()) {
+        Some("queued") => "queued",
+        Some("running") => "running",
+        _ => "unknown",
+    };
+    set_run(&id, |i| i.phase = phase.into());
+    Ok(CancelAnswer { phase: phase.into() })
 }
 
 #[tauri::command]
@@ -939,15 +1172,12 @@ pub fn lab_remote_running() -> Option<RunningInfo> {
 /// How the last background run of this replay ended, once (the screen may have been closed meanwhile).
 #[tauri::command]
 pub fn lab_remote_take_error(replay_id: String) -> Option<RemoteError> {
-    let mut g = LAST_ERROR.lock().unwrap();
-    if g.as_ref().map_or(false, |(id, _)| *id == replay_id) {
-        return g.take().map(|(_, e)| e);
-    }
-    None
+    LAST_ERROR.lock().unwrap().remove(&replay_id)
 }
 
 /// Leftovers of an earlier session: temp copies, deletes that failed, saved jobs. A job with an id is
-/// collected; a file without a job is deleted, because the user didn't ask to spend again.
+/// collected, and a POST that may have landed is asked about; a file no POST went out for is deleted,
+/// because the user didn't ask to spend again.
 #[tauri::command]
 pub async fn lab_remote_resume(app: tauri::AppHandle) -> Result<(), RemoteError> {
     let auth = lab_auth::auth()?;
@@ -986,17 +1216,16 @@ async fn resume_all(app: tauri::AppHandle, auth: Arc<Auth>, root: PathBuf) {
         if job.player_user_id != me || running_replay().as_deref() == Some(id.as_str()) {
             continue;
         }
-        let Some(job_id) = job.job_id.clone() else {
+        if !job.awaits_server() {
             if let Some(f) = job.file_id.as_deref() {
-                delete_file(&auth, &root, f).await;
+                delete_file(&auth, &root, f, job.player_user_id.clone()).await;
             }
             remove_job(&root, &id);
             continue;
-        };
+        }
         let Ok((_guard, cancel)) = claim_run(&id) else { continue };
-        set_run(&id, |i| i.phase = "queued".into());
         let ctx = app_ctx(&app, auth.clone(), &id, cancel);
-        let out = finish_job(&ctx, job, &job_id).await;
+        let out = continue_saved(&ctx, job).await;
         let _ = remember_error(&id, conclude(&ctx, out).await);
         let _ = app.emit("lab-remote-ended", json!({ "replay_id": id }));
     }
@@ -1088,6 +1317,7 @@ mod tests {
             StartOutcome::Fail(e) => e.code,
             StartOutcome::Started(..) => "started".into(),
             StartOutcome::Retry(_) => "retry".into(),
+            StartOutcome::Lost => "lost".into(),
         }
     }
 
@@ -1121,7 +1351,11 @@ mod tests {
         assert_eq!(fail_code(outcome(503, Some(300), r#"{"detail":"the analysis queue is full, try again later"}"#)), "queue_full");
         assert_eq!(fail_code(outcome(503, None, r#"{"error":"Opener analysis is not available"}"#)), "unavailable");
         assert_eq!(fail_code(outcome(413, None, r#"{"error":"The video is over 15 min: cut it to one match or set"}"#)), "too_long");
-        assert_eq!(fail_code(outcome(502, None, "<html>")), "unavailable");
+        // the POST may have gone through behind these
+        assert_eq!(fail_code(outcome(502, None, "<html>")), "lost");
+        assert_eq!(fail_code(outcome(504, None, "<html>")), "lost");
+        assert_eq!(fail_code(outcome(500, None, "oops")), "lost");
+        assert_eq!(fail_code(outcome(202, None, "<html>")), "lost");
         assert_eq!(fail_code(outcome(404, None, r#"{"error":"File not found"}"#)), "start_failed");
     }
 
@@ -1154,6 +1388,10 @@ mod tests {
             poll_error: Duration::from_millis(10),
         };
         (ctx, tx, events)
+    }
+
+    fn job_record(file: &str, job: Option<&str>) -> SavedJob {
+        SavedJob { file_id: Some(file.into()), job_id: job.map(String::from), player_user_id: Some("u-1".into()), ..Default::default() }
     }
 
     fn fixture() -> String {
@@ -1238,7 +1476,7 @@ mod tests {
                 }
             });
             let (ctx, _tx, events) = ctx_for(&m, tmp.path(), "r1");
-            let saved = SavedJob { file_id: Some("f1".into()), job_id: Some("j1".into()), player_user_id: Some("u-1".into()) };
+            let saved = job_record("f1", Some("j1"));
             save_job(tmp.path(), "r1", &saved);
             let v = finish_job(&ctx, saved, "j1").await.unwrap();
             assert!(v["openers"].is_array());
@@ -1281,7 +1519,7 @@ mod tests {
                     }
                 });
                 let (ctx, _tx, _) = ctx_for(&m, tmp.path(), "r1");
-                let saved = SavedJob { file_id: Some("f1".into()), job_id: Some("j".into()), player_user_id: None };
+                let saved = job_record("f1", Some("j"));
                 let e = finish_job(&ctx, saved, "j").await.unwrap_err();
                 assert_eq!(e.code, "job_failed");
                 assert_eq!(e.refunded, expect);
@@ -1306,7 +1544,7 @@ mod tests {
             });
             let (ctx, tx, _) = ctx_for(&m, tmp.path(), "r1");
             tx.send(true).unwrap();
-            let saved = SavedJob { file_id: Some("f1".into()), job_id: Some("j".into()), player_user_id: None };
+            let saved = job_record("f1", Some("j"));
             assert_eq!(finish_job(&ctx, saved, "j").await.unwrap_err().code, "cancelled");
             let calls = m.calls.lock().unwrap();
             let deletes: Vec<&str> = calls.iter().filter(|c| c.0 == "DELETE").map(|c| c.1.as_str()).collect();
@@ -1333,7 +1571,7 @@ mod tests {
             });
             let (ctx, tx, _) = ctx_for(&m, tmp.path(), "r1");
             tx.send(true).unwrap();
-            let saved = SavedJob { file_id: Some("f1".into()), job_id: Some("j".into()), player_user_id: None };
+            let saved = job_record("f1", Some("j"));
             assert!(finish_job(&ctx, saved, "j").await.is_ok());
             assert!(tmp.path().join("r1/lab_result.json").is_file());
         });
@@ -1351,7 +1589,7 @@ mod tests {
                 }
             });
             let (ctx, _tx, _) = ctx_for(&m, tmp.path(), "r1");
-            let saved = SavedJob { file_id: Some("f1".into()), job_id: Some("j".into()), player_user_id: None };
+            let saved = job_record("f1", Some("j"));
             save_job(tmp.path(), "r1", &saved);
             assert_eq!(finish_job(&ctx, saved.clone(), "j").await.unwrap_err().code, "signed_out");
             assert_eq!(read_job(tmp.path(), "r1"), Some(saved));
@@ -1380,7 +1618,7 @@ mod tests {
                 }
             });
             let (ctx, _tx, _) = ctx_for(&m, tmp.path(), "r1");
-            let saved = SavedJob { file_id: Some("f1".into()), job_id: Some("j".into()), player_user_id: None };
+            let saved = job_record("f1", Some("j"));
             assert_eq!(finish_job(&ctx, saved, "j").await.unwrap_err().code, "expired");
         });
     }
@@ -1391,7 +1629,7 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let m = mock(|_, p, _, _| if p.contains("token") { (200, token_json(1)) } else { (403, r#"{"error":"scope"}"#.into()) });
             let (auth, store) = signed_in_auth(&m.url);
-            delete_file(&auth, tmp.path(), "f1").await;
+            delete_file(&auth, tmp.path(), "f1", None).await;
             assert!(read_pending(tmp.path()).is_empty());
             use crate::lab_auth::TokenStore as _;
             assert!(store.get("refresh_token").unwrap().is_some(), "not a sign-out");
@@ -1408,7 +1646,7 @@ mod tests {
                 }
             });
             let (auth, _) = signed_in_auth(&m.url);
-            delete_file(&auth, tmp.path(), "f2").await;
+            delete_file(&auth, tmp.path(), "f2", None).await;
             let list = read_pending(tmp.path());
             assert_eq!(list.len(), 1);
             assert_eq!(list[0].player_user_id.as_deref(), Some("u-1"));
@@ -1439,13 +1677,375 @@ mod tests {
                 }
             });
             let (ctx, _tx, _) = ctx_for(&m, tmp.path(), "r1");
-            let saved = SavedJob { file_id: Some("f1".into()), job_id: Some("j".into()), player_user_id: Some("u-1".into()) };
-            assert_eq!(finish_job(&ctx, saved, "j").await.unwrap_err().code, "unavailable");
+            let saved = job_record("f1", Some("j"));
+            assert_eq!(finish_job(&ctx, saved, "j").await.unwrap_err().code, "result_pending");
             let left = read_job(tmp.path(), "r1").unwrap();
             assert_eq!(left.file_id, None, "the upload is deleted");
             assert_eq!(left.job_id.as_deref(), Some("j"));
             assert!(m.calls.lock().unwrap().iter().any(|c| c.0 == "DELETE" && c.1 == "/api/user-files/f1"));
         });
+    }
+
+    /// Whatever goes wrong while fetching a paid result, the job stays and the result can still be collected.
+    #[test]
+    fn lab_a_paid_result_survives_any_temporary_answer() {
+        run(async {
+            for (status, body) in [(502, "<html>"), (504, "<html>"), (500, "{}"), (429, "Too many"), (409, r#"{"detail":"the job has no result (yet)"}"#), (200, "<html>maintenance</html>")] {
+                let tmp = tempfile::tempdir().unwrap();
+                let up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let u2 = up.clone();
+                let m = mock(move |method, p, _, _| {
+                    if p.contains("token") {
+                        (200, token_json(1))
+                    } else if method == "DELETE" {
+                        (200, "{}".into())
+                    } else if p.ends_with("/result") {
+                        if u2.load(Ordering::SeqCst) { (200, fixture()) } else { (status, body.to_string()) }
+                    } else {
+                        (200, r#"{"id":"j","status":"done","stage":"done"}"#.into())
+                    }
+                });
+                let (ctx, _tx, _) = ctx_for(&m, tmp.path(), "r1");
+                let saved = job_record("f1", Some("j"));
+                assert_eq!(finish_job(&ctx, saved, "j").await.unwrap_err().code, "result_pending", "{status}");
+                let left = read_job(tmp.path(), "r1").expect("the job stays");
+                assert_eq!(left.job_id.as_deref(), Some("j"));
+                assert_eq!(left.file_id, None, "a finished job doesn't need its upload");
+                up.store(true, Ordering::SeqCst);
+                assert!(continue_saved(&ctx, left).await.is_ok());
+                assert!(tmp.path().join("r1/lab_result.json").is_file());
+                assert!(read_job(tmp.path(), "r1").is_none());
+            }
+        });
+    }
+
+    /// A cancel wakes every nap at once: the result stage must not burn its tries in a burst.
+    #[test]
+    fn lab_a_cancel_during_the_result_stage_keeps_the_job_without_a_burst() {
+        run(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let m = mock(|_, p, _, _| if p.contains("token") { (200, token_json(1)) } else { (502, "<html>".into()) });
+            let (ctx, tx, _) = ctx_for(&m, tmp.path(), "r1");
+            tx.send(true).unwrap();
+            assert_eq!(fetch_result(&ctx, "j").await.unwrap_err().code, "result_pending");
+            assert_eq!(m.calls.lock().unwrap().iter().filter(|c| c.1.ends_with("/result")).count(), 1);
+        });
+    }
+
+    /// A result this version can't read is final for this job, but it isn't lost: an update reads it.
+    #[test]
+    fn lab_a_refused_result_is_kept_for_a_later_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let future = r#"{"schema":"spaghetti-lab-result/9","openers":[]}"#;
+        assert_eq!(store_result(tmp.path(), "r1", future).unwrap_err().code, "bad_result");
+        assert_eq!(std::fs::read_to_string(tmp.path().join("r1").join(lab::REJECTED_RESULT)).unwrap(), future);
+        assert_eq!(lab::read_cached(tmp.path(), "r1").unwrap(), None, "this version still can't read it");
+        // what a later version would see
+        std::fs::write(tmp.path().join("r1").join(lab::REJECTED_RESULT), fixture()).unwrap();
+        assert!(lab::read_cached(tmp.path(), "r1").unwrap().is_some());
+        assert!(!tmp.path().join("r1").join(lab::REJECTED_RESULT).exists());
+    }
+
+    #[test]
+    fn lab_a_full_disk_keeps_the_job() {
+        run(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let m = mock(|method, p, _, _| {
+                if p.contains("token") {
+                    (200, token_json(1))
+                } else if method == "DELETE" {
+                    (200, "{}".into())
+                } else if p.ends_with("/result") {
+                    (200, fixture())
+                } else {
+                    (200, r#"{"id":"j","status":"done","stage":"done"}"#.into())
+                }
+            });
+            let (ctx, _tx, _) = ctx_for(&m, tmp.path(), "r1");
+            // a folder where the file must go stands in for a write that fails
+            std::fs::create_dir_all(tmp.path().join("r1/lab_result.json.part")).unwrap();
+            let saved = job_record("f1", Some("j"));
+            assert_eq!(finish_job(&ctx, saved, "j").await.unwrap_err().code, "result_write");
+            assert!(read_job(tmp.path(), "r1").is_some());
+        });
+    }
+
+    fn start_ctx_files(tmp: &Path) {
+        std::fs::create_dir_all(tmp.join("r1")).unwrap();
+    }
+
+    /// A gateway's error page in front of a POST that went through: the same POST finds the job for free.
+    #[test]
+    fn lab_a_gateway_error_on_the_start_is_asked_again_and_the_marker_is_written_first() {
+        run(async {
+            let tmp = tempfile::tempdir().unwrap();
+            start_ctx_files(tmp.path());
+            let root = tmp.path().to_path_buf();
+            let posts = Arc::new(AtomicU64::new(0));
+            let p2 = posts.clone();
+            let m = mock(move |method, p, _, _| {
+                if p.contains("token") {
+                    return (200, token_json(1));
+                }
+                if method == "POST" {
+                    let on_disk = read_job(&root, "r1").expect("saved before the POST");
+                    assert!(on_disk.post_sent, "the marker goes out before the POST");
+                    return if p2.fetch_add(1, Ordering::SeqCst) == 0 {
+                        (502, "<html>Bad gateway</html>".into())
+                    } else {
+                        (200, r#"{"id":"j","status":"done","stage":"done","reused":true}"#.into())
+                    };
+                }
+                if method == "DELETE" {
+                    return (200, "{}".into());
+                }
+                if p.ends_with("/result") {
+                    (200, fixture())
+                } else {
+                    (200, r#"{"id":"j","status":"done","stage":"done"}"#.into())
+                }
+            });
+            let (ctx, _tx, _) = ctx_for(&m, tmp.path(), "r1");
+            let saved = job_record("f1", None);
+            assert!(start_and_follow(&ctx, saved, "f1").await.is_ok());
+            assert_eq!(posts.load(Ordering::SeqCst), 2);
+            assert!(tmp.path().join("r1/lab_result.json").is_file());
+        });
+    }
+
+    /// No answer to any POST: the file and the record stay, and the next attempt asks the same way.
+    #[test]
+    fn lab_an_unanswered_start_keeps_the_upload_and_asks_again_later() {
+        run(async {
+            let tmp = tempfile::tempdir().unwrap();
+            start_ctx_files(tmp.path());
+            let up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let u2 = up.clone();
+            let m = mock(move |method, p, _, _| {
+                if p.contains("token") {
+                    (200, token_json(1))
+                } else if method == "POST" {
+                    if u2.load(Ordering::SeqCst) {
+                        (200, r#"{"id":"j","status":"failed","error":"x","reused":true}"#.into())
+                    } else {
+                        (504, "<html>Gateway timeout</html>".into())
+                    }
+                } else if method == "DELETE" {
+                    (200, "{}".into())
+                } else {
+                    (200, r#"{"id":"j","status":"failed","error":"x"}"#.into())
+                }
+            });
+            let (ctx, _tx, _) = ctx_for(&m, tmp.path(), "r1");
+            let e = start_and_follow(&ctx, job_record("f1", None), "f1").await.unwrap_err();
+            assert_eq!(e.code, "start_unconfirmed");
+            assert!(!m.calls.lock().unwrap().iter().any(|c| c.0 == "DELETE"), "a job may need the file");
+            let left = read_job(tmp.path(), "r1").unwrap();
+            assert!(left.post_sent && left.awaits_server());
+            assert_eq!(left.file_id.as_deref(), Some("f1"));
+            up.store(true, Ordering::SeqCst);
+            assert_eq!(continue_saved(&ctx, left).await.unwrap_err().code, "job_failed");
+            assert!(read_job(tmp.path(), "r1").is_none());
+        });
+    }
+
+    /// A refusal by the route is an answer: no job, so the file goes, even after a lost POST.
+    #[test]
+    fn lab_a_refused_start_deletes_the_upload_after_a_lost_answer_too() {
+        run(async {
+            for (status, body, code) in [(404, r#"{"error":"File not found"}"#, "start_failed"), (503, r#"{"detail":"the analysis queue is full, try again later"}"#, "queue_full")] {
+                let tmp = tempfile::tempdir().unwrap();
+                start_ctx_files(tmp.path());
+                let n = Arc::new(AtomicU64::new(0));
+                let m = mock(move |method, p, _, _| {
+                    if p.contains("token") {
+                        (200, token_json(1))
+                    } else if method == "POST" {
+                        if n.fetch_add(1, Ordering::SeqCst) == 0 { (502, "<html>".into()) } else { (status, body.to_string()) }
+                    } else {
+                        (200, "{}".into())
+                    }
+                });
+                let (ctx, _tx, _) = ctx_for(&m, tmp.path(), "r1");
+                assert_eq!(start_and_follow(&ctx, job_record("f1", None), "f1").await.unwrap_err().code, code);
+                assert!(read_job(tmp.path(), "r1").is_none());
+                assert!(m.calls.lock().unwrap().iter().any(|c| c.0 == "DELETE" && c.1 == "/api/user-files/f1"));
+            }
+        });
+    }
+
+    /// A cancel never sends another POST: that could only charge.
+    #[test]
+    fn lab_a_cancel_stops_the_next_start_post() {
+        run(async {
+            let tmp = tempfile::tempdir().unwrap();
+            start_ctx_files(tmp.path());
+            let cancel: Arc<Mutex<Option<watch::Sender<bool>>>> = Default::default();
+            let c2 = cancel.clone();
+            let m = mock(move |method, p, _, _| {
+                if p.contains("token") {
+                    (200, token_json(1))
+                } else if method == "POST" {
+                    let _ = c2.lock().unwrap().as_ref().unwrap().send(true);
+                    (502, "<html>".into())
+                } else {
+                    (200, "{}".into())
+                }
+            });
+            let (ctx, tx, _) = ctx_for(&m, tmp.path(), "r1");
+            *cancel.lock().unwrap() = Some(tx);
+            let e = start_and_follow(&ctx, job_record("f1", None), "f1").await.unwrap_err();
+            assert_eq!(e.code, "cancelled");
+            assert_eq!(e.phase.as_deref(), Some("unconfirmed"), "the UI must not claim nothing was spent");
+            let calls = m.calls.lock().unwrap();
+            assert_eq!(calls.iter().filter(|c| c.0 == "POST" && c.1.ends_with("/openers")).count(), 1);
+            assert!(calls.iter().any(|c| c.0 == "DELETE" && c.1 == "/api/user-files/f1"));
+        });
+    }
+
+    /// A dead session at the first POST: nothing went out, so the next start deletes the file, not charges.
+    #[test]
+    fn lab_a_sign_out_at_the_first_post_doesnt_leave_a_marker() {
+        run(async {
+            let tmp = tempfile::tempdir().unwrap();
+            start_ctx_files(tmp.path());
+            let m = mock(|_, p, _, _| if p.contains("token") { (400, r#"{"error":"invalid_grant"}"#.into()) } else { (401, r#"{"error":"invalid_token"}"#.into()) });
+            let (ctx, _tx, _) = ctx_for(&m, tmp.path(), "r1");
+            assert_eq!(start_and_follow(&ctx, job_record("f1", None), "f1").await.unwrap_err().code, "signed_out");
+            let left = read_job(tmp.path(), "r1").unwrap();
+            assert!(!left.awaits_server());
+            assert_eq!(left.file_id.as_deref(), Some("f1"));
+        });
+    }
+
+    /// Cancelled is only said once the server said so; until then the job and its file stay.
+    #[test]
+    fn lab_an_unconfirmed_cancel_keeps_the_job_and_tries_again() {
+        run(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let u2 = up.clone();
+            let m = mock(move |method, p, _, _| {
+                if p.contains("token") {
+                    (200, token_json(1))
+                } else if p.ends_with("/quota") {
+                    (200, r#"{"free_remaining":1,"free_per_week":2,"credits":0,"week_resets_at":"x"}"#.into())
+                } else if method == "DELETE" && p.contains("user-files") {
+                    (200, "{}".into())
+                } else if method == "DELETE" {
+                    if u2.load(Ordering::SeqCst) { (200, r#"{"cancelled":true}"#.into()) } else { (502, "<html>".into()) }
+                } else {
+                    (200, r#"{"id":"j","status":"running","stage":"hud"}"#.into())
+                }
+            });
+            let (ctx, tx, _) = ctx_for(&m, tmp.path(), "r1");
+            tx.send(true).unwrap();
+            let e = finish_job(&ctx, job_record("f1", Some("j")), "j").await.unwrap_err();
+            assert_eq!(e.code, "cancel_unconfirmed");
+            let job_deletes = |m: &Mock| m.calls.lock().unwrap().iter().filter(|c| c.0 == "DELETE" && c.1.contains("openers")).count();
+            assert_eq!(job_deletes(&m), CANCEL_TRIES);
+            assert!(!m.calls.lock().unwrap().iter().any(|c| c.1.contains("user-files")), "a live job keeps its file");
+            let left = read_job(tmp.path(), "r1").unwrap();
+            assert!(left.cancel_requested && left.file_id.is_some());
+
+            // the next attempt, in a new run: nobody pressed cancel there
+            up.store(true, Ordering::SeqCst);
+            let (ctx, _tx, _) = ctx_for(&m, tmp.path(), "r1");
+            let e = continue_saved(&ctx, left).await.unwrap_err();
+            assert_eq!(e.code, "cancelled");
+            assert_eq!(job_deletes(&m), CANCEL_TRIES + 1);
+            assert!(m.calls.lock().unwrap().iter().any(|c| c.1 == "/api/user-files/f1"));
+            assert!(read_job(tmp.path(), "r1").is_none());
+        });
+    }
+
+    /// The DELETE says nothing about a refund, and the warning may have been out of date: the quota tells.
+    #[test]
+    fn lab_a_cancel_reports_the_refund_from_the_quota() {
+        run(async {
+            for (after, refunded) in [(2, true), (1, false)] {
+                let tmp = tempfile::tempdir().unwrap();
+                let deleted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let d2 = deleted.clone();
+                let m = mock(move |method, p, _, _| {
+                    if p.contains("token") {
+                        (200, token_json(1))
+                    } else if p.ends_with("/quota") {
+                        let free = if d2.load(Ordering::SeqCst) { after } else { 1 };
+                        (200, format!(r#"{{"free_remaining":{free},"free_per_week":2,"credits":0,"week_resets_at":"x"}}"#))
+                    } else if method == "DELETE" {
+                        d2.store(true, Ordering::SeqCst);
+                        (200, r#"{"cancelled":true}"#.into())
+                    } else {
+                        (200, r#"{"id":"j","status":"running","stage":"hud"}"#.into())
+                    }
+                });
+                let (ctx, tx, _) = ctx_for(&m, tmp.path(), "r1");
+                tx.send(true).unwrap();
+                let e = finish_job(&ctx, job_record("f1", Some("j")), "j").await.unwrap_err();
+                assert_eq!(e.code, "cancelled");
+                assert_eq!(e.refunded, Some(refunded));
+            }
+        });
+    }
+
+    /// 403 scope is a bug to report: no job forgotten, no file deleted under a job that may be running.
+    #[test]
+    fn lab_scope_on_a_poll_or_a_cancel_touches_nothing() {
+        run(async {
+            for cancel in [false, true] {
+                let tmp = tempfile::tempdir().unwrap();
+                let m = mock(|_, p, _, _| if p.contains("token") { (200, token_json(1)) } else { (403, r#"{"error":"scope"}"#.into()) });
+                let (ctx, tx, _) = ctx_for(&m, tmp.path(), "r1");
+                if cancel {
+                    tx.send(true).unwrap();
+                }
+                let saved = job_record("f1", Some("j"));
+                save_job(tmp.path(), "r1", &saved);
+                assert_eq!(finish_job(&ctx, saved.clone(), "j").await.unwrap_err().code, "scope");
+                assert_eq!(read_job(tmp.path(), "r1"), Some(saved));
+                assert!(!m.calls.lock().unwrap().iter().any(|c| c.1.contains("user-files")));
+            }
+        });
+    }
+
+    /// The session ending during the delete must not leave an entry nobody can retry.
+    #[test]
+    fn lab_a_delete_that_ends_the_session_keeps_the_owner() {
+        run(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let m = mock(|_, p, _, _| if p.contains("token") { (400, r#"{"error":"invalid_grant"}"#.into()) } else { (401, r#"{"error":"invalid_token"}"#.into()) });
+            let (auth, _) = signed_in_auth(&m.url);
+            delete_file(&auth, tmp.path(), "f1", None).await;
+            assert!(!auth.account().await.signed_in);
+            let list = read_pending(tmp.path());
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].player_user_id.as_deref(), Some("u-1"));
+        });
+    }
+
+    /// Errors are kept per replay until that replay's screen has shown them, and a new run clears them.
+    #[test]
+    fn lab_errors_wait_for_their_replay_and_a_new_run_clears_them() {
+        let _ = remember_error("err-a", Err(RemoteError::new("job_failed", "x")));
+        let _ = remember_error("err-b", Err(RemoteError::new("expired", "y")));
+        assert_eq!(lab_remote_take_error("err-a".into()).unwrap().code, "job_failed");
+        assert!(lab_remote_take_error("err-a".into()).is_none());
+        assert_eq!(lab_remote_take_error("err-b".into()).unwrap().code, "expired");
+
+        let _ = remember_error("err-c", Err(RemoteError::new("job_failed", "x")));
+        let _ = remember_error("err-c", Ok(Value::Null));
+        assert!(lab_remote_take_error("err-c".into()).is_none());
+
+        let _ = remember_error("err-d", Err(RemoteError::new("job_failed", "x")));
+        // other tests may hold the run slot for a moment
+        for _ in 0..100 {
+            if claim_run("err-d").is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(lab_remote_take_error("err-d".into()).is_none());
     }
 
     /// Cancelling with every byte sent waits for the file's id: it's the only way to delete that file.
@@ -1509,7 +2109,7 @@ mod tests {
             let file_id = upload(&ctx, &clip, total).await.expect("upload");
             println!("upload: ok, {} bytes in {:.1} s, {} progress events", total, started.elapsed().as_secs_f64(), events.lock().unwrap().len());
 
-            delete_file(&auth, tmp.path(), &file_id).await;
+            delete_file(&auth, tmp.path(), &file_id, None).await;
             println!("file delete: pending left = {}", read_pending(tmp.path()).len());
             assert!(read_pending(tmp.path()).is_empty());
             // A second delete: 404, which also counts as done
@@ -1519,7 +2119,7 @@ mod tests {
             let after = lab_auth::quota(&auth).await.unwrap().expect("quota");
             println!("quota after: free={} credits={}", after.free_remaining, after.credits);
             assert_eq!((before.free_remaining, before.credits), (after.free_remaining, after.credits), "an upload alone spends nothing");
-            auth.sign_out().await;
+            auth.sign_out().await.unwrap();
             drop(tx);
         });
     }
@@ -1527,7 +2127,7 @@ mod tests {
     #[test]
     fn lab_saved_files_hold_no_tokens() {
         let tmp = tempfile::tempdir().unwrap();
-        save_job(tmp.path(), "r1", &SavedJob { file_id: Some("f".into()), job_id: Some("j".into()), player_user_id: Some("u".into()) });
+        save_job(tmp.path(), "r1", &job_record("f", Some("j")));
         let t = std::fs::read_to_string(job_path(tmp.path(), "r1")).unwrap();
         assert!(!t.contains("sslab_") && !t.contains("token"));
         assert_eq!(saved_jobs(tmp.path()).len(), 1);

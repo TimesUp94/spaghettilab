@@ -5,8 +5,8 @@ import { useState } from "react";
 import { AlertTriangle, Check, ExternalLink, Info, LogIn, LogOut, Play, RefreshCw, Square } from "lucide-react";
 import { Button, Spinner } from "./ui";
 import {
-  NOTICE_TEXT, acceptNotice, cancelPhase, hostedSteps, initialLang, noticeAccepted, quotaEmpty, quotaLine, resetDate, spendNote,
-  stageLabel, type RemoteError,
+  NOTICE_TEXT, acceptNotice, cancelWarning, closeIsSafe, hostedSteps, initialLang, noticeAccepted, quotaEmpty, quotaLine, resetDate, spendNote,
+  stageLabel, type RemoteError, type RemoteRunning,
 } from "../lib/lab";
 import type { LabState } from "./LabPanel";
 
@@ -47,7 +47,8 @@ export function SignInPanel({ lab }: { lab: LabState }) {
       </p>
       <p>
         <strong className="text-text-primary">What leaves this PC:</strong> a 720p copy of the video, without audio, goes to the
-        server for the analysis, and the app deletes it afterwards. The result comes back to this PC.
+        server for the analysis, and the app deletes it afterwards (if it's closed or offline then, the next time it runs signed
+        in). The result comes back to this PC.
       </p>
       <p>
         Each account has free analyses every week, then credits; contributions and credits are handled on the website, under the
@@ -66,6 +67,11 @@ export function SignInPanel({ lab }: { lab: LabState }) {
         </div>
       )}
       {expired && !lab.signingIn && <div role="status">You've been signed out. Please sign in again.</div>}
+      {lab.account?.store_unavailable && (
+        <div role="status" data-testid="lab-store-unavailable">
+          The system's credential store can't be read right now, so an earlier sign-in can't be checked. It isn't lost: try again in a moment.
+        </div>
+      )}
       {lab.loginError && (
         <div className="flex items-start gap-2 text-p1-light" role="alert" data-testid="lab-login-error">
           <AlertTriangle size={13} className="mt-0.5 shrink-0" />
@@ -108,6 +114,9 @@ export function AccountBar({ lab }: { lab: LabState }) {
   );
 }
 
+/** Ended on these, the server may hold a job for this replay: the next press goes on with it, and spends nothing new. */
+const WAITING_ON_SERVER = ["start_unconfirmed", "result_pending", "result_write", "cancel_unconfirmed"];
+
 /** Starting a run: says what it will use, confirms a repeat, shows the upload notice once. */
 export function HostedForm({ lab, canRun }: { lab: LabState; canRun: boolean }) {
   const [ask, setAsk] = useState<null | "again" | "notice">(null);
@@ -116,6 +125,7 @@ export function HostedForm({ lab, canRun }: { lab: LabState; canRun: boolean }) 
   if (!lab.account.signed_in) return <SignInPanel lab={lab} />;
 
   const again = !!lab.result;
+  const waiting = WAITING_ON_SERVER.includes(lab.remoteError?.code ?? "");
   const go = () => {
     setAsk(null);
     lab.runRemote(again);
@@ -129,13 +139,13 @@ export function HostedForm({ lab, canRun }: { lab: LabState; canRun: boolean }) 
   return (
     <div className="flex flex-col gap-2 text-[11px] text-text-secondary" data-testid="lab-hosted-form">
       {down && <ServiceDown />}
-      {!down && empty && (
+      {!down && empty && !waiting && (
         <div className="flex flex-col gap-1.5 rounded-lg bg-surface-2 border border-surface-4 px-2.5 py-2" data-testid="lab-exhausted">
           <span>No analyses left this week{reset ? `: free analyses come back on ${reset}` : ""}. You can also get credits on the website.</span>
           <div><SupportButton lab={lab} /></div>
         </div>
       )}
-      {!down && !empty && spend && <div data-testid="lab-spend">{spend} The server decides when it starts.</div>}
+      {!down && !empty && spend && !waiting && <div data-testid="lab-spend">{spend} The server decides when it starts.</div>}
 
       {ask === "again" && (
         <div className="flex flex-col gap-2 rounded-lg bg-accent-gold/10 border border-accent-gold/30 px-2.5 py-2" data-testid="lab-again-confirm">
@@ -162,16 +172,16 @@ export function HostedForm({ lab, canRun }: { lab: LabState; canRun: boolean }) 
           <Button
             variant="primary"
             size="sm"
-            icon={again ? RefreshCw : Play}
-            disabled={!canRun || down || empty}
-            title={canRun ? undefined : "Needs the local video"}
-            onClick={() => (again ? setAsk("again") : afterConfirm())}
+            icon={again || waiting ? RefreshCw : Play}
+            disabled={!waiting && (!canRun || down || empty)}
+            title={canRun || waiting ? undefined : "Needs the local video"}
+            onClick={() => (waiting ? go() : again ? setAsk("again") : afterConfirm())}
           >
-            {again ? "Analyse again" : "Analyse this replay"}
+            {waiting ? "Try again" : again ? "Analyse again" : "Analyse this replay"}
           </Button>
         </div>
       )}
-      {!ask && <div className="text-text-muted">An analysis usually takes 5 to 15 minutes. You can keep using the app, or close it: the result is collected when it opens again.</div>}
+      {!ask && <div className="text-text-muted">An analysis usually takes 5 to 15 minutes. You can keep using the app. Once it has started on the server you can also close the app: the result is collected when it opens again.</div>}
     </div>
   );
 }
@@ -184,9 +194,19 @@ const SOURCE_TEXT: Record<string, string> = {
 
 /** A run on the server: its steps, upload and queue, and the cancel with what it would cost. */
 export function HostedProgress({ lab }: { lab: LabState }) {
-  const [asking, setAsking] = useState(false);
+  /** null: no question. The phase is read from the server when Cancel is pressed, not from the last poll. */
+  const [asking, setAsking] = useState<RemoteRunning["phase"] | "checking" | null>(null);
   const p = lab.progress;
-  const phase = cancelPhase(p?.stage);
+  const askCancel = async () => {
+    setAsking("checking");
+    const phase = await lab.cancelPhase();
+    if (phase === "before_charge") {
+      setAsking(null);
+      lab.cancelRemote();
+    } else {
+      setAsking(phase);
+    }
+  };
   const steps = hostedSteps(lab.service?.capabilities);
   const shown = [...steps, ...lab.stages.filter((s) => !steps.includes(s) && s !== stageLabel("start"))];
   const current = lab.stages[lab.stages.length - 1];
@@ -198,22 +218,19 @@ export function HostedProgress({ lab }: { lab: LabState }) {
         <Spinner size={14} className="text-accent-purple" />
         <span className="text-xs font-medium">{lab.cancelling ? "Cancelling…" : "Analysing on the server…"}</span>
         {!lab.cancelling && !asking && (
-          <Button size="sm" variant="ghost" icon={Square} className="ml-auto" onClick={() => (phase === "before_charge" ? lab.cancelRemote() : setAsking(true))}>
+          <Button size="sm" variant="ghost" icon={Square} className="ml-auto" onClick={askCancel}>
             Cancel
           </Button>
         )}
       </div>
 
-      {asking && !lab.cancelling && (
-        <div className={`flex flex-col gap-2 rounded-lg px-2.5 py-2 text-[11px] border ${phase === "running" ? "bg-accent-gold/10 border-accent-gold/30" : "bg-surface-3 border-surface-4"}`} data-testid="lab-cancel-confirm">
-          <span>
-            {phase === "running"
-              ? "This analysis has already started. If you cancel it now, it won't be given back."
-              : "This analysis hasn't started yet. If you cancel it while it's waiting, it's given back."}
-          </span>
+      {asking === "checking" && !lab.cancelling && <div className="text-[11px] text-text-secondary" role="status">Checking the analysis…</div>}
+      {asking && asking !== "checking" && !lab.cancelling && (
+        <div className={`flex flex-col gap-2 rounded-lg px-2.5 py-2 text-[11px] border ${asking === "queued" ? "bg-surface-3 border-surface-4" : "bg-accent-gold/10 border-accent-gold/30"}`} data-testid="lab-cancel-confirm">
+          <span>{cancelWarning(asking)}</span>
           <div className="flex items-center gap-2">
-            <Button size="sm" variant={phase === "running" ? "danger" : "primary"} onClick={() => { setAsking(false); lab.cancelRemote(); }}>Cancel the analysis</Button>
-            <Button size="sm" variant="ghost" onClick={() => setAsking(false)}>Keep it going</Button>
+            <Button size="sm" variant={asking === "queued" ? "primary" : "danger"} onClick={() => { setAsking(null); lab.cancelRemote(); }}>Cancel the analysis</Button>
+            <Button size="sm" variant="ghost" onClick={() => setAsking(null)}>Keep it going</Button>
           </div>
         </div>
       )}
@@ -244,7 +261,11 @@ export function HostedProgress({ lab }: { lab: LabState }) {
         <div className="text-[11px] text-text-secondary" data-testid="lab-queue-position">Position {p.position} in the queue</div>
       )}
       {lab.source && SOURCE_TEXT[lab.source] && <div className="text-[11px] text-text-secondary" data-testid="lab-source">{SOURCE_TEXT[lab.source]}</div>}
-      <div className="text-[10px] text-text-muted">A run can take a while on the shared server. You can leave this screen or close the app.</div>
+      <div className="text-[10px] text-text-muted">
+        {closeIsSafe(p?.stage)
+          ? "A run can take a while on the shared server. You can leave this screen or close the app."
+          : "You can leave this screen, but keep the app open until the video is on the server."}
+      </div>
     </div>
   );
 }
@@ -265,6 +286,10 @@ const TITLE: Record<string, string> = {
   job_failed: "The analysis failed",
   expired: "The analysis is gone",
   bad_result: "The result couldn't be read",
+  result_pending: "The result is still to come",
+  result_write: "The result couldn't be saved",
+  start_unconfirmed: "The start wasn't confirmed",
+  cancel_unconfirmed: "The cancel wasn't confirmed",
   scope: "Please report this",
   network: "No connection",
   rate_limited: "Too many requests",

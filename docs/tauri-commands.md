@@ -559,7 +559,7 @@ fn cancel_strive_export(now: bool) -> Result<(), String>
 
 Normal users analyse on the Spaghetti Showdown servers behind a sign-in: those commands (`lab_sign_in`,
 `run_lab_analysis_remote`, `lab_quota`...) and their structured errors are in `docs/desktop-login.md`, in
-`lab_api.rs`, `lab_auth.rs` and `lab_remote.rs`. `run_lab_analysis` below is the local research mode: the UI offers it
+`lab_api.rs`, `lab_auth.rs` and `lab_remote.rs` (including `lab_remote_cancel_phase`). `run_lab_analysis` below is the local research mode: the UI offers it
 only with `SPAGHETTI_LAB_MODELS` set.
 
 `app/src-tauri/src/lab.rs`. Run the research models (`tools/ggst_logger/model/lab_analyze.py`) on a replay's

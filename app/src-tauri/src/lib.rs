@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Read as _, Write as _};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 mod lab;
 mod lab_api;
@@ -4529,8 +4529,45 @@ async fn reanalyze_all(
 
 // ── App setup ────────────────────────────────────────────────────────────────
 
+/// The event and the path of a `.spag` / `.spagz` given on a command line (file association).
+fn open_file_event(args: &[String]) -> Option<(&'static str, String)> {
+    let path = args.get(1)?;
+    let event = if path.ends_with(".spagz") {
+        "open-spagz-file"
+    } else if path.ends_with(".spag") {
+        "open-spag-file"
+    } else {
+        return None;
+    };
+    Some((event, path.clone()))
+}
+
+/// One app per user: two would fight over the sign-in (each refresh ends the other's tokens, and two at
+/// once end the session) and a hosted run's saved job and temp folder. An isolated instance
+/// (SPAGHETTI_LAB_DATA_DIR: tests, research) has its own data and credentials, and runs next to the real app.
+fn single_instance_wanted(data_dir: Option<&std::ffi::OsStr>, forced: Option<&std::ffi::OsStr>) -> bool {
+    forced.is_some() || data_dir.is_none()
+}
+
+/// A second launch ends right away; its file (a double-clicked .spag) opens in this window.
+fn on_second_instance(app: &tauri::AppHandle, args: Vec<String>, cwd: String) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    if let Some((event, path)) = open_file_event(&args) {
+        let _ = app.emit(event, std::path::Path::new(&cwd).join(path).to_string_lossy().to_string());
+    }
+}
+
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    if single_instance_wanted(std::env::var_os("SPAGHETTI_LAB_DATA_DIR").as_deref(), std::env::var_os("SPAGHETTI_LAB_SINGLE_INSTANCE").as_deref()) {
+        // First of all plugins: a second launch must do nothing else
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| on_second_instance(app, args, cwd)));
+    }
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -4538,25 +4575,36 @@ pub fn run() {
         .setup(|app| {
             // Check if launched with a .spag file argument (file association)
             let args: Vec<String> = std::env::args().collect();
-            if let Some(path) = args.get(1) {
-                let event_name = if path.ends_with(".spagz") {
-                    Some("open-spagz-file")
-                } else if path.ends_with(".spag") {
-                    Some("open-spag-file")
-                } else {
-                    None
-                };
-                if let Some(event) = event_name {
-                    let path = path.clone();
-                    let handle = app.handle().clone();
-                    // Emit after a short delay so frontend is ready
-                    std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                        let _ = handle.emit(event, &path);
-                    });
-                }
+            if let Some((event, path)) = open_file_event(&args) {
+                let handle = app.handle().clone();
+                // Emit after a short delay so frontend is ready
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    let _ = handle.emit(event, &path);
+                });
             }
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Closing during the hosted run's transcode or upload ends it for good: ask first
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if let Some(text) = lab_remote::close_warning() {
+                    use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons, MessageDialogKind};
+                    api.prevent_close();
+                    let app = window.app_handle().clone();
+                    window
+                        .dialog()
+                        .message(text)
+                        .title("Spaghetti Lab")
+                        .kind(MessageDialogKind::Warning)
+                        .buttons(MessageDialogButtons::OkCancelCustom("Close anyway".into(), "Keep it going".into()))
+                        .show(move |close| {
+                            if close {
+                                app.exit(0);
+                            }
+                        });
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_replays,
@@ -4593,6 +4641,7 @@ pub fn run() {
             lab_auth::lab_open_web,
             lab_remote::run_lab_analysis_remote,
             lab_remote::cancel_lab_analysis_remote,
+            lab_remote::lab_remote_cancel_phase,
             lab_remote::lab_remote_running,
             lab_remote::lab_remote_take_error,
             lab_remote::lab_remote_resume,
@@ -4614,13 +4663,35 @@ pub fn run() {
             get_questionnaire_answers,
             set_questionnaire_answer,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            if let tauri::RunEvent::Exit = event {
+                lab_remote::on_app_exit();
+            }
+        });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lab_a_second_launch_forwards_only_a_session_file() {
+        let args = |p: &str| vec!["app.exe".to_string(), p.to_string()];
+        assert_eq!(open_file_event(&args("C:/a b/x.spag")), Some(("open-spag-file", "C:/a b/x.spag".to_string())));
+        assert_eq!(open_file_event(&args("x.spagz")), Some(("open-spagz-file", "x.spagz".to_string())));
+        assert_eq!(open_file_event(&args("x.mp4")), None);
+        assert_eq!(open_file_event(&["app.exe".to_string()]), None);
+    }
+
+    #[test]
+    fn lab_only_an_isolated_instance_runs_next_to_the_app() {
+        let dir = Some(std::ffi::OsStr::new("x"));
+        assert!(single_instance_wanted(None, None));
+        assert!(!single_instance_wanted(dir, None));
+        assert!(single_instance_wanted(dir, dir));
+    }
 
     #[test]
     fn test_supported_timer_drops_isolated_start_reading() {

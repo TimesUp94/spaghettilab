@@ -19,7 +19,7 @@ export interface Scenario {
   /** missing: the login isn't deployed (404 page, unknown /api paths answer 401) */
   login: "ok" | "missing";
   /** the next start POSTs, in order, before a real start */
-  startQueue: ("analysis_starting" | "quota_exhausted" | "one_at_a_time" | "queue_full" | "too_long" | "plain_429")[];
+  startQueue: ("analysis_starting" | "quota_exhausted" | "one_at_a_time" | "queue_full" | "too_long" | "plain_429" | "gateway_after_start" | "gateway")[];
   upload: "ok" | "too_big" | "storage_full" | "banned" | "html_413";
   /** the answer comes this long after the last byte (the server copies the file to storage first) */
   uploadDelayMs: number;
@@ -31,7 +31,9 @@ export interface Scenario {
   refundLost: boolean;
   /** job polls answer 404 */
   job404: boolean;
-  result: "ok" | "bad" | "no_transcript";
+  result: "ok" | "bad" | "no_transcript" | "gateway";
+  /** the job's DELETE answers a gateway's error page */
+  jobDelete: "ok" | "gateway";
   fileDelete: "ok" | "fail" | "scope";
   /** the token lookup fails: 503 unavailable on every authenticated route */
   tokenOutage: boolean;
@@ -48,6 +50,7 @@ const defaults = (): Scenario => ({
   refundLost: false,
   job404: false,
   result: "ok",
+  jobDelete: "ok",
   fileDelete: "ok",
   tokenOutage: false,
 });
@@ -282,6 +285,8 @@ async function handleStart(req: http.IncomingMessage, res: http.ServerResponse) 
       return send(res, 413, { error: "The video is over 15 min: cut it to one match or set" });
     case "plain_429":
       return send(res, 429, "Too many requests from this IP, please try again later.");
+    case "gateway":
+      return send(res, 502, "<html>Bad gateway</html>");
   }
   const existing = [...mock.jobs.values()].find((j) => j.fileId === fileId);
   if (existing) return send(res, 200, { ...jobView(existing), reused: true, ...quotaFields() });
@@ -297,6 +302,8 @@ async function handleStart(req: http.IncomingMessage, res: http.ServerResponse) 
   }
   const job: Job = { id: uuid(), fileId, step: 0, status: "queued", stage: null, position: 2, error: null, source, refundPending: false, created: new Date().toISOString() };
   mock.jobs.set(job.id, job);
+  // nginx gave up while the backend carried on: charged, and the app wasn't told
+  if (forced === "gateway_after_start") return send(res, 502, "<html>Bad gateway</html>");
   send(res, 202, { ...jobView(job), analysis_source: source, ...quotaFields() });
 }
 
@@ -305,6 +312,7 @@ function handleJob(method: string, jobId: string, res: http.ServerResponse) {
   const job = mock.jobs.get(jobId);
   if (!job) return send(res, 404, { error: "Analysis not found" });
   if (method === "DELETE") {
+    if (mock.scenario.jobDelete === "gateway") return send(res, 502, "<html>Bad gateway</html>");
     if (job.status === "queued") {
       refund(job);
     } else if (job.status !== "running") {
@@ -499,6 +507,7 @@ async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
     const job = mock.jobs.get(result[1]);
     if (!job) return send(res, 404, { error: "Analysis not found" });
     if (job.status !== "done") return send(res, 409, { detail: "the job has no result (yet)" });
+    if (mock.scenario.result === "gateway") return send(res, 502, "<html>Bad gateway</html>");
     return send(res, 200, parseJson(resultBody()));
   }
   const jobMatch = new RegExp(`^${openers}/([^/]+)$`).exec(p);

@@ -12,15 +12,15 @@ import {
 import { Badge, Button, EmptyState, Spinner } from "./ui";
 import {
   cancelLabAnalysis, cancelLabAnalysisRemote, deleteLabResult, getLabResult, labAccount, labAnalysisRunning, labConfig, labOpenWeb,
-  labQuota, labRemoteResume, labRemoteRunning, labRemoteTakeError, labServiceStatus, labSignIn, labSignInCancel, labSignInReopen,
+  labQuota, labRemoteCancelPhase, labRemoteResume, labRemoteRunning, labRemoteTakeError, labServiceStatus, labSignIn, labSignInCancel, labSignInReopen,
   labSignOut, runLabAnalysis, runLabAnalysisRemote,
 } from "../api";
 import {
-  NOT_INSTALLED, OUTCOME_COLOR, aiSummaryFor, OUTCOMES, clockTenths, freeFilter, initialLang, isUncertain, loadModelsDir,
+  NOT_INSTALLED, OUTCOME_COLOR, aiSummaryFor, OUTCOMES, cancelNote, clockTenths, freeFilter, initialLang, isUncertain, loadModelsDir,
   moveChoices, presetAfterBlock, presetAfterKnockdown, presetCounterBy, presetMoveOutcome, saveLang, saveModelsDir,
   searchEvents, seekBefore, stageLabel, stageSteps, toRemoteError, wakeUps,
   type Hit, type LabAccount, type LabConfig, type LabEvent, type LabLang, type LabOpener, type LabOptions, type LabProgress,
-  type LabQuota, type LabResult, type LabServiceStatus, type OutcomeWant, type RemoteError, type Side,
+  type LabQuota, type LabResult, type LabServiceStatus, type OutcomeWant, type RemoteError, type RemoteRunning, type Side,
 } from "../lib/lab";
 import { AccountBar, HostedForm, HostedProgress, RemoteErrorNote } from "./LabHosted";
 
@@ -58,6 +58,8 @@ export interface LabState {
   /** Account, service and quota, read when the Lab tab opens, on window focus and after a run. */
   refreshRemote: () => void;
   runRemote: (again: boolean) => void;
+  /** What a cancel means right now, from the server. */
+  cancelPhase: () => Promise<RemoteRunning["phase"]>;
   cancelRemote: () => void;
   signIn: () => void;
   signInReopen: () => void;
@@ -89,6 +91,15 @@ export function useLab(replayId: string, dbPath: string | null, videoPath: strin
   /** the replay on screen, for answers that arrive after the user moved on */
   const idRef = useRef(replayId);
   idRef.current = replayId;
+  /** false once the review screen is gone: an answer that arrives then is for a later visit */
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const onScreen = useCallback((id: string) => mounted.current && idRef.current === id, []);
   /** this screen's own command is waiting for the run to end */
   const ownRun = useRef(false);
   const followTimer = useRef<number | undefined>(undefined);
@@ -132,7 +143,7 @@ export function useLab(replayId: string, dbPath: string | null, videoPath: strin
     (e: RemoteError) => {
       if (e.quota) setQuota(e.quota);
       if (e.code === "cancelled") {
-        setNote("Analysis cancelled.");
+        setNote(cancelNote(e));
         return;
       }
       setRemoteError(e);
@@ -178,7 +189,12 @@ export function useLab(replayId: string, dbPath: string | null, videoPath: strin
     // a run started earlier (before leaving the screen) is still going: follow it until it ends
     labAnalysisRunning()
       .then(async (id) => {
-        if (id !== replayId) return;
+        if (id !== replayId) {
+          // how a run ended while this screen was closed, or a saved job resumed in the background
+          const e = await labRemoteTakeError(replayId).catch(() => null);
+          if (e && onScreen(replayId)) showRemoteEnd(e);
+          return;
+        }
         const remote = await labRemoteRunning().catch(() => null);
         if (remote?.replay_id === replayId) {
           setHosted(true);
@@ -192,7 +208,7 @@ export function useLab(replayId: string, dbPath: string | null, videoPath: strin
       window.clearInterval(followTimer.current);
       followTimer.current = undefined;
     };
-  }, [replayId, load, follow]);
+  }, [replayId, load, follow, onScreen, showRemoteEnd]);
 
   useEffect(() => {
     const un = listen<LabProgress>("lab-progress", (ev) => {
@@ -274,14 +290,17 @@ export function useLab(replayId: string, dbPath: string | null, videoPath: strin
       setCancelling(false);
       try {
         const r = await runLabAnalysisRemote(dbPath, replayId, { again, video_path: videoPath ?? undefined });
-        if (idRef.current === replayId) setResult(r);
+        if (onScreen(replayId)) setResult(r);
       } catch (err) {
-        // kept for a screen that was closed; this one has it
-        labRemoteTakeError(replayId).catch(() => {});
-        if (idRef.current === replayId) showRemoteEnd(toRemoteError(err));
+        // Kept for a screen that was closed. This one takes it only if it's still here to show it: otherwise
+        // it stays until the user comes back to this replay.
+        if (onScreen(replayId)) {
+          labRemoteTakeError(replayId).catch(() => {});
+          showRemoteEnd(toRemoteError(err));
+        }
       } finally {
         ownRun.current = false;
-        if (idRef.current === replayId) {
+        if (onScreen(replayId)) {
           setRunning(false);
           setHosted(false);
           setProgress(null);
@@ -290,7 +309,12 @@ export function useLab(replayId: string, dbPath: string | null, videoPath: strin
         }
       }
     },
-    [dbPath, replayId, videoPath, showRemoteEnd, refreshRemote]
+    [dbPath, replayId, videoPath, onScreen, showRemoteEnd, refreshRemote]
+  );
+
+  const cancelPhase = useCallback(
+    () => labRemoteCancelPhase(replayId).then((a) => a.phase).catch((): RemoteRunning["phase"] => "unknown"),
+    [replayId]
   );
 
   const cancelRemote = useCallback(() => {
@@ -354,7 +378,7 @@ export function useLab(replayId: string, dbPath: string | null, videoPath: strin
   return {
     result, loading, running, stages, lastLine, error, run, cancel, remove,
     config, account, quota, service, hosted, progress, source, cancelling, remoteError, note, signingIn, loginError,
-    refreshRemote, runRemote, cancelRemote, signIn, signInReopen, signInCancel, signOut, openWeb,
+    refreshRemote, runRemote, cancelPhase, cancelRemote, signIn, signInReopen, signInCancel, signOut, openWeb,
   };
 }
 

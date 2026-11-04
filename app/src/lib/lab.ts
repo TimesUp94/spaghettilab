@@ -356,6 +356,8 @@ export interface LabAccount {
   avatar: string | null;
   /** The OS credential store failed: this session ends when the app closes */
   session_only: boolean;
+  /** The OS credential store can't be read right now: not the same as signed out */
+  store_unavailable: boolean;
 }
 
 export interface LabQuota {
@@ -388,7 +390,8 @@ export interface RemoteRunning {
   replay_id: string;
   stage: string;
   position: number | null;
-  phase: "before_charge" | "queued" | "running";
+  /** starting: the POST is out, so the job may exist and even run; unknown: the server can't be asked */
+  phase: "before_charge" | "starting" | "queued" | "running" | "unknown";
 }
 
 export function toRemoteError(e: unknown): RemoteError {
@@ -419,11 +422,22 @@ export function resetDate(iso: string | undefined): string | null {
   return new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Rome", weekday: "long", day: "numeric", month: "long" }).format(d);
 }
 
-/** What a cancel would mean at this stage (the same rule as lab_remote.rs RunningInfo.phase). */
-export function cancelPhase(stage: string | null | undefined): RemoteRunning["phase"] {
-  if (!stage || stage === "check" || stage === "transcode" || stage === "upload") return "before_charge";
-  if (stage === "start" || stage === "queued") return "queued";
-  return "running";
+/** The run is saved on the server's side of things: closing the app no longer ends it. */
+export const closeIsSafe = (stage: string | null | undefined) => !!stage && !["check", "transcode", "upload"].includes(stage);
+
+/** What the warning says before a cancel; the answer of `lab_remote_cancel_phase`. */
+export function cancelWarning(phase: RemoteRunning["phase"]): string {
+  if (phase === "running") return "This analysis has already started. If you cancel it now, it won't be given back.";
+  if (phase === "queued") return "This analysis hasn't started yet. If you cancel it while it's waiting, it's given back; once its turn comes, it isn't.";
+  return "This analysis may already have started. If it's still waiting when you cancel, it's given back; if it has started, it isn't.";
+}
+
+/** How a cancel ended. The DELETE says nothing about a refund: `refunded` comes from the quota before and after. */
+export function cancelNote(e: RemoteError): string {
+  if (e.refunded === true) return "Analysis cancelled. It was given back.";
+  if (e.refunded === false) return "Analysis cancelled. It had already started, so it wasn't given back.";
+  if (e.phase === "unconfirmed") return "Analysis cancelled. The server hadn't confirmed the start: if it had begun, it counts as used, and the quota line shows it.";
+  return "Analysis cancelled.";
 }
 
 /** The steps of a hosted run; the transcript and the AI summary only when the server has them. */
@@ -438,18 +452,18 @@ export function hostedSteps(c?: LabServiceStatus["capabilities"]): string[] {
 
 /**
  * What the upload notice says, checked against /terms (section 13) and /privacy (2.1, 4, 6). Neither page
- * promises Lab video deletion, so the text says it's the app that deletes it. Change the version when the
+ * promises Lab video deletion, so the text says it's the app that deletes it, and when it can't. Change the version when the
  * meaning changes: everyone is asked again.
  */
-export const NOTICE_VERSION = "2026-11-04";
+export const NOTICE_VERSION = "2026-11-04b";
 export const NOTICE_TEXT: Record<LabLang, string[]> = {
   en: [
-    "To analyse a match, Spaghetti Lab sends a 720p copy of the video, without audio, to the Spaghetti Showdown servers (hosted in the EU). The app deletes it when the analysis ends, whether it finished, failed or was cancelled. The result stays on the server for up to 24 hours so the app can fetch it, then only on this PC.",
+    "To analyse a match, Spaghetti Lab sends a 720p copy of the video, without audio, to the Spaghetti Showdown servers (hosted in the EU). The app deletes it when the analysis ends, whether it finished, failed or was cancelled; if the app is closed or offline then, it does so the next time it runs while you're signed in. If the connection drops just as an upload finishes, the app can't know the copy arrived: you can remove it from your files on the website. The result stays on the server for up to 24 hours so the app can fetch it, then only on this PC.",
     "If AI summaries are on, Anthropic receives game data extracted from the video, never the video. Results are generated automatically and can contain errors.",
     "You have 2 free analyses a week, then credits, which you can get on the website. An analysis that fails or is cancelled while waiting is given back; cancelling one that's running is not.",
   ],
   it: [
-    "Per analizzare una partita, Spaghetti Lab invia una copia del video a 720p, senza audio, ai server di Spaghetti Showdown (ospitati nell'UE). L'app la cancella quando l'analisi termina, che sia finita, fallita o annullata. Il risultato resta sul server fino a 24 ore perché l'app possa scaricarlo, poi solo su questo PC.",
+    "Per analizzare una partita, Spaghetti Lab invia una copia del video a 720p, senza audio, ai server di Spaghetti Showdown (ospitati nell'UE). L'app la cancella quando l'analisi termina, che sia finita, fallita o annullata; se in quel momento è chiusa o offline, lo fa la prossima volta che viene aperta con l'accesso effettuato. Se la connessione cade proprio alla fine di un caricamento, l'app non può sapere che la copia è arrivata: puoi rimuoverla dai tuoi file sul sito. Il risultato resta sul server fino a 24 ore perché l'app possa scaricarlo, poi solo su questo PC.",
     "Se i riepiloghi dell'IA sono attivi, Anthropic riceve i dati di gioco estratti dal video, mai il video. I risultati sono generati automaticamente e possono contenere errori.",
     "Hai 2 analisi gratuite a settimana, poi i crediti, che puoi ottenere sul sito. Un'analisi che fallisce o viene annullata mentre è in attesa viene restituita; annullarne una già in corso no.",
   ],

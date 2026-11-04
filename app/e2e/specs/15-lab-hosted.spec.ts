@@ -2,10 +2,11 @@
 // mock Spaghetti Showdown server (mock-lab-backend.ts). Only the system browser is simulated: the spec calls
 // the app's loopback callback itself, as the website's redirect would. The upload is the small e2e clip,
 // stream-copied, so no encode and no model runs. Nothing here can reach a real server (SPAGHETTI_LAB_NO_PROD).
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { test, expect, type App } from "../fixtures";
-import { APP_DIR, DATA_DIR, REPLAY_ID, mockUrl } from "../env";
+import { APP_DIR, DATA_DIR, EXE, REPLAY_ID, RUN_DIR, mockUrl } from "../env";
 
 const LAB_DIR = path.join(DATA_DIR, "SpaghettiLab", "lab");
 const CACHE = path.join(LAB_DIR, REPLAY_ID, "lab_result.json");
@@ -35,6 +36,7 @@ async function openLab(app: App) {
 const signInPanel = (app: App) => app.page.getByTestId("lab-sign-in");
 const signInButton = (app: App) => app.page.getByRole("button", { name: "Sign in with spaghettishowdown.it" });
 const analyse = (app: App) => app.page.getByRole("button", { name: "Analyse this replay" });
+const tryAgain = (app: App) => app.page.getByRole("button", { name: "Try again" });
 const progress = (app: App) => app.page.getByTestId("lab-progress");
 const remoteError = (app: App) => app.page.getByTestId("lab-remote-error");
 const quotaText = (app: App) => app.page.getByTestId("lab-quota");
@@ -71,7 +73,7 @@ async function ready(app: App, opts: { cache?: unknown } = {}) {
     if (opts.cache) await app.page.getByRole("button", { name: "Run options" }).click();
     await signIn(app);
   }
-  await app.page.evaluate(() => localStorage.setItem("spaghettiLab.lab.uploadNotice", "2026-11-04"));
+  await app.page.evaluate(() => localStorage.setItem("spaghettiLab.lab.uploadNotice", "2026-11-04b"));
   await expect(app.page.getByTestId("lab-nickname")).toBeVisible();
 }
 
@@ -150,17 +152,16 @@ test("sign-in: a wrong state is refused, a cancel is a cancel, stray requests ch
   await ensureSignedOut(app);
   await openLab(app);
 
-  // wrong state: refused by the listener, which then closes
+  // wrong state: refused by the listener, and the login waits on (anything on this PC can reach the port)
   let link = await startSignIn(app);
   await expect(app.page.getByText("Waiting for the browser")).toBeVisible();
   const refused = await callback(`code=${encodeURIComponent(link.code)}&state=not-the-state`);
   expect(refused.status).toBe(400);
-  await expect(app.page.getByTestId("lab-login-error")).toContainText("didn't match");
   expect((await state()).sessions).toBe(0);
-  await expect(fetch(`http://127.0.0.1:${link.port}/callback`)).rejects.toThrow();
+  await expect(app.page.getByText("Waiting for the browser")).toBeVisible();
+  await expect(app.page.getByTestId("lab-login-error")).toHaveCount(0);
 
   // cancelled on the website
-  link = await startSignIn(app);
   await callback(`error=access_denied&state=${encodeURIComponent(link.state)}`);
   await expect(app.page.getByTestId("lab-login-error")).toContainText("cancelled in the browser");
 
@@ -189,7 +190,7 @@ test("signed in: nickname, initial for a missing avatar, the quota line; the web
 
   const account = await app.invoke("lab_account");
   expect(JSON.stringify(account)).not.toContain("sslab_");
-  expect(Object.keys(account as object).sort()).toEqual(["avatar", "nickname", "session_only", "signed_in"]);
+  expect(Object.keys(account as object).sort()).toEqual(["avatar", "nickname", "session_only", "signed_in", "store_unavailable"]);
   const stored = await app.page.evaluate(() => JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage }));
   expect(stored).not.toContain("sslab_");
   const calls = await app.calls();
@@ -461,7 +462,7 @@ test("cancel while queued: says it's given back, and it is", async ({ app }) => 
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await confirm.getByRole("button", { name: "Cancel the analysis" }).click();
   await expect(progress(app)).toHaveCount(0);
-  await expect(page.getByTestId("lab-note")).toHaveText("Analysis cancelled.");
+  await expect(page.getByTestId("lab-note")).toHaveText("Analysis cancelled. It was given back.");
   await expect(quotaText(app)).toContainText("2 free this week, 3 credits");
   expect(jobCalls(await log(), "DELETE")).toHaveLength(1);
   await expect.poll(uploadsLeft).toBe(0);
@@ -483,8 +484,126 @@ test("cancel while running: warns it won't be given back, and it isn't", async (
   await expect(confirm).toContainText("won't be given back");
   await confirm.getByRole("button", { name: "Cancel the analysis" }).click();
   await expect(progress(app)).toHaveCount(0);
+  await expect(page.getByTestId("lab-note")).toHaveText("Analysis cancelled. It had already started, so it wasn't given back.");
   await expect(quotaText(app)).toContainText("1 free this week, 3 credits");
   await expect.poll(uploadsLeft).toBe(0);
+});
+
+test("the warning comes from the server when Cancel is pressed, not from the last poll", async ({ app }) => {
+  await ready(app);
+  const { page } = app;
+  await scenario({ holdAt: "queued" });
+  await analyse(app).click();
+  await expect(page.getByTestId("lab-queue-position")).toBeVisible({ timeout: 30_000 });
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.getByTestId("lab-cancel-confirm")).toContainText("it's given back");
+  await page.getByRole("button", { name: "Keep it going" }).click();
+  // The job's turn comes: the same button now warns the other way
+  await scenario({ holdAt: "hud" });
+  await expect.poll(async () => (await state()).jobs[0]?.stage).toBe("hud");
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.getByTestId("lab-cancel-confirm")).toContainText("won't be given back");
+  await page.getByRole("button", { name: "Keep it going" }).click();
+  await scenario({ holdAt: null });
+  await expect(page.getByTestId("lab-openers-count")).toBeVisible({ timeout: 30_000 });
+});
+
+test("a start answered by a gateway's error page: the same POST finds the job, one charge, the upload stays until the end", async ({ app }) => {
+  await ready(app);
+  await scenario({ startQueue: ["gateway_after_start"], holdAt: "hud" });
+  await analyse(app).click();
+  await expect.poll(async () => (await state()).jobs[0]?.stage, { timeout: 30_000 }).toBe("hud");
+  await expect(remoteError(app)).toHaveCount(0);
+  let s = await state();
+  expect(s.jobs).toHaveLength(1);
+  expect(s.quota.free_remaining).toBe(1);
+  expect(await uploadsLeft()).toBe(1);
+  await scenario({ holdAt: null });
+  await expect(app.page.getByTestId("lab-openers-count")).toBeVisible({ timeout: 30_000 });
+  s = await state();
+  expect(s.jobs).toHaveLength(1);
+  expect(s.quota.free_remaining).toBe(1);
+  await expect.poll(uploadsLeft).toBe(0);
+});
+
+test("no answer to the start at all: the upload and the record stay, and trying again asks the server", async ({ app }) => {
+  await ready(app);
+  const { page } = app;
+  await scenario({ startQueue: ["gateway_after_start", "gateway", "gateway", "gateway"], holdAt: "queued" });
+  await analyse(app).click();
+  await expect(remoteError(app)).toHaveAttribute("data-code", "start_unconfirmed", { timeout: 30_000 });
+  expect(await uploadsLeft()).toBe(1);
+  const saved = JSON.parse(fs.readFileSync(path.join(LAB_DIR, REPLAY_ID, "remote_job.json"), "utf-8"));
+  expect(saved.post_sent).toBe(true);
+  expect(saved.job_id ?? null).toBeNull();
+
+  await scenario({ holdAt: null });
+  await tryAgain(app).click();
+  await expect(page.getByTestId("lab-openers-count")).toBeVisible({ timeout: 30_000 });
+  const s = await state();
+  expect(s.files).toHaveLength(1);
+  expect(s.jobs).toHaveLength(1);
+  expect(s.quota.free_remaining).toBe(1);
+  await expect.poll(uploadsLeft).toBe(0);
+});
+
+test("a paid result behind a gateway's error page is kept and collected, for free", async ({ app }) => {
+  await ready(app);
+  const { page } = app;
+  await scenario({ result: "gateway" });
+  await analyse(app).click();
+  await expect(remoteError(app)).toHaveAttribute("data-code", "result_pending", { timeout: 30_000 });
+  await expect.poll(uploadsLeft).toBe(0);
+  expect(fs.existsSync(path.join(LAB_DIR, REPLAY_ID, "remote_job.json"))).toBe(true);
+
+  // with nothing left it can still be collected: it's paid for
+  await control("quota", { free_remaining: 0, credits: 0 });
+  await scenario({ result: "ok" });
+  await tryAgain(app).click();
+  await expect(page.getByTestId("lab-openers-count")).toBeVisible({ timeout: 30_000 });
+  const s = await state();
+  expect(s.files).toHaveLength(1);
+  expect(s.quota).toMatchObject({ free_remaining: 0, credits: 0 });
+  expect(fs.existsSync(path.join(LAB_DIR, REPLAY_ID, "remote_job.json"))).toBe(false);
+});
+
+test("a cancel the server didn't confirm says so, keeps the job and its upload, and is tried again", async ({ app }) => {
+  await ready(app);
+  const { page } = app;
+  await scenario({ holdAt: "hud", jobDelete: "gateway" });
+  await analyse(app).click();
+  await expect.poll(async () => (await state()).jobs[0]?.stage, { timeout: 30_000 }).toBe("hud");
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.getByTestId("lab-cancel-confirm").getByRole("button", { name: "Cancel the analysis" }).click();
+  await expect(remoteError(app)).toHaveAttribute("data-code", "cancel_unconfirmed", { timeout: 30_000 });
+  await expect(page.getByTestId("lab-note")).toHaveCount(0);
+  expect(await uploadsLeft()).toBe(1);
+  expect((await state()).jobs[0].status).toBe("running");
+
+  await scenario({ jobDelete: "ok" });
+  await tryAgain(app).click();
+  await expect(page.getByTestId("lab-note")).toContainText("Analysis cancelled.", { timeout: 30_000 });
+  expect((await state()).jobs[0].status).toBe("cancelled");
+  await expect.poll(uploadsLeft).toBe(0);
+  expect(fs.existsSync(path.join(LAB_DIR, REPLAY_ID, "remote_job.json"))).toBe(false);
+});
+
+test("a failure while the screen was closed is shown when it opens again, with the give-back", async ({ app }) => {
+  await ready(app);
+  const { page } = app;
+  await scenario({ holdAt: "queued" });
+  await analyse(app).click();
+  await expect(page.getByTestId("lab-queue-position")).toBeVisible({ timeout: 30_000 });
+
+  await app.openLibrary();
+  await expect(progress(app)).toHaveCount(0);
+  await scenario({ holdAt: null, failAt: "hud" });
+  await expect.poll(async () => (await state()).jobs[0]?.status, { timeout: 30_000 }).toBe("failed");
+  await expect.poll(uploadsLeft).toBe(0);
+
+  await openLab(app);
+  await expect(remoteError(app)).toHaveAttribute("data-code", "job_failed", { timeout: 15_000 });
+  await expect(page.getByTestId("lab-refunded")).toBeVisible();
 });
 
 test("cancel before the charge: no question, the upload that arrived is deleted, nothing spent", async ({ app }) => {
@@ -602,6 +721,27 @@ test("the app closed during a run: the sign-in survives (credential store) and t
   await expect.poll(uploadsLeft).toBe(0);
   expect((await state()).quota.free_remaining).toBe(1);
   expect(fs.existsSync(path.join(LAB_DIR, REPLAY_ID, "remote_job.json"))).toBe(false);
+});
+
+test("a second launch opens its file in the running app and ends", async ({ connection }) => {
+  test.setTimeout(120_000);
+  // The single-instance lock is per PC: a real copy of the app running would take the file instead
+  const others = spawnSync("tasklist", ["/FI", "IMAGENAME eq spaghetti-lab.exe", "/NH"], { encoding: "utf-8" }).stdout.match(/spaghetti-lab\.exe/gi)?.length ?? 0;
+  test.skip(others > 1, "another copy of the app is running");
+  const env = { SPAGHETTI_LAB_SINGLE_INSTANCE: "1" };
+  await connection.restart(env);
+  try {
+    const opened: string[] = [];
+    connection.page.on("console", (m) => opened.push(m.text()));
+    const missing = path.join(RUN_DIR, "not-there-second-launch.spag");
+    const second = spawn(EXE, [missing], { cwd: RUN_DIR, stdio: "ignore", env: { ...process.env, ...env, SPAGHETTI_LAB_DATA_DIR: DATA_DIR } });
+    const exit = await new Promise<number | null>((resolve) => second.on("exit", resolve));
+    expect(exit).toBe(0);
+    await expect.poll(() => opened.some((t) => t.includes("Failed to open .spag")), { timeout: 15_000 }).toBe(true);
+    await expect(connection.page.locator("body")).toBeVisible();
+  } finally {
+    await connection.restart();
+  }
 });
 
 test.describe("with SPAGHETTI_LAB_MODELS", () => {

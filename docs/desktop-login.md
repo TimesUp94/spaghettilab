@@ -77,7 +77,7 @@ including `/quota`, before `auth.playerrequired`.
 | 400 | `{"error":"fileId is required"}` or `{"error":"Not a video file"}`; service: `{"detail":"the url's host is not allowed"}` | |
 | 404 | `{"error":"File not found"}` | |
 | 415 | service: `{"detail":"expected a video file (.mkv, .mov, .mp4, .webm)"}`, from the upload's file name | analysis given back |
-| 502 | `{"error":"Opener analysis is not available right now"}` | the web shows its own fallback text on 502 |
+| 502 | `{"error":"Opener analysis is not available right now"}` | the web shows its own fallback text on 502. The app treats every 5xx except the route's 503 as a lost answer, because nginx can give up while Node carries on |
 
 Duration check: `file.duration_seconds` is 0 when the backend's ffprobe failed, and then the check is skipped.
 The service probes when the job starts, so the job fails with that message and the analysis is given back.
@@ -198,6 +198,9 @@ Scope allow-list (`isAllowedForLabScope`): `GET openers/status|quota`, `POST ope
 | 16 | Failed and queued-cancelled analyses come back; a cancelled running one doesn't | True in code, but `/terms` section 13 only mentions analyses that fail. The in-app warning is the only place that says a cancelled running one is spent |
 
 For the server agent (not desktop work):
+- **Sweep desktop uploads.** Nothing removes a `desktop_auth_upload` file except the app's own DELETE or account deletion. Orphans: a closed app or lost answer during "Finishing the upload" (the app never learned the id, and a desktop token can't list files), and a player who never returns after a started job. They also count against the 5 GB. Wanted: remove such a file once its job has ended, and any with no job after a few hours. The upload notice can then promise more.
+- **Look up a job by file.** `GET /api/spaghetti-lab/openers?fileId=`, read-only and charging nothing. Today the only way to learn about a POST whose answer was lost is the same POST, which charges if the first never arrived. With a lookup, a cancel in that window could reach the job too.
+- **A start that timed out.** If `POST /jobs/url` times out at axios's 30 s after the service created the job, the route refunds and answers 502 while the job runs on, with no record. Rare, and the app's retry then gets `one_at_a_time`.
 - With a player JWT, a file deleted while compression runs can be written back to Spaces after the delete, leaving an object with no row. This affects website uploads only.
 - `recordUpload` failing after the row is created answers 500, while the video stays on Spaces.
 
@@ -235,7 +238,8 @@ Dependencies: `reqwest` (async; 0.13 is already in the lockfile through the upda
 |---|---|---|
 | `SPAGHETTI_LAB_API_URL` | `https://backend.spaghettishowdown.it` | https only, except loopback |
 | `SPAGHETTI_LAB_WEB_URL` | `https://spaghettishowdown.it` | same rule |
-| `SPAGHETTI_LAB_KEYRING_SERVICE` | `SpaghettiLab` | test service name |
+| `SPAGHETTI_LAB_KEYRING_SERVICE` | `SpaghettiLab`; `SpaghettiLabIsolated` with `SPAGHETTI_LAB_DATA_DIR` set | test service name |
+| `SPAGHETTI_LAB_SINGLE_INSTANCE` | unset | keeps the single-instance lock on although `SPAGHETTI_LAB_DATA_DIR` is set (a spec tests it this way) |
 | `SPAGHETTI_LAB_NO_PROD` | unset | any non-loopback base URL is refused; set by every test run |
 | `SPAGHETTI_LAB_TEST_BROWSER` | unset | Rust only requests a website link instead of opening a browser (no redirect is followed; the test calls the loopback callback); works only when both base URLs are loopback |
 | `SPAGHETTI_LAB_TEST_POLL_MS` | unset | the job poll's interval, only in that test mode |
@@ -246,7 +250,7 @@ Dependencies: `reqwest` (async; 0.13 is already in the lockfile through the upda
 | Command | Wrapper | Returns |
 |---|---|---|
 | `lab_config` | `labConfig()` | `{local_models: bool, web_url}` |
-| `lab_account` | `labAccount()` | `{signed_in, nickname, avatar, session_only}`; no tokens, ever |
+| `lab_account` | `labAccount()` | `{signed_in, nickname, avatar, session_only, store_unavailable}`; no tokens, ever |
 | `lab_sign_in` | `labSignIn()` | the account; resolves when the flow ends |
 | `lab_sign_in_reopen` | `labSignInReopen()` | opens the same login page again |
 | `lab_sign_in_cancel` | `labSignInCancel()` | closes the listener |
@@ -255,9 +259,10 @@ Dependencies: `reqwest` (async; 0.13 is already in the lockfile through the upda
 | `lab_quota` | `labQuota()` | quota fields, or null when not available |
 | `lab_open_web` | `labOpenWeb("support"\|"terms"\|"privacy")` | opens the system browser |
 | `run_lab_analysis_remote` | `runLabAnalysisRemote(dbPath, replayId, {again?, video_path?})` | the result |
-| `cancel_lab_analysis_remote` | `cancelLabAnalysisRemote(replayId)` | `{phase: "before_charge"\|"queued"\|"running"}` |
+| `cancel_lab_analysis_remote` | `cancelLabAnalysisRemote(replayId)` | `{phase}`, the phase as last known |
+| `lab_remote_cancel_phase` | `labRemoteCancelPhase(replayId)` | `{phase: "before_charge"\|"starting"\|"queued"\|"running"\|"unknown"}`, with a fresh GET of the job when it has an id; the warning is built from this |
 | `lab_remote_running` | `labRemoteRunning()` | `{replay_id, stage, position, phase}` or null |
-| `lab_remote_take_error` | `labRemoteTakeError(replayId)` | how the last run of this replay failed, once, for a screen that was closed meanwhile |
+| `lab_remote_take_error` | `labRemoteTakeError(replayId)` | how the last run of this replay ended if it failed or was cancelled, once. Kept per replay until a screen of that replay has shown it; a new run clears it |
 | `lab_remote_resume` | `labRemoteResume()` | picks up saved jobs at startup |
 
 `get_lab_result` and `delete_lab_result` are unchanged. `lab_analysis_running` also reports a hosted run.
@@ -268,10 +273,10 @@ Errors from the remote commands are objects, `{code, message, retry_after?, refu
 |---|---|---|
 | `signed_out` | `invalid_grant`, or 401 after the retry | sign-in panel; the job stays saved |
 | `login_unavailable` | `/desktop-login` 404, or `/token` 401 or 404 | "Sign-in with spaghettishowdown.it isn't available yet. The rest of the app works as usual." |
-| `login_denied`, `login_timeout`, `login_state` | cancel in the browser, timeout, state mismatch | message, retry |
+| `login_denied`, `login_timeout` | cancel in the browser, timeout | message, retry |
 | `already_cached` | a cached result and no `again` | confirm: spends an analysis |
 | `busy` | another Lab run is going, or sign-out during a run | message |
-| `credential_store` | the OS store can't be read | message; the session stays |
+| `credential_store` | the OS store can't be read, or won't delete a token on sign-out | message; the session stays |
 | `rate_limited` | the global limiter's plain 429, or `/token` 429 | message, `retry_after` |
 | `unavailable` | 503 or 502 | "Not available right now"; sign-in unaffected |
 | `queue_full` | `/status` full, or service 503 | retry later, with `retry_after` |
@@ -281,10 +286,14 @@ Errors from the remote commands are objects, `{code, message, retry_after?, refu
 | `storage_full`, `banned` | upload errors | server's text |
 | `job_failed` | job failed | `error`, `refunded`, fresh quota |
 | `expired` | job 404 | "The server no longer has this analysis." |
-| `bad_result` | schema check failed | previous result stays |
+| `bad_result` | schema check failed | previous result stays; the text is kept as `lab_result.rejected.json`, and an app version that can read it picks it up |
+| `result_pending` | job done, but a result answer other than 200 or 404 after 5 tries, or a cancel during them | job kept without the file; "Try again", or the next start, collects it for free |
+| `result_write` | the result couldn't be written on this PC | same |
+| `start_unconfirmed` | no answer to the start POST after retries | file and record kept (`post_sent`); "Try again", or the next start, asks with the same POST |
+| `cancel_unconfirmed` | no DELETE confirmed after 3 tries | file and record kept (`cancel_requested`); "Try again", or the next start, cancels first |
 | `scope` | 403 scope | "Please report this", not a sign-out |
 | `network` | no connection | retry |
-| `cancelled` | user cancelled | nothing |
+| `cancelled` | user cancelled, confirmed by the server | a note: `refunded` from the quota before and after the DELETE, or `phase: "unconfirmed"` when the start was never answered |
 
 ### Progress stages
 
@@ -312,26 +321,43 @@ Event `lab-progress` keeps `{replay_id, stage, line}` and adds optional `percent
    - Otherwise, skip the encode and remux with `-c:v copy -an` (re-encode if that fails).
    - Then check the result against 500 x 1024 x 1024 bytes.
 5. **`upload`**:
-   - Stream from disk with a known length, never held in memory: file name `replay.mp4`, type `video/mp4`, no total timeout, a stalled-read timeout, and a refresh first if the token has under 60 s left.
+   - Stream from disk with a known length, never held in memory: file name `replay.mp4`, type `video/mp4`, no total timeout, a stalled-read timeout, and a refresh first if the token has under 30 minutes left (nginx may hold the whole body before the backend checks the token).
    - Save `{file_id, player_user_id}` to `lab/<id>/remote_job.json` as soon as the answer arrives.
-6. **`start`**: POST. Retry on `analysis_starting` (Retry-After, 6 times) and on network errors (3 times; safe, see above). Save `job_id`. Never abort a POST in flight: if cancel was pressed, wait for the answer and then cancel the job.
+6. **`start`**: save `post_sent` first, then POST. Retry on `analysis_starting` (Retry-After, 6 times) and on a lost answer (network error or any 5xx but the route's 503; 3 times; safe, see above). Save `job_id`. A POST in flight is never aborted by a cancel: wait for the answer and then cancel the job. A cancel does stop the next POST. Closing the app can abort one, so the record is what makes it safe.
 7. **Poll** every 15 s, 30 s after an error, with no overall timeout (a job can wait in the queue for hours). A 404 is `expired`.
 8. **`result`**: run `parse_lab_result`, then write to `lab/<id>/lab_result.json`. The previous result stays until then.
-9. **Clean up** on every path: `DELETE /user-files/:id`, re-read `/quota`, remove `remote_job.json`.
-   A result lost to the network or a 503 keeps the job (without the file) so it can be collected later: it's paid for.
+9. **Clean up**: `DELETE /user-files/:id`, re-read `/quota`, remove `remote_job.json`. The record goes only after a stored
+   result, a job known to have ended without one, or a definite 404. Any other answer about a finished job keeps it (without the file),
+   because it's paid for and the service keeps the result for 24 h. `signed_out`, `credential_store`, `scope` and an unconfirmed cancel change nothing: a job that may be alive keeps its file.
 
 **Cleanup that can't finish.** A failed file delete goes to `lab/pending_deletes.json` (`{file_id, player_user_id}`,
 never tokens), retried at startup and at sign-in as the same player. 404 and `scope` remove the entry.
 
-**Resume.** `remote_job.json` with a `job_id`: keep polling. Without one: delete the file and don't POST,
-because the user didn't ask to spend again. If an earlier POST did reach the server, that job fails and the analysis is given back.
+**Resume.** `remote_job.json` with a `job_id`: keep polling (or cancel first, with `cancel_requested`). With `post_sent` and no
+`job_id`: the same POST again. A job on that file answers 200 `reused` for free, and otherwise the POST starts the analysis the user
+asked for. Neither: no POST went out, so delete the file and don't POST, because the user didn't ask to spend again.
+A refusal by the route (`quota_exhausted`, `one_at_a_time`, `queue_full`, 413, 400, 404, 415) is an answer: no job, file deleted, even after a lost POST.
+
+**Second launch.** `tauri-plugin-single-instance`: a second launch hands its `.spag`/`.spagz` to the running window and exits, so two
+processes never share the session, `remote_job.json` or `.tmp`. An isolated instance (`SPAGHETTI_LAB_DATA_DIR`) runs next to the real app with
+its own data and credential service. So `npx tauri dev` without a data dir exits at once while an installed app is running.
+
+**Closing the app.** While a run is before the charge (`check`, transcode, upload) the window asks first, in a native dialog; once the POST
+is out or a job is saved nothing is lost and it closes as usual. `RunEvent::Exit` kills the ffmpeg of the temp copy (process exit runs no
+drops, so `kill_on_drop` isn't enough) and removes `.tmp`. A crash can still leave that ffmpeg to finish alone; the next start removes `.tmp`.
 
 **Cancel by phase.**
+The refund depends on the job's status when the DELETE arrives, so pressing Cancel first asks Rust (`lab_remote_cancel_phase`), which GETs the job.
 - Before the charge: no question. Stop, kill ffmpeg and wait for it (Windows locks the output), abort the upload. Once every byte is sent the server may already hold the file, so the cancel waits for its id and deletes it. Nothing spent.
-- The phase is `queued` from the moment the POST goes out, because the server may charge from then on.
-- `queued`: the UI says it will be given back.
+- `starting`, from the moment the POST goes out: with an empty queue the job can be running at once, so the warning covers both cases. Same for `unknown` (the job couldn't be read).
+- `queued`: the UI says it will be given back unless its turn comes first.
 - `running`, any stage: the UI warns it won't be refunded and asks first.
-- After `DELETE /:jobId`: on 409, poll once and, if `done`, keep the result, since it was already paid for. Then delete the file and re-read `/quota`.
+- After `DELETE /:jobId`, tried up to 3 times:
+  - 200: delete the file. Comparing `/quota` before and after gives the note: given back or not. The DELETE itself doesn't say.
+  - 404: gone.
+  - 409: poll once. `done` keeps the result, since it was already paid for; `failed` is a failed job.
+  - Anything else: `cancel_unconfirmed`, and the job and file stay.
+- With a lost POST and no job id, a cancel stops further POSTs (one could only charge) and deletes the file, so a job still waiting fails and is given back. A job already past its download can't be reached without a lookup by file (see "For the server agent"), so the note says so.
 
 **Failed job.** `analysis_refunded: true`: "Your analysis was given back". False: no claim either way, just the fresh quota line.
 
@@ -339,17 +365,18 @@ because the user didn't ask to spend again. If an earlier POST did reach the ser
 
 1. Pre-check `GET {web}/desktop-login`: 404 gives `login_unavailable` without opening a browser; a connection failure gives `network`.
 2. Bind `127.0.0.1:0`. Generate `state` (32 random bytes) and a verifier (32 random bytes, base64url), challenge = S256. Open the system browser.
-3. Wait **10 minutes** for `GET /callback`. Other paths get 404 and don't end the wait, so a stray `favicon` or local probe can't use up the single callback. Then close the listener. A wrong `state` aborts.
+3. Wait **10 minutes** for `GET /callback`. Other paths get 404 and a wrong `state` a 400, and neither ends the wait, because anything on this PC can reach the port. Connections are served side by side, each with one 5 s deadline for its whole request, so a silent or trickling one can't hold up the browser's. Then close the listener.
 4. Reply with a small static page (no script, `Referrer-Policy: no-referrer`), then exchange the code.
 
 **Tokens.**
 - The refresh token lives in the OS store (service as above, account `refresh_token`); nickname and avatar in account `player`. At about 52 characters it fits Windows' 2560-byte limit.
 - The access token lives **in memory only**, with its expiry.
 - Tokens never reach the webview, SQLite, files or logs, and error strings go through a filter that removes `sslab_` values and `code=`.
-- If the OS store fails: the session lives in memory (`session_only: true`, with a note); there is never a file fallback.
+- If the OS store fails on a write: the session lives in memory (`session_only: true`, with a note); there is never a file fallback.
+- If it fails on a read: `store_unavailable: true`, with a note. That isn't signed out, and saved jobs aren't touched. A sign-in that replaces an older one revokes it where it can be read.
 
 **Refresh.**
-- One at a time, behind a mutex, reading the store's current token first so a second instance's rotation is picked up.
+- One at a time, behind a mutex, reading the store's current token first. Only one process uses a session (see "Second launch").
 - The new token is written immediately.
 - Failures that never reached the server (connect errors) are retried.
 - A lost response isn't retried automatically; the next attempt then gets `invalid_grant` and the user signs in again.
@@ -373,7 +400,9 @@ because the user didn't ask to spend again. If an earlier POST did reach the ser
 **Notice text**, matched to the 2026-11-04 `/terms` (section 13) and `/privacy` (sections 2.1, 4, 6):
 
 > To analyse a match, Spaghetti Lab sends a 720p copy of the video, without audio, to the Spaghetti Showdown servers
-> (hosted in the EU). The app deletes it when the analysis ends, whether it finished, failed or was cancelled. The
+> (hosted in the EU). The app deletes it when the analysis ends, whether it finished, failed or was cancelled; if the app
+> is closed or offline then, it does so the next time it runs while you're signed in. If the connection drops just as an
+> upload finishes, the app can't know the copy arrived: you can remove it from your files on the website. The
 > result stays on the server for up to 24 hours so the app can fetch it, then only on this PC. If AI summaries are on,
 > Anthropic receives game data extracted from the video, never the video. Results are generated automatically and can
 > contain errors. You have 2 free analyses a week, then credits, which you can get on the website. An analysis that
@@ -381,7 +410,7 @@ because the user didn't ask to spend again. If an earlier POST did reach the ser
 > [Terms](/terms) [Privacy](/privacy)
 
 An Italian version is needed too, as those pages are in Italian. Things this text must not overstate:
-- Neither page promises deletion, or gives a retention period for Lab videos. Deletion is **this app's** behaviour, so the text says "the app deletes it". If a delete fails it's retried later.
+- Neither page promises deletion, or gives a retention period for Lab videos. Deletion is **this app's** behaviour, so the text says "the app deletes it", and says when it can't: nothing on the server sweeps desktop uploads yet (see "For the server agent"). If a delete fails it's retried later as the same player.
 - `/privacy` section 4 says only game data reaches Anthropic, which holds only with decision 7.
 - Credits (non-transferable, no expiry), contributions and the 14-day withdrawal are website matters under `/terms` section 13, and the app only links there.
 
@@ -424,9 +453,9 @@ in the runner's process (`E2E_MOCK_URL` tells the workers and the app).
 | Control | `POST /__mock/scenario` sets knobs, `/__mock/quota` the quota, `/__mock/expire-access` and `/__mock/revoke-all` end sessions; `/__mock/log` returns calls with tokens reduced to a kind; `/__mock/state` counts rotated tokens presented and uploads deleted under a live job, which `15-lab-hosted` requires to stay 0 after every test |
 
 Knobs (`Scenario` in the file): `service` (on, off = production's 503, down), `login` (ok, missing), `startQueue` (the next POST
-answers: `analysis_starting`, `quota_exhausted`, `one_at_a_time`, `queue_full`, `too_long`, `plain_429`), `upload` (ok, `too_big`,
+answers: `analysis_starting`, `quota_exhausted`, `one_at_a_time`, `queue_full`, `too_long`, `plain_429`, `gateway`, `gateway_after_start` = charged, but nginx's 502 answers), `upload` (ok, `too_big`,
 `html_413`, `storage_full`, `banned`), `uploadDelayMs`, `holdAt` (a job stops at a stage), `failAt`, `refundLost`, `job404`,
-`result` (ok, bad, no_transcript), `fileDelete`, `tokenOutage`.
+`result` (ok, bad, no_transcript, gateway), `jobDelete` (ok, gateway), `fileDelete`, `tokenOutage`.
 
 **Rust** (`cargo test lab_`; these need no DB, unlike the round harnesses):
 - Real sockets for the listener: encoded `state`, wrong `state`, cancel, an unrelated request, timeout, and the port closed afterwards.

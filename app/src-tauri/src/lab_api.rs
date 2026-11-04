@@ -94,8 +94,11 @@ pub fn web_base() -> Result<String, RemoteError> {
     check_base(&env_or("SPAGHETTI_LAB_WEB_URL", DEFAULT_WEB_URL), no_prod()).map_err(|m| RemoteError::new("config", m))
 }
 
+/// An isolated instance (SPAGHETTI_LAB_DATA_DIR, not single-instance) has its own session: two apps
+/// refreshing one session would end it.
 pub fn keyring_service() -> String {
-    env_or("SPAGHETTI_LAB_KEYRING_SERVICE", DEFAULT_KEYRING_SERVICE)
+    let default = if std::env::var_os("SPAGHETTI_LAB_DATA_DIR").is_some() { "SpaghettiLabIsolated" } else { DEFAULT_KEYRING_SERVICE };
+    env_or("SPAGHETTI_LAB_KEYRING_SERVICE", default)
 }
 
 /// Test hooks work only against loopback servers, so a stray variable can't weaken a real session.

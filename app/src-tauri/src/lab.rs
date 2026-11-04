@@ -105,8 +105,16 @@ pub fn parse_lab_result(text: &str) -> Result<serde_json::Value, String> {
     Ok(v)
 }
 
-fn read_cached(root: &Path, replay_id: &str) -> Result<Option<serde_json::Value>, String> {
+/// A paid result this version couldn't read, kept next to the cache (lab_remote::store_result).
+pub const REJECTED_RESULT: &str = "lab_result.rejected.json";
+
+pub(crate) fn read_cached(root: &Path, replay_id: &str) -> Result<Option<serde_json::Value>, String> {
     let p = lab_result_path_in(root, replay_id)?;
+    // After an app update that reads it, a refused result becomes the result it always was
+    let rejected = p.with_file_name(REJECTED_RESULT);
+    if std::fs::read_to_string(&rejected).map_or(false, |t| parse_lab_result(&t).is_ok()) {
+        let _ = std::fs::rename(&rejected, &p);
+    }
     if !p.is_file() {
         return Ok(None);
     }
@@ -204,7 +212,7 @@ pub fn parse_stage(line: &str) -> Option<(String, String)> {
 }
 
 /// Kill the process and its children (DataLoader workers, ffmpeg).
-fn kill_tree(pid: u32) {
+pub(crate) fn kill_tree(pid: u32) {
     if cfg!(target_os = "windows") {
         let mut c = Command::new("taskkill");
         c.args(["/PID", &pid.to_string(), "/T", "/F"]).stdout(Stdio::null()).stderr(Stdio::null());
@@ -234,7 +242,8 @@ fn run_lab(app_handle: tauri::AppHandle, db_path: String, replay_id: String, opt
     if std::env::var_os("SPAGHETTI_LAB_NO_MODELS").is_some() {
         return Err("Running the lab models is disabled (SPAGHETTI_LAB_NO_MODELS).".into());
     }
-    if LAB_RUN.lock().unwrap().is_some() || crate::lab_remote::running_replay().is_some() {
+    // One lock at a time: claim_run takes RUN and then LAB_RUN, so holding LAB_RUN here could deadlock
+    if local_run_active() || crate::lab_remote::running_replay().is_some() {
         return Err("A lab analysis is already running.".into());
     }
     let script = lab_script()?;
@@ -369,7 +378,9 @@ pub fn cancel_lab_analysis(replay_id: Option<String>) -> Result<(), String> {
 /// The replay whose lab analysis is running, if any (the UI picks the progress back up on reopen).
 #[tauri::command]
 pub fn lab_analysis_running() -> Option<String> {
-    LAB_RUN.lock().unwrap().as_ref().map(|r| r.replay_id.clone()).or_else(crate::lab_remote::running_replay)
+    // In two statements: the guard must be gone before RUN is taken (see run_lab)
+    let local = LAB_RUN.lock().unwrap().as_ref().map(|r| r.replay_id.clone());
+    local.or_else(crate::lab_remote::running_replay)
 }
 
 /// The cached lab result of a replay, or null when it was never run.
@@ -395,6 +406,7 @@ pub fn delete_lab_result(replay_id: String) -> Result<(), String> {
     // A saved hosted job stays: it's already paid for, and its uploaded file still has to be deleted
     if dir.join("remote_job.json").is_file() {
         let _ = std::fs::remove_file(dir.join("lab_result.json"));
+        let _ = std::fs::remove_file(dir.join(REJECTED_RESULT));
         let _ = std::fs::remove_dir_all(dir.join("last_run"));
         return Ok(());
     }
