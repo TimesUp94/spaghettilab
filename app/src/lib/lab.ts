@@ -56,12 +56,26 @@ export interface LabResult {
   ai_summary?: AiSummary | null;
 }
 
+export type AiCheckNote = string | { kind?: string; text?: string };
+
+/** One finding of the fact check, as a line of text. */
+export function aiCheckText(n: unknown): string {
+  if (typeof n === "string") return n;
+  if (n && typeof n === "object") {
+    const { kind, text } = n as { kind?: unknown; text?: unknown };
+    const parts = [kind, text].filter((p) => typeof p === "string" && p);
+    if (parts.length) return parts.join(": ");
+  }
+  return JSON.stringify(n) ?? "";
+}
+
 export interface AiSummaryLang {
   /** only when grounded */
   text: string | null;
   grounded: boolean;
-  errors: string[];
-  warnings: string[];
+  /** the checker's findings are objects; an exception during the call is a plain string */
+  errors: AiCheckNote[];
+  warnings: AiCheckNote[];
   usage?: { model?: string; input_tokens?: number; output_tokens?: number } | null;
 }
 
@@ -83,9 +97,9 @@ export const isAuthError = (e: string) => /api[_ -]?key|authenticat|unauthori[sz
 export function aiSummaryFor(r: LabResult, lang: LabLang): AiShown | null {
   const l = r.ai_summary?.langs?.[lang];
   if (!l) return null;
-  const errors = Array.isArray(l.errors) ? l.errors.map(String) : [];
+  const errors = Array.isArray(l.errors) ? l.errors.map(aiCheckText) : [];
   if (l.grounded === true && typeof l.text === "string" && l.text.trim()) {
-    return { kind: "grounded", text: l.text, warnings: Array.isArray(l.warnings) ? l.warnings.map(String) : [], model: r.ai_summary?.model ?? null };
+    return { kind: "grounded", text: l.text, warnings: Array.isArray(l.warnings) ? l.warnings.map(aiCheckText) : [], model: r.ai_summary?.model ?? null };
   }
   return { kind: "withheld", errors, authHint: errors.some(isAuthError) };
 }

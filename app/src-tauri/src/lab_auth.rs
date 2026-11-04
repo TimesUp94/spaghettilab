@@ -150,6 +150,14 @@ impl Auth {
         Arc::new(Auth { api, client, store, session: tokio::sync::Mutex::new(Session::default()) })
     }
 
+    /// Tests: a token the server will refuse, to reach the refresh-on-401 path.
+    #[cfg(test)]
+    pub async fn set_access_for_test(&self, token: &str) {
+        let mut s = self.session.lock().await;
+        s.access = Some(token.to_string());
+        s.expires_at = Some(Instant::now() + Duration::from_secs(3000));
+    }
+
     pub fn client(&self) -> reqwest::Client {
         self.client.clone()
     }

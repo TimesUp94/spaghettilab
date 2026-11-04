@@ -31,7 +31,8 @@ export interface Scenario {
   refundLost: boolean;
   /** job polls answer 404 */
   job404: boolean;
-  result: "ok" | "bad" | "no_transcript" | "gateway";
+  /** ai_withheld: as dev's real answers, the fact check refused both languages */
+  result: "ok" | "bad" | "no_transcript" | "ai_withheld" | "gateway";
   /** the job's DELETE answers a gateway's error page */
   jobDelete: "ok" | "gateway";
   fileDelete: "ok" | "fail" | "scope";
@@ -73,7 +74,7 @@ interface Job {
   error: string | null;
   source: "free" | "credit";
   refundPending: boolean;
-  created: string;
+  created: number;
 }
 
 /** One job's life, one step per poll. */
@@ -165,7 +166,7 @@ function jobView(j: Job): Json {
     started: j.status === "queued" ? null : j.created,
     finished: j.status === "done" || j.status === "failed" ? j.created : null,
     error: j.error,
-    meta: {},
+    meta: { filename: "replay.mp4" },
     ...(j.status === "queued" ? { position: j.position } : {}),
   };
 }
@@ -198,10 +199,22 @@ function advance(j: Job) {
 function resultBody(): string {
   const doc = JSON.parse(fs.readFileSync(path.join(APP_DIR, "e2e", "fixtures", "lab_result.json"), "utf-8"));
   if (mock.scenario.result === "bad") return JSON.stringify({ openers: [] });
-  if (mock.scenario.result === "no_transcript") {
+  if (mock.scenario.result === "no_transcript" || mock.scenario.result === "ai_withheld") {
     doc.transcript = null;
     doc.states = null;
     doc.capabilities.transcript = false;
+  }
+  if (mock.scenario.result === "ai_withheld") {
+    const usage = { model: "claude-opus-5-5", input_tokens: 1831, output_tokens: 1747 };
+    doc.capabilities.ai_summary = false;
+    doc.ai_summary = {
+      provider: "claude",
+      model: "claude-opus-5-5",
+      langs: {
+        en: { text: null, grounded: false, errors: [{ kind: "unsupported_percentage", text: "57%" }], warnings: [{ kind: "note_count", text: "18" }], usage },
+        it: { text: null, grounded: false, errors: [{ kind: "note_without_timestamp", text: "note 1: **Asuka**" }], warnings: [], usage },
+      },
+    };
   }
   return JSON.stringify(doc);
 }
@@ -300,7 +313,7 @@ async function handleStart(req: http.IncomingMessage, res: http.ServerResponse) 
   } else {
     return send(res, 429, { error: "quota_exhausted", ...quotaFields() }, { "Retry-After": "90000" });
   }
-  const job: Job = { id: uuid(), fileId, step: 0, status: "queued", stage: null, position: 2, error: null, source, refundPending: false, created: new Date().toISOString() };
+  const job: Job = { id: uuid(), fileId, step: 0, status: "queued", stage: null, position: 2, error: null, source, refundPending: false, created: Date.now() / 1000 };
   mock.jobs.set(job.id, job);
   // nginx gave up while the backend carried on: charged, and the app wasn't told
   if (forced === "gateway_after_start") return send(res, 502, "<html>Bad gateway</html>");

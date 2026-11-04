@@ -289,10 +289,10 @@ ${d.characters.P1} took the set, the key opener at [${ts}].
 2. A second note.`,
         grounded: true,
         errors: [],
-        warnings: ["note 2 cites no timestamp"],
+        warnings: [{ kind: "note_count", text: "2" }],
         usage: { model: "claude-opus-5-5", input_tokens: 4000, output_tokens: 300 },
       },
-      it: { text: null, grounded: false, errors: ["timestamp 9:59.9 is not in the facts", "move 6H is not in the facts"], warnings: [] },
+      it: { text: null, grounded: false, errors: [{ kind: "unknown_timestamp", text: "9:59.9" }, { kind: "move_not_in_facts", text: "6H" }], warnings: [] },
     },
   };
   return { d, ts };
@@ -329,9 +329,10 @@ test("summary: the AI summary above the facts, only when grounded", async ({ app
   await expect(page.getByTestId("lab-ai-summary")).toHaveCount(0);
   const withheld = page.getByTestId("lab-ai-withheld");
   await expect(withheld).toContainText("non corrispondeva ai fatti");
-  await expect(withheld.getByText("move 6H is not in the facts")).toBeHidden();
+  await expect(withheld.getByText("move_not_in_facts: 6H")).toBeHidden();
   await withheld.getByText("Dettagli (2)").click();
-  await expect(withheld.getByText("move 6H is not in the facts")).toBeVisible();
+  await expect(withheld.getByText("move_not_in_facts: 6H")).toBeVisible();
+  await expect(withheld).not.toContainText("[object Object]");
   await expect(page.getByRole("heading", { name: h1(d.facts.md.it) })).toBeVisible();
 
   // a missing API key gets a hint

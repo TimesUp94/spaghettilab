@@ -186,11 +186,14 @@ with `ANTHROPIC_API_KEY` on the server); `capabilities.ai_summary` is true when 
 
 ```
 "ai_summary": { "provider": "claude", "model": "claude-opus-5-5",
-  "langs": { "it": {"text": str|null, "grounded": bool, "errors": [str], "warnings": [str],
+  "langs": { "it": {"text": str|null, "grounded": bool, "errors": [note], "warnings": [note],
                     "usage": {"model", "input_tokens", "output_tokens"}|null},
              "en": {...} } }
 ```
 
+- A `note` is what the fact check found, `{"kind": str, "text": str}` (`unsupported_percentage`,
+  `note_without_timestamp`, `move_time_mismatch`, ...), or a plain string when the call itself failed. Readers must
+  handle both.
 - One call per language, from the facts document only (the same prompt as `prompts.<lang>`).
 - Every answer goes through `lang_summary.check_answer`: an answer that cites a timestamp, move, character,
   percentage or frame data that isn't in the facts is **withheld** (`text: null`, `grounded: false`, the

@@ -611,6 +611,10 @@ async fn prepare(ctx: &Ctx, ffmpeg: &str, video: &Path, info: VideoInfo, out: &P
 /// Streams from disk, never held in memory. Always named replay.mp4: the name becomes the facts'
 /// title on the server, and player names must stay out of it.
 async fn upload(ctx: &Ctx, file: &Path, total: u64) -> Result<String, RemoteError> {
+    classify_upload(&upload_answer(ctx, file, total).await?)
+}
+
+async fn upload_answer(ctx: &Ctx, file: &Path, total: u64) -> Result<Answer, RemoteError> {
     ctx.auth.ensure_lasting(UPLOAD_TOKEN_LIFE).await?;
     let sent = Arc::new(AtomicU64::new(0));
     let touched = Arc::new(Mutex::new(Instant::now()));
@@ -673,12 +677,11 @@ async fn upload(ctx: &Ctx, file: &Path, total: u64) -> Result<String, RemoteErro
             std::future::pending::<()>().await;
         }
     };
-    let a = tokio::select! {
-        r = send => r?,
-        _ = watchdog => return Err(RemoteError::new("network", "The upload stalled. Check the connection and try again.")),
-        _ = cancel_mid_transfer => return Err(ctx.cancelled("before_charge")),
-    };
-    classify_upload(&a)
+    tokio::select! {
+        r = send => r,
+        _ = watchdog => Err(RemoteError::new("network", "The upload stalled. Check the connection and try again.")),
+        _ = cancel_mid_transfer => Err(ctx.cancelled("before_charge")),
+    }
 }
 
 struct StartFail {
@@ -1039,16 +1042,20 @@ fn test_poll() -> Option<Duration> {
     std::env::var("SPAGHETTI_LAB_TEST_POLL_MS").ok().and_then(|v| v.parse().ok()).map(Duration::from_millis)
 }
 
-fn app_ctx(app: &tauri::AppHandle, auth: Arc<Auth>, id: &str, cancel: watch::Receiver<bool>) -> Ctx {
+fn app_emit(app: &tauri::AppHandle) -> Emit {
     let handle = app.clone();
+    Arc::new(move |event, payload| {
+        let _ = handle.emit(event, payload);
+    })
+}
+
+fn app_ctx(emit: Emit, auth: Arc<Auth>, id: &str, cancel: watch::Receiver<bool>) -> Ctx {
     let poll = test_poll();
     Ctx {
         auth,
         root: lab::lab_root(),
         id: id.to_string(),
-        emit: Arc::new(move |event, payload| {
-            let _ = handle.emit(event, payload);
-        }),
+        emit,
         cancel,
         poll: poll.unwrap_or(POLL),
         poll_error: poll.unwrap_or(POLL_AFTER_ERROR),
@@ -1059,6 +1066,11 @@ fn app_ctx(app: &tauri::AppHandle, auth: Arc<Auth>, id: &str, cancel: watch::Rec
 
 #[tauri::command]
 pub async fn run_lab_analysis_remote(app: tauri::AppHandle, db_path: String, replay_id: String, options: Option<RemoteOptions>) -> Result<Value, RemoteError> {
+    run_remote(app_emit(&app), db_path, replay_id, options).await
+}
+
+/// The command without the window: lab_live_dev.rs runs this against the dev server.
+async fn run_remote(emit: Emit, db_path: String, replay_id: String, options: Option<RemoteOptions>) -> Result<Value, RemoteError> {
     let options = options.unwrap_or_default();
     let id = lab::safe_id(&replay_id).map_err(|e| RemoteError::new("no_video", e))?;
     let auth = lab_auth::auth()?;
@@ -1085,7 +1097,7 @@ pub async fn run_lab_analysis_remote(app: tauri::AppHandle, db_path: String, rep
         return Err(RemoteError::new("already_cached", "This replay already has a result. Analysing it again spends an analysis."));
     }
     let (_guard, cancel) = claim_run(&id)?;
-    let ctx = app_ctx(&app, auth, &id, cancel);
+    let ctx = app_ctx(emit, auth, &id, cancel);
 
     // A job already paid for, or one a lost answer may have started: never spend again before knowing
     if let Some(s) = saved.as_ref().filter(|s| s.awaits_server()) {
@@ -1224,12 +1236,17 @@ async fn resume_all(app: tauri::AppHandle, auth: Arc<Auth>, root: PathBuf) {
             continue;
         }
         let Ok((_guard, cancel)) = claim_run(&id) else { continue };
-        let ctx = app_ctx(&app, auth.clone(), &id, cancel);
+        let ctx = app_ctx(app_emit(&app), auth.clone(), &id, cancel);
         let out = continue_saved(&ctx, job).await;
         let _ = remember_error(&id, conclude(&ctx, out).await);
         let _ = app.emit("lab-remote-ended", json!({ "replay_id": id }));
     }
 }
+
+/// Against the real dev server, by hand only: see the top of that file.
+#[cfg(test)]
+#[path = "lab_live_dev.rs"]
+mod live_dev;
 
 #[cfg(test)]
 mod tests {

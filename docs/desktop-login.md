@@ -8,7 +8,8 @@ The login and a real analysis are live on the dev server (`https://dev.spaghetti
 `node app/e2e/live/dev-auth-check.mjs` runs the app's token and upload code against dev with the test account,
 without starting an analysis. On 2026-11-04 it confirmed: exchange, rotation, 401 `invalid_token`, 400 `invalid_grant`,
 403 `scope`, 404 on an unknown job or file, revoke, a 39 MB streamed upload, the file delete, and no charge for an
-upload alone. Still unchecked for real: the website's Discord click, and a full analysis through the app.
+upload alone. `app/src-tauri/src/lab_live_dev.rs` runs full analyses through the app's pipeline on dev (see "Live tests
+on dev"). Still unchecked for real: the website's Discord click, which needs a person.
 
 Checked on 2026-11-04 by reading the code, and with read-only GETs:
 
@@ -455,7 +456,7 @@ in the runner's process (`E2E_MOCK_URL` tells the workers and the app).
 Knobs (`Scenario` in the file): `service` (on, off = production's 503, down), `login` (ok, missing), `startQueue` (the next POST
 answers: `analysis_starting`, `quota_exhausted`, `one_at_a_time`, `queue_full`, `too_long`, `plain_429`, `gateway`, `gateway_after_start` = charged, but nginx's 502 answers), `upload` (ok, `too_big`,
 `html_413`, `storage_full`, `banned`), `uploadDelayMs`, `holdAt` (a job stops at a stage), `failAt`, `refundLost`, `job404`,
-`result` (ok, bad, no_transcript, gateway), `jobDelete` (ok, gateway), `fileDelete`, `tokenOutage`.
+`result` (ok, bad, no_transcript, ai_withheld, gateway), `jobDelete` (ok, gateway), `fileDelete`, `tokenOutage`.
 
 **Rust** (`cargo test lab_`; these need no DB, unlike the round harnesses):
 - Real sockets for the listener: encoded `state`, wrong `state`, cancel, an unrelated request, timeout, and the port closed afterwards.
@@ -470,3 +471,33 @@ answers: `analysis_starting`, `quota_exhausted`, `one_at_a_time`, `queue_full`, 
 - Re-analyse confirmation, cached result signed out, resume after a restart, cleanup calls in `/__mock/log`, and local mode shown only with the variable.
 
 `14-lab` restarts the app with `SPAGHETTI_LAB_MODELS` set (`connection.restart(env)`) to reach the local form, and back afterwards.
+
+### Live tests on dev
+
+`app/src-tauri/src/lab_live_dev.rs`: ignored tests, not in CI, that need `LAB_LIVE_DEV=1` and refuse any other server:
+
+```bash
+cd app/src-tauri
+LAB_LIVE_DEV=1 cargo test --lib lab_dev_0 -- --ignored --nocapture --test-threads=1   # one step at a time, 0 to 8
+```
+
+They run the shipped code (`run_remote` is `run_lab_analysis_remote` without its window), with the app's own environment
+variables pointed at dev, a data folder in the temp dir and the credential-store service `SpaghettiLabLiveDevTest`. Only the
+no-browser sign-in is test code. They print status codes, field names and counts. Steps 2, 3 and 4 are real analyses: each
+costs server CPU and real AI-summary money, so run them one at a time, on purpose. Step 7 needs the account at 0 free and 0
+credits, set by the server's admin. Step 8 ends the session and removes the credentials and the temp folder.
+
+What real answers showed that the mock and the docs had wrong (all fixed):
+- `ai_summary.langs.*.errors` and `warnings` are `{kind, text}` objects from the fact check, strings only when the call itself
+  failed. `String(x)` showed "[object Object]" in the withheld details.
+- A job's `created`, `started` and `finished` are numbers (epoch seconds), and `meta` has `filename`, later `size`, `fps`,
+  `duration_s`, `openers`, `characters`, `capabilities`, `events`.
+
+To get a job that fails, upload something the service's `probe` refuses (under 360p; the app's own check is skipped by going in at
+its upload). A test pattern isn't reliable: 10 s of `testsrc2` at 720p ended `done`, see below.
+
+### Open on the server side (found on dev, 2026-11-04)
+
+- **A non-game video can end `done`:** 0 openers, invented characters, charged and not given back, and the AI summary was paid for.
+- **The AI summary is often withheld after being paid for:** 1 of 8 language answers passed the fact check. Percentages the
+  model works out itself (8 of 14 openers = 57%) count as `unsupported_percentage`, and multi-line notes as `note_without_timestamp`.

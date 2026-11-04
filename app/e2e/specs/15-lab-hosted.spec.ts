@@ -444,6 +444,19 @@ test("a result without a transcript or AI summary doesn't assume them", async ({
   await expect(app.page.getByTestId("lab-no-transcript")).not.toContainText("GPU");
 });
 
+test("an AI summary the fact check refused: dev's real answer shape reads as text", async ({ app }) => {
+  await ready(app);
+  await scenario({ result: "ai_withheld" });
+  await analyse(app).click();
+  await expect(app.page.getByTestId("lab-no-transcript")).toBeVisible({ timeout: 30_000 });
+  await app.page.getByRole("group", { name: "Lab section" }).getByRole("button", { name: /^Summary/ }).click();
+  const withheld = app.page.getByTestId("lab-ai-withheld");
+  await expect(withheld).toBeVisible();
+  await withheld.locator("summary").click();
+  await expect(withheld).toContainText(/unsupported_percentage: 57%|note_without_timestamp: note 1/);
+  await expect(withheld).not.toContainText("[object Object]");
+});
+
 test("cancel while queued: says it's given back, and it is", async ({ app }) => {
   await ready(app);
   const { page } = app;
