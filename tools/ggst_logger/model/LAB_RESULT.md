@@ -178,3 +178,21 @@ when it runs), `stage: facts`, `stage: done`. The opener service turns them into
 `starting` and, for `/jobs/url`, `download` before `hud`. `--transcript auto`
 runs the transcript only with a CUDA GPU (it needs about 77 s of V-JEPA 2 per match). `off` gives `transcript: null`,
 `states: null` and `capabilities.transcript: false`. Openers and facts always run, on the CPU too.
+
+## `ai_summary` (optional, since 2026-11-04)
+
+Present only when the run had an LLM provider (`lab_analyze.py --llm claude`, or `GGST_LANG_PROVIDER=claude`
+with `ANTHROPIC_API_KEY` on the server); `capabilities.ai_summary` is true when at least one language passed.
+
+```
+"ai_summary": { "provider": "claude", "model": "claude-opus-5-5",
+  "langs": { "it": {"text": str|null, "grounded": bool, "errors": [str], "warnings": [str],
+                    "usage": {"model", "input_tokens", "output_tokens"}|null},
+             "en": {...} } }
+```
+
+- One call per language, from the facts document only (the same prompt as `prompts.<lang>`).
+- Every answer goes through `lang_summary.check_answer`: an answer that cites a timestamp, move, character,
+  percentage or frame data that isn't in the facts is **withheld** (`text: null`, `grounded: false`, the
+  problems in `errors`). UIs show `text` only when `grounded` is true, label it as AI-written, and keep the
+  facts as the source of truth; `warnings` may be shown as a small note.

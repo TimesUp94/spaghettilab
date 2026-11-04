@@ -27,7 +27,7 @@ ACTIVE = (QUEUED, RUNNING)
 
 # lab_analyze.py prints `stage: <name>`; the older recognize.py markers are still understood
 STAGE_PREFIX = "stage: "
-STAGE_NAMES = ("hud", "detect", "moves", "transcript", "facts", "done")
+STAGE_NAMES = ("hud", "detect", "moves", "transcript", "facts", "summary", "done")
 STAGES = [("running the CV pipeline", "hud"), ("combo starts found", "moves"), ("openers ->", "done")]
 RESULT_FILES = ("lab_result.json", "openers.json")      # what a job keeps; the first that exists is the result
 
@@ -118,7 +118,16 @@ def capabilities(limits: Limits) -> dict:
     """What a job of this service produces (lab_result.json `capabilities`): the transcript only with
     OPENERS_TRANSCRIPT=1, its weights and a GPU."""
     return dict(openers=True, transcript=bool(limits.transcript and transcript_weights() and gpu_available()),
-                facts=True)
+                facts=True, ai_summary=llm_provider() != "none")
+
+
+def llm_provider() -> str:
+    """GGST_LANG_PROVIDER (e.g. claude) when its key is configured, else none: the AI summary is opt-in per
+    server, and only the facts document is sent (lab_analyze.ai_summary)."""
+    name = os.environ.get("GGST_LANG_PROVIDER", "none")
+    if name == "claude" and not os.environ.get("ANTHROPIC_API_KEY"):
+        return "none"
+    return name
 
 
 def chain_command(video: Path, out: Path, limits: Limits, transcript: bool = False, title: str | None = None) -> list[str]:
@@ -129,6 +138,7 @@ def chain_command(video: Path, out: Path, limits: Limits, transcript: bool = Fal
     cmd = [sys.executable, str(MODEL_DIR / "lab_analyze.py"), str(video), "--out", str(out), "--device", dev,
            "--threads", str(limits.threads), "--transcript", "on" if transcript else "off"]
     cmd += ["--title", title] if title else []
+    cmd += ["--llm", llm_provider()]
     return cmd + (["--light"] if limits.light else [])
 
 

@@ -197,6 +197,27 @@ def assemble(video: str, duration_s: float, fps: float, openers_doc: dict, preds
                 facts=facts, prompts=prompts, timings_s=timings)
 
 
+def ai_summary(doc: dict, name: str, langs=LANGS, prov=None) -> dict | None:
+    """Summary + coaching notes written by an LLM from the facts (lang_summary prompts), one call per
+    language, each answer checked against the facts (lang_summary.check_answer). An answer that fails the
+    check is withheld: text None, the problems kept. name "none" -> None (nothing leaves the machine)."""
+    if name in (None, "", "none"):
+        return None
+    os.environ.setdefault("GGST_LANG_ALLOW_NETWORK", "1")     # choosing a provider is the opt-in
+    prov = prov or ls.provider(name, enabled=True)
+    out = dict(provider=name, model=getattr(prov, "model", None), langs={})
+    for lang in langs:
+        try:
+            text = prov.complete(ls.build_prompt(doc["facts"], lang))
+            chk = ls.check_answer(text or "", doc["facts"])
+            ok = bool(text) and not chk.get("errors")
+            out["langs"][lang] = dict(text=text if ok else None, grounded=ok, errors=chk.get("errors", []),
+                                      warnings=chk.get("warnings", []), usage=getattr(prov, "last_usage", None))
+        except Exception as e:                     # the rest of the result still comes out
+            out["langs"][lang] = dict(text=None, grounded=False, errors=[f"{type(e).__name__}: {e}"[:300]], warnings=[])
+    return out
+
+
 def clean_title(title: str | None) -> str | None:
     """A match title for the facts: the file name without directory or extension, printable, at most 80 chars."""
     if not title:
@@ -379,6 +400,9 @@ def main():
     ap.add_argument("--title", help="match title for the facts and prompts (e.g. the original file name); "
                     "default: none, the heading shows only the characters")
     ap.add_argument("--workers", type=int, default=1, help="transcript: video decode processes (one video: 0 or 1)")
+    ap.add_argument("--llm", default=os.environ.get("GGST_LANG_PROVIDER", "none"), choices=sorted(ls.PROVIDERS),
+                    help="write a summary + coaching notes with an LLM from the facts (claude: needs ANTHROPIC_API_KEY); "
+                         "default GGST_LANG_PROVIDER or none")
     a = ap.parse_args()
     if a.device:
         os.environ["GGST_DEVICE"] = a.device
@@ -410,6 +434,12 @@ def main():
     t_f = time.time()
     doc = assemble(str(a.video), duration, fps, openers_doc, preds, states, hud, timings, match_id=a.title)
     doc["timings_s"]["facts"] = round(time.time() - t_f, 1)
+    if a.llm != "none":
+        st("summary")
+        t_s = time.time()
+        doc["ai_summary"] = ai_summary(doc, a.llm)
+        doc["capabilities"]["ai_summary"] = bool(doc["ai_summary"] and any(v["grounded"] for v in doc["ai_summary"]["langs"].values()))
+        doc["timings_s"]["summary"] = round(time.time() - t_s, 1)
     doc["timings_s"]["total"] = round(time.time() - st.t0, 1)
     write_json(doc, out / "lab_result.json")
     st("done")

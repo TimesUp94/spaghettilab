@@ -53,8 +53,8 @@ def stub_command(tmp_path, seconds=0.3, outcome="ok", seen=None):
     return cmd
 
 
-CPU = {"openers": True, "transcript": False, "facts": True}
-GPU = {"openers": True, "transcript": True, "facts": True}
+CPU = {"openers": True, "transcript": False, "facts": True, "ai_summary": False}
+GPU = {"openers": True, "transcript": True, "facts": True, "ai_summary": False}
 
 
 def new_job(q, owner):
@@ -153,7 +153,7 @@ def test_http_auth_and_ownership(tmp_path, monkeypatch):
         doc = client.get(f"/jobs/{jid}/result", headers=h).json()
         assert len(doc["openers"]) == 2                          # the old field is still there
         assert doc["schema"] == "spaghetti-lab-result/1" and doc["transcript"] is None
-        assert doc["capabilities"] == CPU
+        assert doc["capabilities"] == {k: v for k, v in CPU.items() if k != "ai_summary"}   # written by the stub
         health = client.get("/health").json()
         assert health["running"] == 0 and health["capabilities"] == CPU
 
@@ -194,7 +194,7 @@ def test_stages_and_transcript_capability(tmp_path):
         await wait_until(lambda: q.jobs[a["id"]].status == DONE)
         job = q.jobs[a["id"]]
         assert job.stage == "done" and seen == [(True, "Sol vs Ky.mp4")]       # the user's name, not the upload path
-        assert job.meta["capabilities"] == GPU and job.meta["events"] == 3 and job.meta["openers"] == 2
+        assert job.meta["capabilities"] == {k: v for k, v in GPU.items() if k != "ai_summary"} and job.meta["events"] == 3 and job.meta["openers"] == 2
         assert q.result_path(a["id"]).name == "lab_result.json"
         out = tmp_path / "w" / a["id"] / "out"
         assert sorted(p.name for p in out.iterdir()) == ["lab_result.json", "openers.json"]

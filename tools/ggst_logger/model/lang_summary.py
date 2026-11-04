@@ -752,10 +752,12 @@ class NoneProvider(Provider):
 
 @dataclass
 class ClaudeProvider(Provider):
-    """STUB, never called in this repo yet: sending match facts to Anthropic is the user's decision.
-    It refuses unless constructed with enabled=True AND GGST_LANG_ALLOW_NETWORK=1 is set."""
+    """Claude Opus 5.5 over the facts document (decided 2026-11-04: the facts may go to Anthropic; only the
+    facts, no video, frames or player names). It refuses unless constructed with enabled=True AND
+    GGST_LANG_ALLOW_NETWORK=1 is set, so nothing leaves a machine that wasn't configured for it.
+    Thinking is always on with this model (effort is the control); max_tokens covers thinking + answer."""
     model: str = "claude-opus-5-5"
-    max_tokens: int = 4000
+    max_tokens: int = 16000
     effort: str = "medium"
     fallbacks: str | None = "default"     # server-side refusal fallback
     enabled: bool = False
@@ -765,10 +767,10 @@ class ClaudeProvider(Provider):
         if not (self.enabled and os.environ.get("GGST_LANG_ALLOW_NETWORK") == "1"):
             raise RuntimeError("ClaudeProvider is disabled: no decision yet on sending match data to an LLM provider "
                                "(construct with enabled=True and set GGST_LANG_ALLOW_NETWORK=1 once decided)")
-        import anthropic  # not a dependency of the project yet
+        import anthropic  # optional: pip install anthropic (the server extra has it)
         client = anthropic.Anthropic()
-        kw = dict(model=self.model, max_tokens=self.max_tokens,
-                  system=[{"type": "text", "text": prompt["system"], "cache_control": {"type": "ephemeral"}}],
+        # the system prompt (~400 tokens) is below the minimum cacheable prefix: no cache_control
+        kw = dict(model=self.model, max_tokens=self.max_tokens, system=prompt["system"],
                   messages=[{"role": "user", "content": prompt["user"]}],
                   output_config={"effort": self.effort})
         if self.fallbacks:
@@ -777,6 +779,10 @@ class ClaudeProvider(Provider):
             resp = client.messages.create(**kw)
         if resp.stop_reason == "refusal":
             raise RuntimeError(f"refused: {getattr(resp, 'stop_details', None)}")
+        if resp.stop_reason == "max_tokens":
+            raise RuntimeError("the answer hit max_tokens")
+        self.last_usage = dict(model=getattr(resp, "model", self.model), input_tokens=resp.usage.input_tokens,
+                               output_tokens=resp.usage.output_tokens)
         return "".join(b.text for b in resp.content if b.type == "text")
 
 

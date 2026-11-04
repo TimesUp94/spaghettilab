@@ -171,3 +171,36 @@ def test_no_paths_or_job_ids_in_the_result():
     doc = la.assemble(video, 46.0, 30.0, ops, None, None, _hud(), match_id=r"C:\Users\me\Tappa 4 [GF].mp4")
     assert doc["facts"]["match_id"] == "Tappa 4 GF" and "Users" not in json.dumps(doc)
     assert "(Tappa 4 GF)" in doc["prompts"]["it"]
+
+
+def test_ai_summary_grounding_gate():
+    """A grounded answer is kept, an answer with invented facts is withheld, a provider error is reported;
+    nothing here touches the network (a fake provider)."""
+    import json as _json
+    from pathlib import Path as _P
+    import lab_analyze as la
+    fx = _P(la.__file__).parent / "fixtures" / "lab_result_sample.json"
+    doc = _json.loads(fx.read_text(encoding="utf-8"))
+    lang_dir = _P(r"G:\Projects\replanal-data\ggst_dataset\lang\inputs_20261022_181805")
+    good = (lang_dir / "answer_example_good_en.md")
+    bad = (lang_dir / "answer_example_bad_en.md")
+    if not (good.exists() and bad.exists()):
+        import pytest
+        pytest.skip("example answers not on this machine")
+
+    class Fake:
+        model = "fake"
+        def __init__(self, answers): self.answers = answers
+        def complete(self, prompt, out_dir=None):
+            a = self.answers[prompt["lang"]]
+            if isinstance(a, Exception):
+                raise a
+            return a
+
+    res = la.ai_summary(doc, "claude", langs=("en",), prov=Fake({"en": good.read_text(encoding="utf-8")}))
+    assert res["langs"]["en"]["grounded"] and res["langs"]["en"]["text"]
+    res = la.ai_summary(doc, "claude", langs=("en",), prov=Fake({"en": bad.read_text(encoding="utf-8")}))
+    assert not res["langs"]["en"]["grounded"] and res["langs"]["en"]["text"] is None and res["langs"]["en"]["errors"]
+    res = la.ai_summary(doc, "claude", langs=("en",), prov=Fake({"en": RuntimeError("refused: cyber")}))
+    assert not res["langs"]["en"]["grounded"] and "refused" in res["langs"]["en"]["errors"][0]
+    assert la.ai_summary(doc, "none") is None
