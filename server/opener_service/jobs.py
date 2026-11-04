@@ -121,18 +121,20 @@ def capabilities(limits: Limits) -> dict:
                 facts=True)
 
 
-def chain_command(video: Path, out: Path, limits: Limits, transcript: bool = False) -> list[str]:
+def chain_command(video: Path, out: Path, limits: Limits, transcript: bool = False, title: str | None = None) -> list[str]:
     """lab_analyze for one video: openers (light unless OPENERS_LIGHT=0) and facts, on the CPU; with the
-    transcript, everything on the GPU (GGST_DEVICE overrides)."""
+    transcript, everything on the GPU (GGST_DEVICE overrides). title: the user's file name for the facts'
+    heading (never the upload's path or the job id)."""
     dev = os.environ.get("GGST_DEVICE") or ("cuda" if transcript else "cpu")
     cmd = [sys.executable, str(MODEL_DIR / "lab_analyze.py"), str(video), "--out", str(out), "--device", dev,
            "--threads", str(limits.threads), "--transcript", "on" if transcript else "off"]
+    cmd += ["--title", title] if title else []
     return cmd + (["--light"] if limits.light else [])
 
 
 class Queue:
     def __init__(self, workdir: Path, limits: Limits, command=chain_command, caps: dict | None = None):
-        """command(video, out, limits, transcript) -> argv; caps: the capabilities (default: probed once)."""
+        """command(video, out, limits, transcript, title) -> argv; caps: the capabilities (default: probed once)."""
         self.workdir, self.limits, self.command = Path(workdir), limits, command
         self._caps = caps
         self.workdir.mkdir(parents=True, exist_ok=True)
@@ -283,7 +285,7 @@ class Queue:
                    OPENBLAS_NUM_THREADS=str(self.limits.threads), VM_WORKERS="0", PYTHONUNBUFFERED="1",
                    PYTHONIOENCODING="utf-8")
         proc = await asyncio.create_subprocess_exec(
-            *self.command(Path(job.video), out, self.limits, transcript), stdout=asyncio.subprocess.PIPE,
+            *self.command(Path(job.video), out, self.limits, transcript, job.meta.get("filename") or None), stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT, env=env, preexec_fn=_limit_fn(self.limits) if os.name != "nt" else None,
             start_new_session=os.name != "nt")
         self.procs[job.id] = proc

@@ -20,7 +20,7 @@ unknown fields. A breaking change becomes `spaghetti-lab-result/2`.
 | field | type | meaning |
 |---|---|---|
 | `schema` | `"spaghetti-lab-result/1"` | |
-| `video` | str | the video path lab_analyze was given (on the service, a temporary file: do not show or rely on it) |
+| `video` | str | the **file name** (no directory) of the video lab_analyze was given. On the service it is the upload's temporary name (`video.mp4`): show the user's own file name instead |
 | `duration_s` | float | video length in seconds |
 | `fps` | float | the video's frame rate (30 or 60 usually). All times below are seconds of the video; `frame` fields are always on a **60 fps** timeline (`frame / 60 = t`), whatever the video's fps |
 | `characters` | `{"P1": str, "P2": str}` | the opener chain's character vote (names as in `tools/ggst_logger/dataset/moves.json`, e.g. `"Sol"`, `"Asuka"`, `"Elphelt"`) |
@@ -79,7 +79,9 @@ class is right about 0.85 of the time on the test fold.
 
 The `lang_summary.match_facts` document, unchanged (`schema: "ggst-match-facts/1"`). Its main parts:
 `result` (`winner`, `score` e.g. `"2-1"`, `uncertain`), `rounds[]` (`n`, `start_s`, `end_s`, `winner`, `uncertain`,
-`t_start`/`t_end` m:ss.s), `players.P1/P2` (opener counts and mix, top opening moves, biggest combos, damage), and
+`t_start`/`t_end` m:ss.s), `match_id` (the match title given with `--title`, e.g. the user's original file name without
+extension, or null; the markdown heading is `Match facts: P1 <char> vs P2 <char>` plus ` (<title>)` when there is
+one. No server path or job id is ever in the facts or prompts), `players.P1/P2` (opener counts and mix, top opening moves, biggest combos, damage), and
 `openers[]` (`id` "O1"..., `t_s`, `t` m:ss.s, `attacker`, `char`, `move`, `move_name`, `hit_kind` neither/counter/punish/unclear,
 `damage_pct`, `ko`, `uncertain`). With the transcript there is also `transcript.P1/P2` (attack outcome rates, most
 used attacks, what counter-hit them, habits). `sources` and `caveats` say what was used. Added here: `md`
@@ -164,9 +166,15 @@ Measured quality of these presets over the test fold (`search_index.py eval`, F1
 
 ```
 .venv/Scripts/python.exe tools/ggst_logger/model/lab_analyze.py <video> --out <dir> [--device cuda|cpu] [--light]
-       [--transcript auto|on|off] [--analysis <analyze_replay output dir>] [--threads N]
+       [--transcript auto|on|off] [--analysis <analyze_replay output dir>] [--threads N] [--title <match title>]
 ```
 
-It prints `stage: hud|detect|moves|transcript|facts|done` lines; the opener service parses them. `--transcript auto`
+`--title` is the match title in the facts and prompts. The service passes the user's original file name (job
+`meta.filename`). Without `--title`, the heading names only the characters. The desktop app should pass the
+replay's name.
+
+It prints exactly these lines, in this order: `stage: hud`, `stage: detect`, `stage: moves`, `stage: transcript` (only
+when it runs), `stage: facts`, `stage: done`. The opener service turns them into the job's `stage`. It adds its own
+`starting` and, for `/jobs/url`, `download` before `hud`. `--transcript auto`
 runs the transcript only with a CUDA GPU (it needs about 77 s of V-JEPA 2 per match). `off` gives `transcript: null`,
 `states: null` and `capabilities.transcript: false`. Openers and facts always run, on the CPU too.

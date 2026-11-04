@@ -11,7 +11,7 @@ described in LAB_RESULT.md next to this file). This is what the opener service a
    transcript when there is one, and the HUD parquet the pipeline wrote.
 
     .venv/Scripts/python.exe tools/ggst_logger/model/lab_analyze.py <video> --out <dir> [--device cuda|cpu]
-        [--light] [--transcript auto|on|off] [--analysis <analyze_replay output dir>] [--threads N]
+        [--light] [--transcript auto|on|off] [--analysis <analyze_replay output dir>] [--threads N] [--title T]
 
 Progress lines for the service: `stage: hud|detect|moves|transcript|facts|done`.
 Weights from GGST_MODEL_DIR (default <GGST_DATA>/ggst_dataset/model): the chain's *_final files, and for the
@@ -179,20 +179,32 @@ def prompt_text(p: dict) -> str:
 def assemble(video: str, duration_s: float, fps: float, openers_doc: dict, preds: list[dict] | None = None,
              states: dict | None = None, hud: "ls.Hud | None" = None, timings: dict | None = None,
              match_id: str | None = None) -> dict:
-    """The lab_result document. preds: transcript prediction rows or None (transcript not run)."""
+    """The lab_result document. preds: transcript prediction rows or None (transcript not run). match_id: the
+    title shown in the facts and prompts (e.g. the original file name); None = none, only the characters.
+    `video` keeps only the file name: no directory (a server's job folder) ends up in the result."""
     t0 = time.time()
-    facts = ls.match_facts(openers_doc, preds, hud, match_id=match_id or Path(str(video)).stem)
+    facts = ls.match_facts(openers_doc, preds, hud, match_id=clean_title(match_id))
     facts["md"] = {lang: ls.render_md(facts, lang) for lang in LANGS}
     prompts = {lang: prompt_text(ls.build_prompt(facts, lang)) for lang in LANGS}
     timings = dict(timings or {})
     timings.setdefault("facts", round(time.time() - t0, 2))
-    return dict(schema=SCHEMA, video=str(video), duration_s=round(float(duration_s), 2), fps=round(float(fps), 3),
+    return dict(schema=SCHEMA, video=Path(str(video)).name, duration_s=round(float(duration_s), 2), fps=round(float(fps), 3),
                 characters=dict(openers_doc["characters"]),
                 capabilities=dict(openers=True, transcript=preds is not None, facts=True),
                 openers=openers_doc["openers"],
                 transcript=dict(events=map_transcript(preds, openers_doc["openers"])) if preds is not None else None,
                 states=states if preds is not None else None,
                 facts=facts, prompts=prompts, timings_s=timings)
+
+
+def clean_title(title: str | None) -> str | None:
+    """A match title for the facts: the file name without directory or extension, printable, at most 80 chars."""
+    if not title:
+        return None
+    t = Path(str(title).replace("\\", "/")).name
+    t = Path(t).stem if Path(t).suffix.lower() in (".mp4", ".mkv", ".webm", ".mov", ".avi") else t
+    t = "".join(c for c in t if c.isprintable() and c not in "[]()`<>").strip()[:80]
+    return t or None
 
 
 def write_json(doc: dict, path: Path):
@@ -364,6 +376,8 @@ def main():
     ap.add_argument("--threads", type=int, help="CPU threads for the networks (default: torch's)")
     ap.add_argument("--transcript", choices=["auto", "on", "off"], default="auto",
                     help="auto: only with a CUDA GPU and the transcript weights present")
+    ap.add_argument("--title", help="match title for the facts and prompts (e.g. the original file name); "
+                    "default: none, the heading shows only the characters")
     ap.add_argument("--workers", type=int, default=1, help="transcript: video decode processes (one video: 0 or 1)")
     a = ap.parse_args()
     if a.device:
@@ -394,7 +408,7 @@ def main():
     hud = ls.Hud.load(pq_path) if pq_path and Path(pq_path).exists() else None
     timings = dict(st.times)
     t_f = time.time()
-    doc = assemble(str(a.video), duration, fps, openers_doc, preds, states, hud, timings, match_id=a.video.stem)
+    doc = assemble(str(a.video), duration, fps, openers_doc, preds, states, hud, timings, match_id=a.title)
     doc["timings_s"]["facts"] = round(time.time() - t_f, 1)
     doc["timings_s"]["total"] = round(time.time() - st.t0, 1)
     write_json(doc, out / "lab_result.json")

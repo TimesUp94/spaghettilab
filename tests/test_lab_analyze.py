@@ -79,7 +79,7 @@ def test_assemble_without_transcript():
     assert doc["capabilities"] == {"openers": True, "transcript": False, "facts": True}
     assert doc["transcript"] is None and doc["states"] is None and doc["openers"] == ops["openers"]
     f = doc["facts"]
-    assert f["schema"] == "ggst-match-facts/1" and f["match_id"] == "m" and f["sources"]["transcript"] is False
+    assert f["schema"] == "ggst-match-facts/1" and f["match_id"] is None and f["sources"]["transcript"] is False
     assert set(f["md"]) == {"it", "en"} and f["md"]["en"] == ls.render_md({k: v for k, v in f.items() if k != "md"}, "en")
     assert doc["prompts"]["en"].startswith("[system]\n") and "[user]\n" in doc["prompts"]["it"]
     assert doc["timings_s"]["hud"] == 1.0 and "facts" in doc["timings_s"]
@@ -156,3 +156,18 @@ def test_opener_fallback_events(sample):
     assert all(e["opener"] and e["outcome"] in ("hit", "counter") for e in oe)
     assert la.search_events(dict(sample, transcript=None)) == oe
     assert la.preset_after_block(oe, "P1") == [] and la.preset_after_block(oe, "P2") == []
+
+
+def test_no_paths_or_job_ids_in_the_result():
+    """On the server the video is <workdir>/<job id>/video.mp4: neither the folder nor the job id may reach the
+    result; the title is the user's file name, or nothing (the heading then shows only the characters)."""
+    ops = dict(characters={"P1": "Sol", "P2": "Ky"}, openers=[opener("P1", 10.0)])
+    job = "0123456789abcdef0123456789abcdef"
+    video = f"/srv/opener_service/work/{job}/video.mp4"
+    doc = la.assemble(video, 46.0, 30.0, ops, None, None, _hud())
+    text = json.dumps(doc, ensure_ascii=False)
+    assert job not in text and "/srv" not in text and doc["video"] == "video.mp4"
+    assert doc["facts"]["md"]["en"].splitlines()[0].endswith("P1 Sol vs P2 Ky")
+    doc = la.assemble(video, 46.0, 30.0, ops, None, None, _hud(), match_id=r"C:\Users\me\Tappa 4 [GF].mp4")
+    assert doc["facts"]["match_id"] == "Tappa 4 GF" and "Users" not in json.dumps(doc)
+    assert "(Tappa 4 GF)" in doc["prompts"]["it"]

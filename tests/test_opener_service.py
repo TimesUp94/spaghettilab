@@ -46,9 +46,9 @@ def stub_command(tmp_path, seconds=0.3, outcome="ok", seen=None):
     script = tmp_path / "stub.py"
     script.write_text(STUB)
 
-    def cmd(video, out, limits, transcript=False):
+    def cmd(video, out, limits, transcript=False, title=None):
         if seen is not None:
-            seen.append(transcript)
+            seen.append((transcript, title))
         return [sys.executable, str(script), str(video), str(out), str(seconds), outcome, "on" if transcript else "off"]
     return cmd
 
@@ -187,11 +187,13 @@ def test_stages_and_transcript_capability(tmp_path):
         seen = []
         q = Queue(tmp_path / "w", Limits(per_owner=5), stub_command(tmp_path, 0.6, seen=seen), caps=GPU)
         q.start()
-        a = new_job(q, "a")
+        job_id, d = q.new_dir()
+        (d / "video.mp4").write_bytes(b"x")
+        a = q.submit(job_id, "a", d / "video.mp4", {"filename": "Sol vs Ky.mp4"})
         await wait_until(lambda: q.jobs[a["id"]].stage == "hud")
         await wait_until(lambda: q.jobs[a["id"]].status == DONE)
         job = q.jobs[a["id"]]
-        assert job.stage == "done" and seen == [True]
+        assert job.stage == "done" and seen == [(True, "Sol vs Ky.mp4")]       # the user's name, not the upload path
         assert job.meta["capabilities"] == GPU and job.meta["events"] == 3 and job.meta["openers"] == 2
         assert q.result_path(a["id"]).name == "lab_result.json"
         out = tmp_path / "w" / a["id"] / "out"
@@ -229,3 +231,6 @@ def test_capabilities_and_command(monkeypatch, tmp_path):
     assert cpu[cpu.index("--device") + 1] == "cpu" and "--light" in cpu
     gpu = jobs_mod.chain_command(Path("v.mp4"), Path("o"), Limits(light=False), transcript=True)
     assert gpu[gpu.index("--transcript") + 1] == "on" and gpu[gpu.index("--device") + 1] == "cuda" and "--light" not in gpu
+    assert "--title" not in gpu
+    named = jobs_mod.chain_command(Path("v.mp4"), Path("o"), Limits(), title="match 1.mp4")
+    assert named[named.index("--title") + 1] == "match 1.mp4"

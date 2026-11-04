@@ -1,6 +1,6 @@
 {
  "schema": "spaghetti-lab-result/1",
- "video": "G:\\Projects\\replanal-data\\ggst_rec\\inputs_20261022_181805.mp4",
+ "video": "inputs_20261022_181805.mp4",
  "duration_s": 150.0,
  "fps": 60.0,
  "characters": {
