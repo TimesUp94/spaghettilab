@@ -6,6 +6,9 @@ use std::process::{Command, Stdio};
 use tauri::Emitter;
 
 mod lab;
+mod lab_api;
+mod lab_auth;
+mod lab_remote;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -4579,6 +4582,20 @@ pub fn run() {
             lab::lab_analysis_running,
             lab::get_lab_result,
             lab::delete_lab_result,
+            lab_auth::lab_config,
+            lab_auth::lab_account,
+            lab_auth::lab_sign_in,
+            lab_auth::lab_sign_in_reopen,
+            lab_auth::lab_sign_in_cancel,
+            lab_auth::lab_sign_out,
+            lab_auth::lab_service_status,
+            lab_auth::lab_quota,
+            lab_auth::lab_open_web,
+            lab_remote::run_lab_analysis_remote,
+            lab_remote::cancel_lab_analysis_remote,
+            lab_remote::lab_remote_running,
+            lab_remote::lab_remote_take_error,
+            lab_remote::lab_remote_resume,
             get_notes,
             add_note,
             update_note,

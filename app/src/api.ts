@@ -16,7 +16,7 @@ import type {
   StriveExportOptions,
   StriveExportSummary,
 } from "./types";
-import type { LabOptions, LabResult } from "./lib/lab";
+import type { LabAccount, LabConfig, LabOptions, LabQuota, LabResult, LabServiceStatus, RemoteError, RemoteRunning } from "./lib/lab";
 
 export async function getReplays(dbPath: string): Promise<Replay[]> {
   return invoke("get_replays", { dbPath });
@@ -248,4 +248,65 @@ export async function getLabResult(replayId: string): Promise<LabResult | null> 
 
 export async function deleteLabResult(replayId: string): Promise<void> {
   return invoke("delete_lab_result", { replayId });
+}
+
+// Lab sign-in and hosted analysis (docs/desktop-login.md). These fail with a RemoteError object, not a string.
+
+export async function labConfig(): Promise<LabConfig> {
+  return invoke("lab_config");
+}
+
+export async function labAccount(): Promise<LabAccount> {
+  return invoke("lab_account");
+}
+
+/** Opens the system browser; resolves when the login ends. */
+export async function labSignIn(): Promise<LabAccount> {
+  return invoke("lab_sign_in");
+}
+
+export async function labSignInReopen(): Promise<void> {
+  return invoke("lab_sign_in_reopen");
+}
+
+export async function labSignInCancel(): Promise<void> {
+  return invoke("lab_sign_in_cancel");
+}
+
+export async function labSignOut(): Promise<LabAccount> {
+  return invoke("lab_sign_out");
+}
+
+export async function labServiceStatus(): Promise<LabServiceStatus> {
+  return invoke("lab_service_status");
+}
+
+/** null when the analysis isn't available right now. */
+export async function labQuota(): Promise<LabQuota | null> {
+  return invoke("lab_quota");
+}
+
+export async function labOpenWeb(page: "support" | "terms" | "privacy"): Promise<void> {
+  return invoke("lab_open_web", { page });
+}
+
+export async function runLabAnalysisRemote(dbPath: string, replayId: string, options: { again?: boolean; video_path?: string }): Promise<LabResult> {
+  return invoke("run_lab_analysis_remote", { dbPath, replayId, options });
+}
+
+export async function cancelLabAnalysisRemote(replayId: string): Promise<{ phase: string }> {
+  return invoke("cancel_lab_analysis_remote", { replayId });
+}
+
+export async function labRemoteRunning(): Promise<RemoteRunning | null> {
+  return invoke("lab_remote_running");
+}
+
+export async function labRemoteTakeError(replayId: string): Promise<RemoteError | null> {
+  return invoke("lab_remote_take_error", { replayId });
+}
+
+/** Leftovers of an earlier session: temp copies, failed deletes, saved jobs. */
+export async function labRemoteResume(): Promise<void> {
+  return invoke("lab_remote_resume");
 }

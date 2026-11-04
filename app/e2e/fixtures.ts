@@ -4,6 +4,7 @@
 import { test as base, expect, chromium, type Browser, type Locator, type Page } from "@playwright/test";
 import fs from "node:fs";
 import path from "node:path";
+import { startApp, stopApp } from "./app-process";
 import { CDP_PORT, DEFAULT_DB, FILES_DIR, FIXTURE_VIDEO, REPLAY_ID } from "./env";
 
 /**
@@ -195,17 +196,37 @@ export class App {
   }
 }
 
-export const test = base.extend<{ app: App }, { connection: { browser: Browser; page: Page } }>({
+export interface Connection {
+  browser: Browser;
+  page: Page;
+  /** Close the app and start it again, keeping its data and profile; `env` adds variables to that instance. */
+  restart: (env?: Record<string, string>) => Promise<void>;
+}
+
+async function connect(): Promise<{ browser: Browser; page: Page }> {
+  const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
+  const page = browser.contexts()[0].pages().find((p) => p.url().startsWith("http://tauri.localhost"));
+  if (!page) throw new Error("The app window was not found over CDP");
+  await page.addInitScript(installMocks);
+  await page.evaluate(installMocks);
+  return { browser, page };
+}
+
+export const test = base.extend<{ app: App }, { connection: Connection }>({
   connection: [
     async ({}, use) => {
-      const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
-      const page = browser.contexts()[0].pages().find((p) => p.url().startsWith("http://tauri.localhost"));
-      if (!page) throw new Error("The app window was not found over CDP");
-      await page.addInitScript(installMocks);
-      await page.evaluate(installMocks);
-      await use({ browser, page });
+      const connection: Connection = {
+        ...(await connect()),
+        restart: async (env = {}) => {
+          await connection.browser.close().catch(() => {});
+          await stopApp();
+          await startApp(env);
+          Object.assign(connection, await connect());
+        },
+      };
+      await use(connection);
       // Leave the app running for the next spec file; the global teardown stops it.
-      await browser.close().catch(() => {});
+      await connection.browser.close().catch(() => {});
     },
     { scope: "worker" },
   ],

@@ -106,6 +106,14 @@ export interface LabProgress {
   replay_id: string;
   stage: string;
   line: string;
+  /** hosted analysis: transcode and upload */
+  percent?: number;
+  sent?: number;
+  total?: number;
+  /** hosted analysis: place in the server's queue */
+  position?: number;
+  /** hosted analysis: what the server charged */
+  source?: string;
 }
 
 /** Errors meaning the lab isn't set up (lab.rs NOT_INSTALLED). */
@@ -136,10 +144,19 @@ export const STAGES: { key: string; label: string }[] = [
   { key: "facts", label: "Summary" },
   { key: "summary", label: "AI summary" },
   { key: "done", label: "Done" },
+  // the hosted analysis (lab_remote.rs)
+  { key: "check", label: "Checking the video" },
+  { key: "transcode", label: "Preparing a 720p copy" },
+  { key: "upload", label: "Uploading" },
+  { key: "start", label: "Starting the analysis" },
+  { key: "queued", label: "Waiting in the queue" },
+  { key: "starting", label: "Fetching the video" },
+  { key: "download", label: "Fetching the video" },
+  { key: "result", label: "Getting the result" },
 ];
 
 export function stageLabel(stage: string): string {
-  return STAGES.find((s) => s.key === stage)?.label ?? stage;
+  return STAGES.find((s) => s.key === stage)?.label ?? "Analysing";
 }
 
 /** The ordered, de-duplicated steps shown in the progress list. */
@@ -323,3 +340,120 @@ export function saveLang(l: LabLang) {
 const MODELS_KEY = "spaghettiLab.lab.modelsDir";
 export const loadModelsDir = () => localStorage.getItem(MODELS_KEY) ?? "";
 export const saveModelsDir = (d: string) => (d.trim() ? localStorage.setItem(MODELS_KEY, d.trim()) : localStorage.removeItem(MODELS_KEY));
+
+// ── hosted analysis and sign-in (docs/desktop-login.md) ──────────────────────
+
+export interface LabConfig {
+  /** SPAGHETTI_LAB_MODELS is set: the local research mode is offered */
+  local_models: boolean;
+  web_url: string;
+}
+
+/** All the webview ever learns about the session: no tokens. */
+export interface LabAccount {
+  signed_in: boolean;
+  nickname: string | null;
+  avatar: string | null;
+  /** The OS credential store failed: this session ends when the app closes */
+  session_only: boolean;
+}
+
+export interface LabQuota {
+  free_remaining: number;
+  free_per_week: number;
+  credits: number;
+  week_resets_at: string;
+}
+
+export interface LabServiceStatus {
+  available: boolean;
+  running?: number | null;
+  queued?: number | null;
+  max_queue?: number | null;
+  capabilities?: { openers?: boolean; transcript?: boolean; facts?: boolean; ai_summary?: boolean } | null;
+  free_per_week?: number | null;
+}
+
+/** What the hosted commands fail with. */
+export interface RemoteError {
+  code: string;
+  message: string;
+  retry_after?: number;
+  refunded?: boolean;
+  quota?: LabQuota;
+  phase?: string;
+}
+
+export interface RemoteRunning {
+  replay_id: string;
+  stage: string;
+  position: number | null;
+  phase: "before_charge" | "queued" | "running";
+}
+
+export function toRemoteError(e: unknown): RemoteError {
+  if (e && typeof e === "object" && typeof (e as RemoteError).code === "string") return e as RemoteError;
+  return { code: "unknown", message: String(e) };
+}
+
+/** "N free this week, M credits" */
+export function quotaLine(q: LabQuota): string {
+  return `${q.free_remaining} free this week, ${q.credits} ${q.credits === 1 ? "credit" : "credits"}`;
+}
+
+export const quotaEmpty = (q: LabQuota | null) => !!q && q.free_remaining <= 0 && q.credits <= 0;
+
+/** What the next analysis is expected to use. The server decides, free ones first. */
+export function spendNote(q: LabQuota | null): string | null {
+  if (!q) return null;
+  if (q.free_remaining > 0) return "This will use a free analysis.";
+  if (q.credits > 0) return "This will use a credit.";
+  return null;
+}
+
+/** The week's reset, as the website shows it: its rule is Monday 00:00 in Rome. */
+export function resetDate(iso: string | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Rome", weekday: "long", day: "numeric", month: "long" }).format(d);
+}
+
+/** What a cancel would mean at this stage (the same rule as lab_remote.rs RunningInfo.phase). */
+export function cancelPhase(stage: string | null | undefined): RemoteRunning["phase"] {
+  if (!stage || stage === "check" || stage === "transcode" || stage === "upload") return "before_charge";
+  if (stage === "start" || stage === "queued") return "queued";
+  return "running";
+}
+
+/** The steps of a hosted run; the transcript and the AI summary only when the server has them. */
+export function hostedSteps(c?: LabServiceStatus["capabilities"]): string[] {
+  const steps = ["Checking the video", "Preparing a 720p copy", "Uploading", "Waiting in the queue", "Fetching the video", "Reading the HUD", "Recognising moves"];
+  if (c?.transcript) steps.push("Transcript");
+  steps.push("Summary");
+  if (c?.ai_summary) steps.push("AI summary");
+  steps.push("Getting the result");
+  return steps;
+}
+
+/**
+ * What the upload notice says, checked against /terms (section 13) and /privacy (2.1, 4, 6). Neither page
+ * promises Lab video deletion, so the text says it's the app that deletes it. Change the version when the
+ * meaning changes: everyone is asked again.
+ */
+export const NOTICE_VERSION = "2026-11-04";
+export const NOTICE_TEXT: Record<LabLang, string[]> = {
+  en: [
+    "To analyse a match, Spaghetti Lab sends a 720p copy of the video, without audio, to the Spaghetti Showdown servers (hosted in the EU). The app deletes it when the analysis ends, whether it finished, failed or was cancelled. The result stays on the server for up to 24 hours so the app can fetch it, then only on this PC.",
+    "If AI summaries are on, Anthropic receives game data extracted from the video, never the video. Results are generated automatically and can contain errors.",
+    "You have 2 free analyses a week, then credits, which you can get on the website. An analysis that fails or is cancelled while waiting is given back; cancelling one that's running is not.",
+  ],
+  it: [
+    "Per analizzare una partita, Spaghetti Lab invia una copia del video a 720p, senza audio, ai server di Spaghetti Showdown (ospitati nell'UE). L'app la cancella quando l'analisi termina, che sia finita, fallita o annullata. Il risultato resta sul server fino a 24 ore perché l'app possa scaricarlo, poi solo su questo PC.",
+    "Se i riepiloghi dell'IA sono attivi, Anthropic riceve i dati di gioco estratti dal video, mai il video. I risultati sono generati automaticamente e possono contenere errori.",
+    "Hai 2 analisi gratuite a settimana, poi i crediti, che puoi ottenere sul sito. Un'analisi che fallisce o viene annullata mentre è in attesa viene restituita; annullarne una già in corso no.",
+  ],
+};
+const NOTICE_KEY = "spaghettiLab.lab.uploadNotice";
+export const noticeAccepted = () => localStorage.getItem(NOTICE_KEY) === NOTICE_VERSION;
+export const acceptNotice = () => localStorage.setItem(NOTICE_KEY, NOTICE_VERSION);

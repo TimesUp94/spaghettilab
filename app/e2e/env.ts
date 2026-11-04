@@ -19,6 +19,11 @@ export const DEFAULT_DB = path.join(OUTPUT_DIR, "analysis.db");
 export const FILES_DIR = path.join(RUN_DIR, "files");
 export const PID_FILE = path.join(RUN_DIR, "app.pid");
 
+/** The credential-store service of every test run (entries removed at teardown). */
+export const KEYRING_SERVICE = "SpaghettiLabE2E";
+/** The mock Spaghetti Showdown server (mock-lab-backend.ts), started by the global setup. */
+export const mockUrl = () => process.env.E2E_MOCK_URL ?? "";
+
 /**
  * The match video every spec works on: the first two games of a set (720p, 192 s), cut from
  * E2E_SOURCE_VIDEO. The expectations below belong to this clip.

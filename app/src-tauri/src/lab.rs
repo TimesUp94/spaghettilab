@@ -67,8 +67,13 @@ struct LabRun {
 /// The running lab analysis (one at a time: it can use the whole GPU).
 static LAB_RUN: Mutex<Option<LabRun>> = Mutex::new(None);
 
+/// A local run is going on (the hosted mode shares the one-at-a-time rule).
+pub fn local_run_active() -> bool {
+    LAB_RUN.lock().unwrap().is_some()
+}
+
 /// A replay id usable as one folder name (no separators, no `..`).
-fn safe_id(replay_id: &str) -> Result<String, String> {
+pub fn safe_id(replay_id: &str) -> Result<String, String> {
     let id = replay_id.trim();
     if id.is_empty() || id == "." || id == ".." || id.chars().any(|c| matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control()) {
         return Err(format!("Invalid replay id '{}'", replay_id));
@@ -77,7 +82,7 @@ fn safe_id(replay_id: &str) -> Result<String, String> {
 }
 
 /// `<data dir>/SpaghettiLab/lab`
-fn lab_root() -> PathBuf {
+pub fn lab_root() -> PathBuf {
     local_data_dir().join("SpaghettiLab").join("lab")
 }
 
@@ -229,7 +234,7 @@ fn run_lab(app_handle: tauri::AppHandle, db_path: String, replay_id: String, opt
     if std::env::var_os("SPAGHETTI_LAB_NO_MODELS").is_some() {
         return Err("Running the lab models is disabled (SPAGHETTI_LAB_NO_MODELS).".into());
     }
-    if LAB_RUN.lock().unwrap().is_some() {
+    if LAB_RUN.lock().unwrap().is_some() || crate::lab_remote::running_replay().is_some() {
         return Err("A lab analysis is already running.".into());
     }
     let script = lab_script()?;
@@ -364,7 +369,7 @@ pub fn cancel_lab_analysis(replay_id: Option<String>) -> Result<(), String> {
 /// The replay whose lab analysis is running, if any (the UI picks the progress back up on reopen).
 #[tauri::command]
 pub fn lab_analysis_running() -> Option<String> {
-    LAB_RUN.lock().unwrap().as_ref().map(|r| r.replay_id.clone())
+    LAB_RUN.lock().unwrap().as_ref().map(|r| r.replay_id.clone()).or_else(crate::lab_remote::running_replay)
 }
 
 /// The cached lab result of a replay, or null when it was never run.
@@ -380,10 +385,20 @@ pub fn delete_lab_result(replay_id: String) -> Result<(), String> {
     if LAB_RUN.lock().unwrap().as_ref().map_or(false, |r| r.replay_id == id) {
         return Err("The lab analysis of this replay is running; cancel it first.".into());
     }
-    let dir = lab_root().join(id);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    if crate::lab_remote::running_replay().as_deref() == Some(id.as_str()) {
+        return Err("The lab analysis of this replay is running; cancel it first.".into());
     }
+    let dir = lab_root().join(id);
+    if !dir.exists() {
+        return Ok(());
+    }
+    // A saved hosted job stays: it's already paid for, and its uploaded file still has to be deleted
+    if dir.join("remote_job.json").is_file() {
+        let _ = std::fs::remove_file(dir.join("lab_result.json"));
+        let _ = std::fs::remove_dir_all(dir.join("last_run"));
+        return Ok(());
+    }
+    std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(())
 }
 

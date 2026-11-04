@@ -21,6 +21,8 @@ Environment variables:
 | `E2E_CDP_PORT` | DevTools port (default 9333) |
 | `E2E_KEEP_APP=1` | Leave the app running after the run |
 
+`E2E_REUSE_DATA=1` makes the `first launch` tests of `01-shell` fail, because they need an empty data dir.
+
 ## How it works
 
 - **One app instance** for the run (`global-setup.ts`). It builds with `tauri build --debug --no-bundle`
@@ -31,6 +33,9 @@ Environment variables:
     keys in the game;
   - `SPAGHETTI_LAB_NO_MODELS=1`: the backend refuses to run the lab models (GPU); `14-lab` writes the
     fixture `e2e/fixtures/lab_result.json` into the run's lab cache instead;
+  - `SPAGHETTI_LAB_API_URL` / `SPAGHETTI_LAB_WEB_URL` = the mock server (`mock-lab-backend.ts`), with
+    `SPAGHETTI_LAB_NO_PROD=1` refusing any other address, `SPAGHETTI_LAB_TEST_BROWSER=1` so no browser opens, and
+    `SPAGHETTI_LAB_KEYRING_SERVICE=SpaghettiLabE2E` (its credentials are removed at teardown);
   - its own WebView2 profile and `--remote-debugging-port`.
 - **The fixture clip** is the first two games of a set (192 s, 720p), cut once into `e2e/.cache/` with
   ffmpeg. The analysis reads 4 rounds, all won by P1, as two games of 2–0 with one comeback
@@ -63,4 +68,5 @@ Environment variables:
 | 11-responsive | Review layout from 1920×1080 to 800×700 (16:9 video in the window, panel beside or below), every page at 640–1440 px |
 | 12-reanalyse | Reanalyse one video and the whole library (@slow) |
 | 13-library | Search in a large library (mocked list), set cards, the update banner |
-| 14-lab | Lab tab from a fixture result (never runs the models): run form, errors, progress / cancel, openers and timeline markers, moves filters, search presets and filters vs counts computed from the fixture, summary it/en and copy prompt, no-transcript fallback, delete |
+| 14-lab | Lab tab from a fixture result, on an instance with `SPAGHETTI_LAB_MODELS` (never runs the models): run form, errors, progress / cancel, openers and timeline markers, moves filters, search presets and filters vs counts computed from the fixture, summary it/en and copy prompt, no-transcript fallback, delete |
+| 15-lab-hosted | Sign-in and hosted analysis with the real Rust code against the mock server: signed-out gate, cached result, login failures and wrong state, quota line, notice once, upload, queue, stages, result, upload deleted, re-analyse, every refusal, 503 status, failed job and give-back, cancel by phase, 401 refresh and retry, refresh refused, sign-out with revoke, resume after a restart, local mode only with the variable |

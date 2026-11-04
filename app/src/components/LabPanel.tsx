@@ -1,21 +1,28 @@
-// The "Lab" tab of the review screen: runs the research models on the replay (run_lab_analysis) and
-// shows their result: combo openers, the move transcript, a search over it and the match summary.
+// The "Lab" tab of the review screen: analyses the replay on the Spaghetti Showdown servers
+// (run_lab_analysis_remote, behind a sign-in; see docs/desktop-login.md) or, only with SPAGHETTI_LAB_MODELS
+// set, with the local research models (run_lab_analysis). Then shows the result: combo openers, the move
+// transcript, a search over it and the match summary. Cached results stay readable signed out.
 // The same panels exist on the website (FGCScoreboard); both follow tools/ggst_logger/model/LAB_RESULT.md.
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   FlaskConical, Play, Square, Trash2, RefreshCw, Swords, ListTree, Search, FileText, Copy, Check,
   AlertTriangle, Cpu, Settings2, Info, Sparkles,
 } from "lucide-react";
 import { Badge, Button, EmptyState, Spinner } from "./ui";
-import { cancelLabAnalysis, deleteLabResult, getLabResult, labAnalysisRunning, runLabAnalysis } from "../api";
+import {
+  cancelLabAnalysis, cancelLabAnalysisRemote, deleteLabResult, getLabResult, labAccount, labAnalysisRunning, labConfig, labOpenWeb,
+  labQuota, labRemoteResume, labRemoteRunning, labRemoteTakeError, labServiceStatus, labSignIn, labSignInCancel, labSignInReopen,
+  labSignOut, runLabAnalysis, runLabAnalysisRemote,
+} from "../api";
 import {
   NOT_INSTALLED, OUTCOME_COLOR, aiSummaryFor, OUTCOMES, clockTenths, freeFilter, initialLang, isUncertain, loadModelsDir,
   moveChoices, presetAfterBlock, presetAfterKnockdown, presetCounterBy, presetMoveOutcome, saveLang, saveModelsDir,
-  searchEvents, seekBefore, stageLabel, stageSteps, wakeUps,
-  type Hit, type LabEvent, type LabLang, type LabOpener, type LabOptions, type LabProgress, type LabResult,
-  type OutcomeWant, type Side,
+  searchEvents, seekBefore, stageLabel, stageSteps, toRemoteError, wakeUps,
+  type Hit, type LabAccount, type LabConfig, type LabEvent, type LabLang, type LabOpener, type LabOptions, type LabProgress,
+  type LabQuota, type LabResult, type LabServiceStatus, type OutcomeWant, type RemoteError, type Side,
 } from "../lib/lab";
+import { AccountBar, HostedForm, HostedProgress, RemoteErrorNote } from "./LabHosted";
 
 // ── state ────────────────────────────────────────────────────────────────────
 
@@ -30,6 +37,33 @@ export interface LabState {
   run: (o: LabOptions) => void;
   cancel: () => void;
   remove: () => void;
+
+  // the hosted analysis and its sign-in
+  /** null until known */
+  config: LabConfig | null;
+  account: LabAccount | null;
+  quota: LabQuota | null;
+  service: LabServiceStatus | null;
+  /** the run going on is the hosted one */
+  hosted: boolean;
+  progress: LabProgress | null;
+  /** what the server charged this run: "free", "credit", "reused", or null before it said */
+  source: string | null;
+  cancelling: boolean;
+  remoteError: RemoteError | null;
+  /** a quiet line about how the last run ended */
+  note: string | null;
+  signingIn: boolean;
+  loginError: RemoteError | null;
+  /** Account, service and quota, read when the Lab tab opens, on window focus and after a run. */
+  refreshRemote: () => void;
+  runRemote: (again: boolean) => void;
+  cancelRemote: () => void;
+  signIn: () => void;
+  signInReopen: () => void;
+  signInCancel: () => void;
+  signOut: () => void;
+  openWeb: (page: "support" | "terms" | "privacy") => void;
 }
 
 /** The lab result of a replay and the run / cancel / delete actions. */
@@ -40,6 +74,24 @@ export function useLab(replayId: string, dbPath: string | null, videoPath: strin
   const [stages, setStages] = useState<string[]>([]);
   const [lastLine, setLastLine] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [config, setConfig] = useState<LabConfig | null>(null);
+  const [account, setAccount] = useState<LabAccount | null>(null);
+  const [quota, setQuota] = useState<LabQuota | null>(null);
+  const [service, setService] = useState<LabServiceStatus | null>(null);
+  const [hosted, setHosted] = useState(false);
+  const [progress, setProgress] = useState<LabProgress | null>(null);
+  const [source, setSource] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const [remoteError, setRemoteError] = useState<RemoteError | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [signingIn, setSigningIn] = useState(false);
+  const [loginError, setLoginError] = useState<RemoteError | null>(null);
+  /** the replay on screen, for answers that arrive after the user moved on */
+  const idRef = useRef(replayId);
+  idRef.current = replayId;
+  /** this screen's own command is waiting for the run to end */
+  const ownRun = useRef(false);
+  const followTimer = useRef<number | undefined>(undefined);
 
   const load = useCallback(async () => {
     try {
@@ -53,29 +105,94 @@ export function useLab(replayId: string, dbPath: string | null, videoPath: strin
   }, [replayId]);
 
   useEffect(() => {
+    labConfig().then(setConfig).catch(() => setConfig({ local_models: false, web_url: "" }));
+  }, []);
+
+  const refreshRemote = useCallback(async () => {
+    const acc = await labAccount().catch(() => null);
+    if (acc) setAccount(acc);
+    labServiceStatus().then(setService).catch(() => setService({ available: false }));
+    if (!acc?.signed_in) {
+      setQuota(null);
+      return;
+    }
+    try {
+      setQuota(await labQuota());
+    } catch (e) {
+      // only the answer "signed out" ends the session; the rest keeps the last known line
+      if (toRemoteError(e).code === "signed_out") {
+        setQuota(null);
+        setAccount(await labAccount().catch(() => null));
+      }
+    }
+  }, []);
+
+  /** How a hosted run ended, whichever way its end was noticed. */
+  const showRemoteEnd = useCallback(
+    (e: RemoteError) => {
+      if (e.quota) setQuota(e.quota);
+      if (e.code === "cancelled") {
+        setNote("Analysis cancelled.");
+        return;
+      }
+      setRemoteError(e);
+      if (e.code === "signed_out") labAccount().then(setAccount).catch(() => {});
+    },
+    []
+  );
+
+  /** A run this screen didn't start (it was closed meanwhile, or a saved job was resumed). */
+  const follow = useCallback(() => {
+    if (followTimer.current !== undefined) return;
+    setRunning(true);
+    followTimer.current = window.setInterval(async () => {
+      const id = await labAnalysisRunning().catch(() => null);
+      if (id === idRef.current) return;
+      window.clearInterval(followTimer.current);
+      followTimer.current = undefined;
+      setRunning(false);
+      setHosted(false);
+      setProgress(null);
+      setCancelling(false);
+      load();
+      const e = await labRemoteTakeError(idRef.current).catch(() => null);
+      if (e) showRemoteEnd(e);
+      refreshRemote();
+    }, 2000);
+  }, [load, refreshRemote, showRemoteEnd]);
+
+  useEffect(() => {
     setResult(null);
     setError(null);
+    setRemoteError(null);
+    setNote(null);
     setStages([]);
     setLastLine("");
+    setProgress(null);
+    setSource(null);
+    setCancelling(false);
+    setHosted(false);
+    setRunning(false);
     setLoading(true);
     load();
     // a run started earlier (before leaving the screen) is still going: follow it until it ends
-    let timer: number | undefined;
     labAnalysisRunning()
-      .then((id) => {
+      .then(async (id) => {
         if (id !== replayId) return;
-        setRunning(true);
-        timer = window.setInterval(async () => {
-          if ((await labAnalysisRunning().catch(() => null)) !== replayId) {
-            window.clearInterval(timer);
-            setRunning(false);
-            load();
-          }
-        }, 2000);
+        const remote = await labRemoteRunning().catch(() => null);
+        if (remote?.replay_id === replayId) {
+          setHosted(true);
+          setProgress({ replay_id: replayId, stage: remote.stage, line: "", position: remote.position ?? undefined });
+          setStages([stageLabel(remote.stage)]);
+        }
+        follow();
       })
       .catch(() => {});
-    return () => window.clearInterval(timer);
-  }, [replayId, load]);
+    return () => {
+      window.clearInterval(followTimer.current);
+      followTimer.current = undefined;
+    };
+  }, [replayId, load, follow]);
 
   useEffect(() => {
     const un = listen<LabProgress>("lab-progress", (ev) => {
@@ -83,18 +200,48 @@ export function useLab(replayId: string, dbPath: string | null, videoPath: strin
       if (!p || p.replay_id !== replayId) return;
       const label = stageLabel(p.stage);
       setLastLine(p.line);
+      setProgress(p);
+      if (p.source) setSource(p.source);
+      else if (p.stage === "start" && p.line === "reused") setSource("reused");
       if (p.stage !== "done") setStages((s) => (s.includes(label) ? s : [...s, label]));
+    });
+    const quotaEvents = listen<LabQuota>("lab-quota", (ev) => {
+      if (ev.payload) setQuota(ev.payload);
+    });
+    // a saved job picked up in the background
+    const ended = listen<{ replay_id: string }>("lab-remote-ended", (ev) => {
+      if (ev.payload?.replay_id !== replayId) return;
+      load();
+      labRemoteTakeError(replayId).then((e) => e && showRemoteEnd(e)).catch(() => {});
+    });
+    // progress of a run this screen didn't start: a saved job resumed in the background
+    const resumed = listen<LabProgress>("lab-progress", (ev) => {
+      const p = ev.payload;
+      if (!p || p.replay_id !== replayId || p.stage === "done" || ownRun.current || followTimer.current !== undefined) return;
+      labRemoteRunning()
+        .then((r) => {
+          if (r?.replay_id !== replayId || ownRun.current) return;
+          setHosted(true);
+          follow();
+        })
+        .catch(() => {});
     });
     return () => {
       un.then((f) => f());
+      quotaEvents.then((f) => f());
+      ended.then((f) => f());
+      resumed.then((f) => f());
     };
-  }, [replayId]);
+  }, [replayId, load, follow, showRemoteEnd]);
 
   const run = useCallback(
     async (o: LabOptions) => {
       if (!dbPath) return;
       setRunning(true);
+      ownRun.current = true;
       setError(null);
+      setRemoteError(null);
+      setNote(null);
       setStages([]);
       setLastLine("");
       try {
@@ -104,11 +251,92 @@ export function useLab(replayId: string, dbPath: string | null, videoPath: strin
         const msg = String(e);
         if (msg !== "Cancelled") setError(msg);
       } finally {
+        ownRun.current = false;
         setRunning(false);
       }
     },
     [dbPath, replayId, videoPath, title]
   );
+
+  const runRemote = useCallback(
+    async (again: boolean) => {
+      if (!dbPath) return;
+      setRunning(true);
+      setHosted(true);
+      ownRun.current = true;
+      setError(null);
+      setRemoteError(null);
+      setNote(null);
+      setStages([]);
+      setLastLine("");
+      setProgress(null);
+      setSource(null);
+      setCancelling(false);
+      try {
+        const r = await runLabAnalysisRemote(dbPath, replayId, { again, video_path: videoPath ?? undefined });
+        if (idRef.current === replayId) setResult(r);
+      } catch (err) {
+        // kept for a screen that was closed; this one has it
+        labRemoteTakeError(replayId).catch(() => {});
+        if (idRef.current === replayId) showRemoteEnd(toRemoteError(err));
+      } finally {
+        ownRun.current = false;
+        if (idRef.current === replayId) {
+          setRunning(false);
+          setHosted(false);
+          setProgress(null);
+          setCancelling(false);
+          refreshRemote();
+        }
+      }
+    },
+    [dbPath, replayId, videoPath, showRemoteEnd, refreshRemote]
+  );
+
+  const cancelRemote = useCallback(() => {
+    setCancelling(true);
+    cancelLabAnalysisRemote(replayId).catch(() => setCancelling(false));
+  }, [replayId]);
+
+  const signIn = useCallback(async () => {
+    setSigningIn(true);
+    setLoginError(null);
+    setRemoteError(null);
+    try {
+      setAccount(await labSignIn());
+      refreshRemote();
+      // a job saved for this player, its upload still to delete, a result to collect
+      labRemoteResume().catch(() => {});
+    } catch (err) {
+      const e = toRemoteError(err);
+      if (e.code !== "cancelled") setLoginError(e);
+    } finally {
+      setSigningIn(false);
+    }
+  }, [refreshRemote]);
+
+  const signInReopen = useCallback(() => {
+    labSignInReopen().catch((e) => setLoginError(toRemoteError(e)));
+  }, []);
+
+  const signInCancel = useCallback(() => {
+    labSignInCancel().catch(() => {});
+  }, []);
+
+  const signOut = useCallback(async () => {
+    try {
+      setAccount(await labSignOut());
+      setQuota(null);
+      setRemoteError(null);
+      setNote(null);
+    } catch (e) {
+      setRemoteError(toRemoteError(e));
+    }
+  }, []);
+
+  const openWeb = useCallback((page: "support" | "terms" | "privacy") => {
+    labOpenWeb(page).catch((e) => setRemoteError(toRemoteError(e)));
+  }, []);
 
   const cancel = useCallback(() => {
     cancelLabAnalysis(replayId).catch((e) => setError(String(e)));
@@ -123,8 +351,15 @@ export function useLab(replayId: string, dbPath: string | null, videoPath: strin
     }
   }, [replayId]);
 
-  return { result, loading, running, stages, lastLine, error, run, cancel, remove };
+  return {
+    result, loading, running, stages, lastLine, error, run, cancel, remove,
+    config, account, quota, service, hosted, progress, source, cancelling, remoteError, note, signingIn, loginError,
+    refreshRemote, runRemote, cancelRemote, signIn, signInReopen, signInCancel, signOut, openWeb,
+  };
 }
+
+/** At most every 30 s: focus changes come in bursts and each refresh is a few requests. */
+const FOCUS_REFRESH_MS = 30_000;
 
 // ── small pieces ─────────────────────────────────────────────────────────────
 
@@ -281,14 +516,14 @@ function OpenersList({ r, onSeek }: { r: LabResult; onSeek: (ms: number) => void
   );
 }
 
-function MovesList({ r, onSeek }: { r: LabResult; onSeek: (ms: number) => void }) {
+function MovesList({ r, onSeek, local }: { r: LabResult; onSeek: (ms: number) => void; local: boolean }) {
   const [side, setSide] = useState<Side | "any">("any");
   const [outcome, setOutcome] = useState<OutcomeWant>("any");
   const [move, setMove] = useState("");
   const events = useMemo(() => searchEvents(r), [r]);
   const moves = useMemo(() => moveChoices(events, side), [events, side]);
   const list = useMemo(() => freeFilter(events, { side, char: "", move, category: "", outcome }).map((h) => h.e), [events, side, move, outcome]);
-  if (!r.transcript) return <NoTranscript />;
+  if (!r.transcript) return <NoTranscript local={local} />;
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-end gap-2 flex-wrap">
@@ -556,7 +791,7 @@ const AI_TEXT: Record<LabLang, { withheld: string; auth: string; details: string
 
 /** The AI summary of one language (LAB_RESULT.md "ai_summary"): its text only when grounded, else why it
  * was withheld. Nothing when the result has none. */
-function AiSummaryBlock({ r, lang, onSeek }: { r: LabResult; lang: LabLang; onSeek: (ms: number) => void }) {
+function AiSummaryBlock({ r, lang, onSeek, local }: { r: LabResult; lang: LabLang; onSeek: (ms: number) => void; local: boolean }) {
   const ai = aiSummaryFor(r, lang);
   if (!ai) return null;
   if (ai.kind === "withheld") {
@@ -565,7 +800,7 @@ function AiSummaryBlock({ r, lang, onSeek }: { r: LabResult; lang: LabLang; onSe
         <div className="flex items-start gap-2">
           <Sparkles size={13} className="mt-0.5 shrink-0 text-text-muted" />
           <span>
-            {ai.authHint
+            {ai.authHint && local
               ? AI_TEXT[lang].auth
               : AI_TEXT[lang].withheld}
           </span>
@@ -603,7 +838,7 @@ function AiSummaryBlock({ r, lang, onSeek }: { r: LabResult; lang: LabLang; onSe
   );
 }
 
-function SummaryPanel({ r, onSeek }: { r: LabResult; onSeek: (ms: number) => void }) {
+function SummaryPanel({ r, onSeek, local }: { r: LabResult; onSeek: (ms: number) => void; local: boolean }) {
   const [lang, setLang] = useState<LabLang>(initialLang);
   const [copied, setCopied] = useState(false);
   const md = r.facts?.md?.[lang] ?? r.facts?.md?.en ?? r.facts?.md?.it ?? "";
@@ -627,7 +862,7 @@ function SummaryPanel({ r, onSeek }: { r: LabResult; onSeek: (ms: number) => voi
           {copied ? "Copied" : "Copy prompt"}
         </Button>
       </div>
-      <AiSummaryBlock r={r} lang={lang} onSeek={onSeek} />
+      <AiSummaryBlock r={r} lang={lang} onSeek={onSeek} local={local} />
       <div className="flex items-start gap-2 rounded-lg bg-surface-2/60 border border-surface-4/60 px-2.5 py-2 text-[11px] text-text-secondary">
         <Info size={13} className="mt-0.5 shrink-0 text-text-muted" />
         {hasAi ? (
@@ -636,8 +871,10 @@ function SummaryPanel({ r, onSeek }: { r: LabResult; onSeek: (ms: number) => voi
           </span>
         ) : (
           <span>
-            These are the facts the models read from the video; no AI wrote them and nothing is sent anywhere. "Copy prompt"
-            copies them with instructions, to paste into a chatbot of your choice for a written summary.
+            {local
+              ? "These are the facts the models read from the video; no AI wrote them and nothing is sent anywhere."
+              : "These are the facts the models read from the video; no AI wrote them."}{" "}
+            "Copy prompt" copies them with instructions, to paste into a chatbot of your choice for a written summary.
           </span>
         )}
       </div>
@@ -646,7 +883,15 @@ function SummaryPanel({ r, onSeek }: { r: LabResult; onSeek: (ms: number) => voi
   );
 }
 
-function NoTranscript() {
+function NoTranscript({ local }: { local: boolean }) {
+  if (!local) {
+    return (
+      <div className="flex items-start gap-2 rounded-lg bg-surface-2/60 border border-surface-4/60 px-2.5 py-2 text-[11px] text-text-secondary" data-testid="lab-no-transcript">
+        <Info size={13} className="mt-0.5 shrink-0 text-text-muted" />
+        <span>This analysis has no move transcript. Openers, search over the openers and the summary still work.</span>
+      </div>
+    );
+  }
   return (
     <div className="flex items-start gap-2 rounded-lg bg-accent-gold/10 border border-accent-gold/30 px-2.5 py-2 text-[11px] text-text-secondary" data-testid="lab-no-transcript">
       <Cpu size={13} className="mt-0.5 shrink-0 text-accent-gold" />
@@ -669,7 +914,25 @@ export function LabPanel({ lab, onSeek, canRun }: { lab: LabState; onSeek: (ms: 
   const [showSettings, setShowSettings] = useState(false);
   const [modelsDir, setModelsDir] = useState(loadModelsDir);
   const [aiSummary, setAiSummary] = useState(false);
+  const [modeChoice, setModeChoice] = useState<"local" | "hosted">("local");
   const r = lab.result;
+  const localAllowed = !!lab.config?.local_models;
+  const mode = localAllowed ? modeChoice : "hosted";
+
+  // The Lab tab is where the account matters: nothing goes on the network before it's opened
+  const { refreshRemote } = lab;
+  const lastRefresh = useRef(0);
+  useEffect(() => {
+    lastRefresh.current = Date.now();
+    refreshRemote();
+    const onFocus = () => {
+      if (Date.now() - lastRefresh.current < FOCUS_REFRESH_MS) return;
+      lastRefresh.current = Date.now();
+      refreshRemote();
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshRemote]);
 
   const start = () => lab.run({ transcript, light, llm: aiSummary ? "claude" : "none", models_dir: modelsDir.trim() || undefined });
 
@@ -750,7 +1013,31 @@ export function LabPanel({ lab, onSeek, canRun }: { lab: LabState; onSeek: (ms: 
     </div>
   );
 
-  if (lab.loading) {
+  const modeSwitch = localAllowed && !lab.running && (
+    <div className="flex items-center gap-2">
+      <span className="text-[11px] text-text-secondary">Run on</span>
+      <Seg label="Analysis mode" value={mode} onChange={setModeChoice} options={[
+        { key: "local", label: "local models", title: "This PC's research models: no sign-in, nothing spent" },
+        { key: "hosted", label: "server", title: "The Spaghetti Showdown servers: sign-in, spends an analysis" },
+      ]} />
+    </div>
+  );
+  const form = (
+    <div className="flex flex-col gap-2.5">
+      {modeSwitch}
+      {mode === "local" ? runForm : <HostedForm lab={lab} canRun={canRun} />}
+    </div>
+  );
+  const runningCard = lab.hosted ? <HostedProgress lab={lab} /> : progress;
+  const remoteNotes = (
+    <>
+      {lab.remoteError && <RemoteErrorNote e={lab.remoteError} lab={lab} />}
+      {lab.note && <div className="text-[11px] text-text-secondary" role="status" data-testid="lab-note">{lab.note}</div>}
+    </>
+  );
+  const showAccount = mode === "hosted" && lab.account?.signed_in;
+
+  if (lab.loading || !lab.config) {
     return <div className="flex items-center gap-2 text-xs text-text-secondary p-4"><Spinner size={14} /> Loading the lab result…</div>;
   }
 
@@ -758,11 +1045,15 @@ export function LabPanel({ lab, onSeek, canRun }: { lab: LabState; onSeek: (ms: 
     return (
       <div className="flex flex-col gap-3">
         <EmptyState icon={FlaskConical} title="Lab analysis">
-          Research models read the video: combo openers, every move and its outcome (with a GPU), a search over them and a
-          summary of the match. Experimental: treat it as what the model saw, not a full record.
+          {localAllowed
+            ? "Research models read the video: combo openers, every move and its outcome (with a GPU), a search over them and a summary of the match."
+            : "Research models read the video: combo openers, a search over them and a summary of the match."}{" "}
+          Experimental: treat it as what the model saw, not a full record.
         </EmptyState>
-        {lab.running ? progress : runForm}
+        {showAccount && <AccountBar lab={lab} />}
+        {lab.running ? runningCard : form}
         {error}
+        {remoteNotes}
       </div>
     );
   }
@@ -777,15 +1068,17 @@ export function LabPanel({ lab, onSeek, canRun }: { lab: LabState; onSeek: (ms: 
         {!lab.running && (
           <span className="ml-auto flex items-center gap-0.5">
             <Button size="sm" variant="ghost" icon={Settings2} onClick={() => setShowSettings((s) => !s)} aria-label="Run options">
-              <span className="hidden sm:inline">Run again</span>
+              <span className="hidden sm:inline">{mode === "local" ? "Run again" : lab.account?.signed_in ? "Analyse again" : "Sign in to analyse again"}</span>
             </Button>
             <Button size="sm" variant="danger" icon={Trash2} onClick={lab.remove} aria-label="Delete the lab result" title="Delete the lab result" />
           </span>
         )}
       </div>
-      {lab.running ? progress : showSettings && <div className="rounded-lg bg-surface-2/60 border border-surface-4/60 p-2.5">{runForm}</div>}
+      {showAccount && <AccountBar lab={lab} />}
+      {lab.running ? runningCard : (showSettings || !!lab.remoteError) && <div className="rounded-lg bg-surface-2/60 border border-surface-4/60 p-2.5">{form}</div>}
       {error}
-      {!r.transcript && section !== "moves" && <NoTranscript />}
+      {remoteNotes}
+      {!r.transcript && section !== "moves" && <NoTranscript local={localAllowed} />}
 
       <div className="flex flex-wrap gap-1" role="group" aria-label="Lab section">
         {([
@@ -809,9 +1102,9 @@ export function LabPanel({ lab, onSeek, canRun }: { lab: LabState; onSeek: (ms: 
       </div>
 
       {section === "openers" && <OpenersList r={r} onSeek={onSeek} />}
-      {section === "moves" && <MovesList r={r} onSeek={onSeek} />}
+      {section === "moves" && <MovesList r={r} onSeek={onSeek} local={localAllowed} />}
       {section === "search" && <SearchPanel r={r} onSeek={onSeek} />}
-      {section === "summary" && <SummaryPanel r={r} onSeek={onSeek} />}
+      {section === "summary" && <SummaryPanel r={r} onSeek={onSeek} local={localAllowed} />}
     </div>
   );
 }

@@ -1,12 +1,11 @@
-// Stops the app instance started by the global setup (and its Python / ffmpeg children).
-import { spawnSync } from "node:child_process";
-import fs from "node:fs";
-import { PID_FILE } from "./env";
+// Stops the app instance started by the global setup (and its Python / ffmpeg children), the mock
+// server, and removes the test sign-in from the OS credential store.
+import { clearTestCredentials, stopApp } from "./app-process";
+import { stopMockBackend } from "./mock-lab-backend";
 
 export default async function globalTeardown() {
   if (process.env.E2E_KEEP_APP) return;
-  if (!fs.existsSync(PID_FILE)) return;
-  const pid = fs.readFileSync(PID_FILE, "utf8").trim();
-  spawnSync("taskkill", ["/PID", pid, "/T", "/F"], { stdio: "ignore" });
-  fs.rmSync(PID_FILE, { force: true });
+  await stopApp();
+  await stopMockBackend();
+  clearTestCredentials();
 }

@@ -3,12 +3,15 @@
 // Isolation: SPAGHETTI_LAB_DATA_DIR sends the analysis DB, sessions and previews to e2e/.run/data
 // (never the checkout's output/analysis.db), WEBVIEW2_USER_DATA_FOLDER gives the WebView its own
 // profile (localStorage), and SPAGHETTI_LAB_NO_GAME makes the Strive export refuse to drive the game
-// (SPAGHETTI_LAB_NO_MODELS: the lab analysis refuses to run the models).
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+// (SPAGHETTI_LAB_NO_MODELS: the lab analysis refuses to run the models). Every server the app can talk
+// to is the mock (mock-lab-backend.ts); SPAGHETTI_LAB_NO_PROD refuses anything else.
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { clearTestCredentials, startApp } from "./app-process";
+import { startMockBackend } from "./mock-lab-backend";
 import {
-  APP_DIR, CACHE_DIR, CDP_PORT, CLIP_SECONDS, DATA_DIR, EXE, FILES_DIR, FIXTURE_VIDEO, PID_FILE,
+  APP_DIR, CACHE_DIR, CDP_PORT, CLIP_SECONDS, DATA_DIR, EXE, FILES_DIR, FIXTURE_VIDEO,
   REPO_DIR, RUN_DIR, SOURCE_VIDEO,
 } from "./env";
 
@@ -61,21 +64,6 @@ function build() {
   if (r.status !== 0) throw new Error("tauri build failed");
 }
 
-async function waitForCdp(timeoutMs: number) {
-  const until = Date.now() + timeoutMs;
-  while (Date.now() < until) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`);
-      const list = (await res.json()) as { type: string; url: string }[];
-      if (list.some((p) => p.type === "page" && p.url.startsWith("http://tauri.localhost"))) return;
-    } catch {
-      /* not up yet */
-    }
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  throw new Error(`The app's DevTools port ${CDP_PORT} did not come up`);
-}
-
 async function portInUse(): Promise<boolean> {
   try {
     await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`);
@@ -102,22 +90,8 @@ export default async function globalSetup() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.mkdirSync(FILES_DIR, { recursive: true });
 
-  const log = fs.openSync(path.join(RUN_DIR, "app.log"), "w");
-  const child = spawn(EXE, [], {
-    cwd: RUN_DIR,
-    detached: true,
-    stdio: ["ignore", log, log],
-    env: {
-      ...process.env,
-      SPAGHETTI_LAB_DATA_DIR: DATA_DIR,
-      SPAGHETTI_LAB_NO_GAME: "1",
-      // the lab specs load a fixture result: never run the research models (GPU) in a test
-      SPAGHETTI_LAB_NO_MODELS: "1",
-      WEBVIEW2_USER_DATA_FOLDER: path.join(RUN_DIR, "webview"),
-      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${CDP_PORT}`,
-    },
-  });
-  child.unref();
-  fs.writeFileSync(PID_FILE, String(child.pid));
-  await waitForCdp(60_000);
+  // In this process until the teardown; the workers and the app find it through the variable
+  process.env.E2E_MOCK_URL = await startMockBackend();
+  clearTestCredentials();
+  await startApp();
 }

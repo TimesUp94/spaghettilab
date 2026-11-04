@@ -557,6 +557,11 @@ fn cancel_strive_export(now: bool) -> Result<(), String>
 
 ## Lab Analysis Commands
 
+Normal users analyse on the Spaghetti Showdown servers behind a sign-in: those commands (`lab_sign_in`,
+`run_lab_analysis_remote`, `lab_quota`...) and their structured errors are in `docs/desktop-login.md`, in
+`lab_api.rs`, `lab_auth.rs` and `lab_remote.rs`. `run_lab_analysis` below is the local research mode: the UI offers it
+only with `SPAGHETTI_LAB_MODELS` set.
+
 `app/src-tauri/src/lab.rs`. Run the research models (`tools/ggst_logger/model/lab_analyze.py`) on a replay's
 video and keep the result, `lab_result.json` (schema `spaghetti-lab-result/1`, described in
 `tools/ggst_logger/model/LAB_RESULT.md`), in a per-replay cache: `<data dir>/SpaghettiLab/lab/<replay_id>/lab_result.json`

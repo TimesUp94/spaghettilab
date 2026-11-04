@@ -43,6 +43,7 @@ import {
   openSpagz,
   saveSpagz,
   createQuickSession,
+  labRemoteResume,
 } from "./api";
 import { ExportModal } from "./components/ExportModal";
 import { AnalysisProgress } from "./components/AnalysisProgress";
@@ -115,6 +116,11 @@ export default function App() {
     () => (selectedMatch && stats ? statsForMatch(stats, selectedMatch, damageEvents) : stats),
     [selectedMatch, stats, damageEvents]
   );
+
+  // A hosted Lab analysis started before the app closed is collected (no network without a sign-in)
+  useEffect(() => {
+    labRemoteResume().catch(() => {});
+  }, []);
 
   useEffect(() => {
     const un = listen<string>("reanalyze-progress", (e) => setReanalyzeText(e.payload));

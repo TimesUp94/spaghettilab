@@ -1,7 +1,14 @@
 # Desktop login and hosted Lab analysis
 
-Plan and API reference for the Lab tab's spaghettishowdown.it login and hosted analysis. The desktop side
-is not built yet; everything under "Desktop side" is the design to build against.
+The Lab tab's spaghettishowdown.it login and hosted analysis: API reference and how the desktop side is
+built (`lab_api.rs`, `lab_auth.rs`, `lab_remote.rs`, `LabPanel.tsx`, `LabHosted.tsx`).
+
+The login and a real analysis are live on the dev server (`https://dev.spaghettishowdown.it`,
+`https://dev.backend.spaghettishowdown.it`); production's defaults answer "not available" until they ship there.
+`node app/e2e/live/dev-auth-check.mjs` runs the app's token and upload code against dev with the test account,
+without starting an analysis. On 2026-11-04 it confirmed: exchange, rotation, 401 `invalid_token`, 400 `invalid_grant`,
+403 `scope`, 404 on an unknown job or file, revoke, a 39 MB streamed upload, the file delete, and no charge for an
+upload alone. Still unchecked for real: the website's Discord click, and a full analysis through the app.
 
 Checked on 2026-11-04 by reading the code, and with read-only GETs:
 
@@ -230,7 +237,8 @@ Dependencies: `reqwest` (async; 0.13 is already in the lockfile through the upda
 | `SPAGHETTI_LAB_WEB_URL` | `https://spaghettishowdown.it` | same rule |
 | `SPAGHETTI_LAB_KEYRING_SERVICE` | `SpaghettiLab` | test service name |
 | `SPAGHETTI_LAB_NO_PROD` | unset | any non-loopback base URL is refused; set by every test run |
-| `SPAGHETTI_LAB_TEST_BROWSER` | unset | Rust follows the login link itself instead of opening a browser; loopback only |
+| `SPAGHETTI_LAB_TEST_BROWSER` | unset | Rust only requests a website link instead of opening a browser (no redirect is followed; the test calls the loopback callback); works only when both base URLs are loopback |
+| `SPAGHETTI_LAB_TEST_POLL_MS` | unset | the job poll's interval, only in that test mode |
 | `SPAGHETTI_LAB_MODELS` | unset | shows the local mode, labelled "local models" |
 
 ### Rust commands and TS wrappers (`api.ts`)
@@ -248,7 +256,8 @@ Dependencies: `reqwest` (async; 0.13 is already in the lockfile through the upda
 | `lab_open_web` | `labOpenWeb("support"\|"terms"\|"privacy")` | opens the system browser |
 | `run_lab_analysis_remote` | `runLabAnalysisRemote(dbPath, replayId, {again?, video_path?})` | the result |
 | `cancel_lab_analysis_remote` | `cancelLabAnalysisRemote(replayId)` | `{phase: "before_charge"\|"queued"\|"running"}` |
-| `lab_remote_running` | `labRemoteRunning()` | `{replay_id, stage, position}` or null |
+| `lab_remote_running` | `labRemoteRunning()` | `{replay_id, stage, position, phase}` or null |
+| `lab_remote_take_error` | `labRemoteTakeError(replayId)` | how the last run of this replay failed, once, for a screen that was closed meanwhile |
 | `lab_remote_resume` | `labRemoteResume()` | picks up saved jobs at startup |
 
 `get_lab_result` and `delete_lab_result` are unchanged. `lab_analysis_running` also reports a hosted run.
@@ -261,6 +270,9 @@ Errors from the remote commands are objects, `{code, message, retry_after?, refu
 | `login_unavailable` | `/desktop-login` 404, or `/token` 401 or 404 | "Sign-in with spaghettishowdown.it isn't available yet. The rest of the app works as usual." |
 | `login_denied`, `login_timeout`, `login_state` | cancel in the browser, timeout, state mismatch | message, retry |
 | `already_cached` | a cached result and no `again` | confirm: spends an analysis |
+| `busy` | another Lab run is going, or sign-out during a run | message |
+| `credential_store` | the OS store can't be read | message; the session stays |
+| `rate_limited` | the global limiter's plain 429, or `/token` 429 | message, `retry_after` |
 | `unavailable` | 503 or 502 | "Not available right now"; sign-in unaffected |
 | `queue_full` | `/status` full, or service 503 | retry later, with `retry_after` |
 | `one_at_a_time` | service 429 | "You already have an analysis queued or running (on the website or another PC)." |
@@ -305,7 +317,8 @@ Event `lab-progress` keeps `{replay_id, stage, line}` and adds optional `percent
 6. **`start`**: POST. Retry on `analysis_starting` (Retry-After, 6 times) and on network errors (3 times; safe, see above). Save `job_id`. Never abort a POST in flight: if cancel was pressed, wait for the answer and then cancel the job.
 7. **Poll** every 15 s, 30 s after an error, with no overall timeout (a job can wait in the queue for hours). A 404 is `expired`.
 8. **`result`**: run `parse_lab_result`, then write to `lab/<id>/lab_result.json`. The previous result stays until then.
-9. **Clean up** on every path, in the background: `DELETE /user-files/:id`, re-read `/quota`, remove `remote_job.json`.
+9. **Clean up** on every path: `DELETE /user-files/:id`, re-read `/quota`, remove `remote_job.json`.
+   A result lost to the network or a 503 keeps the job (without the file) so it can be collected later: it's paid for.
 
 **Cleanup that can't finish.** A failed file delete goes to `lab/pending_deletes.json` (`{file_id, player_user_id}`,
 never tokens), retried at startup and at sign-in as the same player. 404 and `scope` remove the entry.
@@ -314,7 +327,8 @@ never tokens), retried at startup and at sign-in as the same player. 404 and `sc
 because the user didn't ask to spend again. If an earlier POST did reach the server, that job fails and the analysis is given back.
 
 **Cancel by phase.**
-- Before the charge: stop, kill ffmpeg, abort the upload, delete the file if it arrived. Nothing spent.
+- Before the charge: no question. Stop, kill ffmpeg and wait for it (Windows locks the output), abort the upload. Once every byte is sent the server may already hold the file, so the cancel waits for its id and deletes it. Nothing spent.
+- The phase is `queued` from the moment the POST goes out, because the server may charge from then on.
 - `queued`: the UI says it will be given back.
 - `running`, any stage: the UI warns it won't be refunded and asks first.
 - After `DELETE /:jobId`: on 409, poll once and, if `done`, keep the result, since it was already paid for. Then delete the file and re-read `/quota`.
@@ -352,7 +366,8 @@ because the user didn't ask to spend again. If an earlier POST did reach the ser
   - Before starting: "This will use a free analysis" or "This will use a credit", worded as what's expected. After `start`, the real `analysis_source`.
   - A cached result: "Analyse again" with a confirmation that it spends an analysis, even for the same video.
 - **Exhausted**: reset date and a button opening `{web}/support` in the system browser. No payments in the app. (The site's own link adds `?from=lab` for its source tracking; add it if the server agent wants it counted.)
-- **Local mode** only with `SPAGHETTI_LAB_MODELS` set: labelled "local models", existing options, no login, no spending. Normal users never see `NOT_INSTALLED`.
+- **Local mode** only with `SPAGHETTI_LAB_MODELS` set: selected by default, labelled "local models" next to "server", existing options, no login, no spending. Normal users never see `NOT_INSTALLED`.
+- Hints that only hold locally (the GPU note on a missing transcript, "nothing is sent anywhere", the API key hint) show only with the local mode.
 - **Upload notice** before the first upload, remembered in `localStorage` by text version, so a material change asks again.
 
 **Notice text**, matched to the 2026-11-04 `/terms` (section 13) and `/privacy` (sections 2.1, 4, 6):
@@ -395,32 +410,34 @@ Every test run sets `SPAGHETTI_LAB_API_URL` and `SPAGHETTI_LAB_WEB_URL` to the m
 and `SPAGHETTI_LAB_KEYRING_SERVICE=SpaghettiLabE2E` (entries deleted at teardown). The existing `SPAGHETTI_LAB_NO_MODELS`,
 `SPAGHETTI_LAB_NO_GAME` and `SPAGHETTI_LAB_DATA_DIR` stay. Nothing talks to production.
 
-**`app/e2e/mock-lab-backend.ts`**: Node `http`, no dependencies, started by `global-setup.ts` on a random loopback port.
+**`app/e2e/mock-lab-backend.ts`**: Node `http`, no dependencies, started by `global-setup.ts` on a random loopback port,
+in the runner's process (`E2E_MOCK_URL` tells the workers and the app).
 
 | Part | What it does |
 |---|---|
-| Web | `GET /desktop-login` applies `desktopLogin.js`'s rules, then redirects to the loopback callback (or `access_denied`, or a wrong `state`, by scenario), or answers 404 |
+| Web | `GET /desktop-login` applies `desktopLogin.js`'s rules and remembers the link with a code ready; the spec calls the loopback callback itself (a good code, `access_denied`, a wrong `state`), as the redirect would. 404 when the login is "missing" |
 | Token | `/api/desktop-auth/token` and `/revoke` with PKCE really checked, one-use codes, rotation, reuse detection, access replaced on refresh |
 | Scope | the `isAllowedForLabScope` list, 401 `invalid_token`, 403 `scope`, and 401 `credentials_required` on unknown `/api` paths |
 | Upload | counts bytes while **discarding the stream**, reads only the part headers, applies the `video/*` and extension rules, the size limit and the error shapes; records the peak |
 | Openers | the exact status codes and bodies from this document. Jobs advance one stage per poll (`queued` with `position`, then `download` to `done`), and `analysis_refunded` is true only once |
 | Result | serves `e2e/fixtures/lab_result.json`, plus a no-transcript variant, one with the AI summary withheld, and a bad schema |
-| Control | `POST /__mock/scenario` sets the next answers; `GET /__mock/log` returns calls with tokens reduced to a kind (`access`, `refresh`, `none`) |
+| Control | `POST /__mock/scenario` sets knobs, `/__mock/quota` the quota, `/__mock/expire-access` and `/__mock/revoke-all` end sessions; `/__mock/log` returns calls with tokens reduced to a kind; `/__mock/state` counts rotated tokens presented and uploads deleted under a live job, which `15-lab-hosted` requires to stay 0 after every test |
 
-Scenarios: `off` (production's 503), `service_down`, `no_login_routes` (404 page, 401 token), `deny`, `wrong_state`,
-`expired_access`, `revoked` (`invalid_grant`), `scope_bug`, `quota_zero`, `quota_exhausted_on_post`,
-`analysis_starting` (n times), `one_at_a_time`, `queue_full`, `too_long_413`, `upload_413_html`, `plain_429`,
-`storage_full`, `banned`, `job_fails`, `job_fails_refund_lost`, `job_404`, `cancel_409_done`, `file_delete_fails`, `slow`.
+Knobs (`Scenario` in the file): `service` (on, off = production's 503, down), `login` (ok, missing), `startQueue` (the next POST
+answers: `analysis_starting`, `quota_exhausted`, `one_at_a_time`, `queue_full`, `too_long`, `plain_429`), `upload` (ok, `too_big`,
+`html_413`, `storage_full`, `banned`), `uploadDelayMs`, `holdAt` (a job stops at a stage), `failAt`, `refundLost`, `job404`,
+`result` (ok, bad, no_transcript), `fileDelete`, `tokenOutage`.
 
 **Rust** (`cargo test lab_`; these need no DB, unlike the round harnesses):
-- `tiny_http` tests: PKCE vector, state mismatch, callback path handling, the listener's timeout, refresh-once-retry-once, rotation written to the store, 403 not a sign-out, non-JSON bodies, tokens absent from errors and logs, base-URL rule, NO_PROD refusal.
+- Real sockets for the listener: encoded `state`, wrong `state`, cancel, an unrelated request, timeout, and the port closed afterwards.
+- `tiny_http` tests: PKCE vector, refresh-once-retry-once, concurrent 401s giving one refresh, rotation written to the store before use, 403 not a sign-out, non-JSON bodies, tokens absent from errors and logs, base-URL rule, NO_PROD refusal.
 - Upload: multipart headers and a streamed known length.
-- Transcode: tiny `lavfi` test sources only (2 s), which never touch a real video or a GPU.
+- Transcode: 2 s of the small e2e clip through libx264, skipped when the clip isn't there; never a GPU.
 - Temp files removed on every path.
 
-**Playwright** (new `15-lab-hosted`, its row added to `app/e2e/README.md`):
+**Playwright** (`15-lab-hosted`, real Rust against the mock; the upload is the small clip, stream-copied):
 - Signed-out panel and links, sign-in, sign-out, each login failure, the quota line and focus refresh.
-- Notice shown once, stages and upload progress, cancel warnings by phase, refund notes, every error row above.
+- Notice shown once, stages and upload progress, cancel warnings by phase, refund notes, the error rows.
 - Re-analyse confirmation, cached result signed out, resume after a restart, cleanup calls in `/__mock/log`, and local mode shown only with the variable.
 
-`14-lab` needs `SPAGHETTI_LAB_MODELS` set in its setup to keep reaching the local form.
+`14-lab` restarts the app with `SPAGHETTI_LAB_MODELS` set (`connection.restart(env)`) to reach the local form, and back afterwards.

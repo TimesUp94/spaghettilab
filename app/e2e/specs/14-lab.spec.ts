@@ -3,6 +3,8 @@
 // tools/ggst_logger/model/fixtures/lab_result_sample.json) written into the run's data dir, and the
 // "running" flow is a mocked run_lab_analysis that sends the same progress events as the real one.
 // The expected search counts are computed here from the fixture, independently of the app's code.
+// The local mode only exists with SPAGHETTI_LAB_MODELS set, so this spec runs on an instance that has it
+// (the folder is never read: SPAGHETTI_LAB_NO_MODELS refuses first). 15-lab-hosted covers normal users.
 import fs from "node:fs";
 import path from "node:path";
 import { test, expect, type App } from "../fixtures";
@@ -42,7 +44,14 @@ async function expectSeekedTo(app: App, t: number) {
   expect(await app.videoTime()).toBeLessThan(Math.max(0, t - 1) + 0.25);
 }
 
-test.afterAll(() => writeCache(null));
+test.beforeAll(async ({ connection }) => {
+  await connection.restart({ SPAGHETTI_LAB_MODELS: path.join(DATA_DIR, "no-models-here") });
+});
+
+test.afterAll(async ({ connection }) => {
+  writeCache(null);
+  await connection.restart();
+});
 
 test("without a result: the run form, and the not-installed error", async ({ app }) => {
   writeCache(null);

@@ -176,7 +176,9 @@ Video path is resolved and converted to a Tauri asset URL via `convertFileSrc()`
 
 ### LabPanel (the Lab tab)
 
-**Source:** `app/src/components/LabPanel.tsx` (`useLab` hook + panel), `app/src/lib/lab.ts` (types, presets).
+**Source:** `app/src/components/LabPanel.tsx` (`useLab` hook + panel), `app/src/components/LabHosted.tsx` (sign-in panel, account and quota line, hosted form and progress, errors), `app/src/lib/lab.ts` (types, presets, notice text).
+
+Normal users analyse on the server: signed out they get a sign-in panel saying what leaves the PC, signed in the quota line, what the run is expected to spend, the upload notice once, and cancel warnings by phase. Cached results stay readable signed out, and nothing goes on the network before the tab is opened. The local form below shows only with `SPAGHETTI_LAB_MODELS` set. See `docs/desktop-login.md`.
 
 The research models' result for the replay (`run_lab_analysis` / `get_lab_result`, see `docs/tauri-commands.md`
 and `tools/ggst_logger/model/LAB_RESULT.md`). The website (FGCScoreboard) has the same panels; both follow

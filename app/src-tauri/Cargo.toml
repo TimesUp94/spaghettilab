@@ -22,3 +22,16 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tempfile = "3"
 dirs = "6"
+# Lab login and hosted analysis (lab_api.rs, lab_auth.rs, lab_remote.rs)
+reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "stream", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+url = "2"
+tokio = { version = "1", features = ["net", "io-util", "time", "sync", "process", "fs", "macros", "rt"] }
+futures-util = "0.3"
+
+[dev-dependencies]
+tiny_http = "0.12"
