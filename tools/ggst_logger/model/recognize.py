@@ -42,8 +42,12 @@ def analysis(video: Path, out: Path, given: Path | None) -> Path:
     """The pipeline's frames parquet for the video (run the pipeline if needed)."""
     if given is not None:
         found = list(given.glob("frames/*_frames.parquet"))
+        # a shared output folder holds every replay's parquet: take this video's own, never just the first
+        mine = [f for f in found if f.name.startswith(video.stem)]
+        if mine or len(found) == 1:
+            return (mine or found)[0]
         if found:
-            return found[0]
+            raise SystemExit(f"{given} has {len(found)} frames parquets and none named after {video.stem}")
     rd = out / "analysis"
     found = list(rd.glob("frames/*_frames.parquet"))
     if found:
