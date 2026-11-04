@@ -21,6 +21,8 @@ jobs:
         env:
           PYTHONIOENCODING: utf-8
         run: |
+          # sample frames are local test data (git-ignored data/, on G: behind a junction): link the host's copy
+          if (-not (Test-Path data)) { cmd /c mklink /J data C:\Projects\replanal\data | Out-Null }
           $env:PYTHONPATH = "$PWD"
           & C:\Projects\replanal\.venv\Scripts\python.exe -m pytest -q -p no:cacheprovider
 
