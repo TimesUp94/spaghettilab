@@ -3,13 +3,35 @@
 The Lab tab's spaghettishowdown.it login and hosted analysis: API reference and how the desktop side is
 built (`lab_api.rs`, `lab_auth.rs`, `lab_remote.rs`, `LabPanel.tsx`, `LabHosted.tsx`).
 
-The login and a real analysis are live on the dev server (`https://dev.spaghettishowdown.it`,
-`https://dev.backend.spaghettishowdown.it`); production's defaults answer "not available" until they ship there.
-`node app/e2e/live/dev-auth-check.mjs` runs the app's token and upload code against dev with the test account,
-without starting an analysis. On 2026-11-04 it confirmed: exchange, rotation, 401 `invalid_token`, 400 `invalid_grant`,
-403 `scope`, 404 on an unknown job or file, revoke, a 39 MB streamed upload, the file delete, and no charge for an
-upload alone. `app/src-tauri/src/lab_live_dev.rs` runs full analyses through the app's pipeline on dev (see "Live tests
-on dev"). Still unchecked for real: the website's Discord click, which needs a person.
+## State on 2026-11-04 (evening)
+
+The desktop side is finished and pushed (`7e5408c`, `1088cfa`, `5517675`; Gitea CI green on all three). It isn't usable on
+production yet, because production has neither the login nor analysis on. The app's default URLs are production's, and they
+match FGCAndroid `BASE_URL_PROD` and FGCScoreboard `NEXT_PUBLIC_HERCULES`, so no client change is expected when it ships.
+
+| Where | Login | Analysis | What the app shows |
+|---|---|---|---|
+| Production (`spaghettishowdown.it`, `backend.spaghettishowdown.it`) | `/desktop-login` answers 404 | `/openers/status` answers 503 `{"error":"Opener analysis is not available"}` | The readable "isn't available yet" sign-in message; cached results still open |
+| Dev (`dev.spaghettishowdown.it`, `dev.backend.spaghettishowdown.it`) | Live | Live, with the real service and a paid AI summary | The whole flow, with `SPAGHETTI_LAB_API_URL` and `SPAGHETTI_LAB_WEB_URL` |
+
+**Confirmed against dev with the app's real Rust client:** exchange, quota, status, rotation, 8 concurrent callers sharing one
+refresh, 401 refresh and retry, 403 `scope`, 400 `invalid_grant`, revoke, a stale refresh token, a streamed upload, the file
+delete, three full runs (result validated and cached, upload deleted), free before credits, `reused`, cancel while running (not
+given back), and a failed job given back (`analysis_refunded`).
+
+**Confirmed only against the mock:** `quota_exhausted` and its `/support` offer, cancel while queued, the token lookup 503, 403
+`scope` on a file delete.
+
+**Not tested anywhere real:** the website's Discord click and its redirect to the app's listener (needs a person), an upload near
+500 MB through nginx, a real 1080p match through the encode, a `.spag` session or database-resolved video through a run, a long
+match against the 30-minute service timeout, whether a cancelled upload leaves a partial file on the server, the native close
+dialog, and killing ffmpeg on exit. Anything on production.
+
+**Not recommended for production yet**, because of the two backend problems under "Open on the server side": a non-game video can
+be charged, and the AI summary is usually withheld after it has been paid for. The full list is in "For the server agent".
+
+`node app/e2e/live/dev-auth-check.mjs` runs the app's token and upload code against dev with the test account, without starting an
+analysis. `app/src-tauri/src/lab_live_dev.rs` runs full analyses through the app's pipeline on dev (see "Live tests on dev").
 
 Checked on 2026-11-04 by reading the code, and with read-only GETs:
 
@@ -19,10 +41,8 @@ Checked on 2026-11-04 by reading the code, and with read-only GETs:
 | FGCScoreboard `gitea/master` | `0d14034a` and `b7ae6bc5` | `OpenersPanel.jsx`, `/desktop-login`, `/terms`, `/privacy` |
 | replanal `server/opener_service` | this repo | job bodies, stages, limits (FastAPI errors use `detail`) |
 
-Production on that date:
-- `GET /api/spaghetti-lab/openers/status` answers 503 `{"error":"Opener analysis is not available"}`.
-- `https://spaghettishowdown.it/desktop-login` answers 404. The login code is on Gitea but not deployed.
-- `/terms`, `/privacy` and `/support` answer 200.
+Production, last read that evening: the `/status` and `/desktop-login` answers in the table above; `/terms`, `/privacy` and
+`/support` answer 200. The login code is on Gitea but not deployed there.
 
 ## Verified API
 
@@ -145,8 +165,8 @@ analysis byte for byte**. The app relies on `6b8877b`; both ship together, since
 
 ## Login contract
 
-**Proposed, server agent builds it. Code exists on Gitea (FGCBackend `6b8877b`, FGCScoreboard `0d14034a`) but is
-not deployed and may change.** Keep every URL and shape in `lab_api.rs`.
+**Built by the server agent and live on dev (FGCBackend `6b8877b`, FGCScoreboard `0d14034a`), not on production.**
+Keep every URL and shape in `lab_api.rs`.
 
 **Website page:** `GET {web}/desktop-login?redirect_port=&state=&code_challenge=&code_challenge_method=S256`
 - `redirect_port`: 4-5 digits, 1024-65535. `state`: 1-512 characters. `code_challenge`: exactly 43 base64url characters.
@@ -198,7 +218,23 @@ Scope allow-list (`isAllowedForLabScope`): `GET openers/status|quota`, `POST ope
 | 15 | "No player names are sent" to the AI summary (message 23) | The upload's file name becomes the facts' title, so a name like `Jason_vs_Enero.mp4` reaches the facts and the summary prompt. The website sends the user's real file name; the app avoids this (decision 7) |
 | 16 | Failed and queued-cancelled analyses come back; a cancelled running one doesn't | True in code, but `/terms` section 13 only mentions analyses that fail. The in-app warning is the only place that says a cancelled running one is spent |
 
-For the server agent (not desktop work):
+For the server agent (not desktop work). The first group is needed before production, the rest can follow:
+
+- **Deploy the login to production:** `/desktop-login` and `/api/desktop-auth/*`.
+- **Turn analysis on in production** after the fixes below, with `/status` answering 200.
+- **Fail a run that isn't a match.** No HUD or no openers should end `failed`, given back, with no AI summary (see "Open on the server side").
+- **Stop paying for withheld AI summaries.** Fix the fact check and prompt, or switch the summary off until then. The code is `lang_summary.check_answer`, in replanal.
+- **Check long matches against `OPENERS_TIMEOUT_S`.** Runs took about 3.7x the length of a 90 s clip, against about 1.2x for a 12.8-minute video. At 3.7x, a 15-minute match would hit the 30-minute limit.
+- **Confirm a 500 MB upload through production:** nginx `client_max_body_size` and read timeout, and `UPLOAD_MAX_SIZE_MB`.
+- **Set the dev test account to 0 free and 0 credits** (asked in project.fgc #36, not answered), so `lab_dev_7` can test `quota_exhausted`. Then reset it.
+- **Keep the dev service busy for a moment,** so cancel while queued can be tested with the test account.
+- **State the cancel rule in `/terms` section 13:** cancelling a running analysis isn't given back. Only the app says so today (still absent on production on 2026-11-04).
+
+Can follow:
+- **`strList` in `labResult.js`:** the AI summary's `errors` and `warnings` are `{kind, text}` objects, so the website probably shows "[object Object]" (read, not run).
+- **Website uploads' file names:** the file name can reach the facts' title and so the AI prompt (mismatch 15). The app always sends `replay.mp4`.
+- **Partial uploads:** check whether a cancelled desktop upload leaves anything on the server. The app never gets a file id for it.
+- **An endpoint for the user's active job,** so a job running on the website or another PC is found before the upload, not after it.
 - **Sweep desktop uploads.** Nothing removes a `desktop_auth_upload` file except the app's own DELETE or account deletion. Orphans: a closed app or lost answer during "Finishing the upload" (the app never learned the id, and a desktop token can't list files), and a player who never returns after a started job. They also count against the 5 GB. Wanted: remove such a file once its job has ended, and any with no job after a few hours. The upload notice can then promise more.
 - **Look up a job by file.** `GET /api/spaghetti-lab/openers?fileId=`, read-only and charging nothing. Today the only way to learn about a POST whose answer was lost is the same POST, which charges if the first never arrived. With a lookup, a cancel in that window could reach the job too.
 - **A start that timed out.** If `POST /jobs/url` times out at axios's 30 s after the service created the job, the route refunds and answers 502 while the job runs on, with no record. Rare, and the app's retry then gets `one_at_a_time`.

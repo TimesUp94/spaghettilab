@@ -559,8 +559,20 @@ fn cancel_strive_export(now: bool) -> Result<(), String>
 
 Normal users analyse on the Spaghetti Showdown servers behind a sign-in: those commands (`lab_sign_in`,
 `run_lab_analysis_remote`, `lab_quota`...) and their structured errors are in `docs/desktop-login.md`, in
-`lab_api.rs`, `lab_auth.rs` and `lab_remote.rs` (including `lab_remote_cancel_phase`). `run_lab_analysis` below is the local research mode: the UI offers it
+`lab_api.rs`, `lab_auth.rs` and `lab_remote.rs`. `run_lab_analysis` below is the local research mode: the UI offers it
 only with `SPAGHETTI_LAB_MODELS` set.
+
+| Command | What it does |
+|---|---|
+| `lab_config`, `lab_account`, `lab_service_status`, `lab_quota` | Read the settings, signed-in state (never tokens), service state and quota |
+| `lab_sign_in`, `lab_sign_in_reopen`, `lab_sign_in_cancel`, `lab_sign_out` | The browser sign-in and sign-out |
+| `lab_open_web` | Opens `support`, `terms` or `privacy` in the system browser (allow-list) |
+| `run_lab_analysis_remote`, `cancel_lab_analysis_remote` | Start or cancel a hosted run (`lab-progress` events) |
+| `lab_remote_cancel_phase` | Fresh job state for the cancel warning |
+| `lab_remote_running`, `lab_remote_take_error`, `lab_remote_resume` | The run in progress, how the last run ended, and saved jobs at startup |
+
+Remote commands return `{code, message, retry_after?, refunded?, quota?}` errors rather than strings. Production has neither the
+login nor analysis on yet, so the app shows a readable message there; dev runs the whole flow.
 
 `app/src-tauri/src/lab.rs`. Run the research models (`tools/ggst_logger/model/lab_analyze.py`) on a replay's
 video and keep the result, `lab_result.json` (schema `spaghetti-lab-result/1`, described in

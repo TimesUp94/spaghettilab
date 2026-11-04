@@ -180,6 +180,12 @@ Video path is resolved and converted to a Tauri asset URL via `convertFileSrc()`
 
 Normal users analyse on the server: signed out they get a sign-in panel saying what leaves the PC, signed in the quota line, what the run is expected to spend, the upload notice once, and cancel warnings by phase. Cached results stay readable signed out, and nothing goes on the network before the tab is opened. The local form below shows only with `SPAGHETTI_LAB_MODELS` set. See `docs/desktop-login.md`.
 
+- **Cancel:** pressing it asks Rust for the job's current state (`lab_remote_cancel_phase`), and the warning comes from that. Afterwards the note compares the quota before and after, because the DELETE doesn't say whether it refunded.
+- **Try again:** collects a paid job whose result or start wasn't confirmed, even with no quota left and no local video.
+- **Closing the app:** the "you can close the app" text appears only after the upload has finished, and a native dialog asks first while the run is still before the charge.
+- **Errors:** a run's failure is kept per replay and shown when a screen of that replay is open, so a refund note isn't lost to a closed screen. The AI summary's `errors` and `warnings` are `{kind, text}` objects.
+- **Production:** sign-in gives a readable "isn't available yet" message until the login ships there, and the rest of the app is unaffected.
+
 The research models' result for the replay (`run_lab_analysis` / `get_lab_result`, see `docs/tauri-commands.md`
 and `tools/ggst_logger/model/LAB_RESULT.md`). The website (FGCScoreboard) has the same panels; both follow
 LAB_RESULT.md, so the search presets must stay exactly as defined there.
