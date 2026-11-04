@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use tauri::Emitter;
 
+mod lab;
+
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
@@ -4572,6 +4574,11 @@ pub fn run() {
             cut_vod_sets,
             export_strive_replays,
             cancel_strive_export,
+            lab::run_lab_analysis,
+            lab::cancel_lab_analysis,
+            lab::lab_analysis_running,
+            lab::get_lab_result,
+            lab::delete_lab_result,
             get_notes,
             add_note,
             update_note,

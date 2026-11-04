@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   ArrowLeft, RefreshCw, Share2, Save, LayoutDashboard, ListOrdered, Sparkles, Activity,
-  StickyNote, FolderOpen, ChevronDown, ScanLine,
+  StickyNote, FolderOpen, ChevronDown, ScanLine, FlaskConical,
 } from "lucide-react";
 import type {
   DamageEvent, Drawing, FrameDataPoint, Highlight, Match, MatchStats, Note, Replay, RoundResult, VideoMode,
@@ -16,11 +16,12 @@ import { RoundBreakdown } from "../components/RoundBreakdown";
 import { HighlightsPanel } from "../components/Highlights";
 import { DamageLog } from "../components/DamageLog";
 import { NotesPanel } from "../components/NotesPanel";
+import { LabPanel, useLab } from "../components/LabPanel";
 import { Button, IconButton, Spinner, Tabs, type TabDef } from "../components/ui";
 import { formatClock, replayTitle, setInfo } from "../lib/matches";
 import { useMediaQuery } from "../lib/useMediaQuery";
 
-export type ReviewTab = "overview" | "rounds" | "highlights" | "damage" | "notes";
+export type ReviewTab = "overview" | "rounds" | "highlights" | "damage" | "notes" | "lab";
 
 export interface ReviewData {
   replay: Replay;
@@ -41,6 +42,9 @@ interface Props {
   onSelectMatch: (index: number | null) => void;
   videoSrc: string | null;
   videoMode: VideoMode;
+  /** The analysis DB and the local video file (the lab analysis reads it) */
+  dbPath: string | null;
+  videoPath: string | null;
   seekToMs: number | null;
   onSeek: (ms: number) => void;
   onSeeked: () => void;
@@ -117,8 +121,11 @@ export function ReviewView(p: Props) {
   const [tab, setTab] = useState<ReviewTab>("overview");
   useEffect(() => setTab("overview"), [data.replay.replay_id]);
 
+  const [labLanes, setLabLanes] = useState(true);
+
   const info = setInfo(data.replay.replay_id);
   const title = info.p1 && info.p2 ? `${info.p1} vs ${info.p2}` : replayTitle(data.replay);
+  const lab = useLab(data.replay.replay_id, p.dbPath, p.videoMode === "local" ? p.videoPath : null, title);
   const range = useMemo(
     () =>
       selectedMatch
@@ -140,6 +147,7 @@ export function ReviewView(p: Props) {
     { key: "highlights", label: "Highlights", icon: Sparkles, count: highlights.length },
     { key: "damage", label: "Damage", icon: Activity, count: damage.length },
     { key: "notes", label: "Notes", icon: StickyNote, count: data.notes.length + data.drawings.length },
+    { key: "lab", label: "Lab", icon: FlaskConical, count: lab.result?.openers.length },
   ];
 
   const canReanalyze = p.videoMode === "local" && !!p.onReanalyze;
@@ -175,6 +183,12 @@ export function ReviewView(p: Props) {
         <span className="inline-flex items-center gap-1"><i className="w-2.5 h-0.5 bg-p2 rounded" /> P2 health</span>
         <span className="hidden sm:inline">lower bars: tension</span>
         {data.notes.length > 0 && <span className="inline-flex items-center gap-1"><i className="w-1.5 h-1.5 bg-accent-green rounded-full" /> notes</span>}
+        {lab.result && <span className="inline-flex items-center gap-1"><i className="w-0 h-0 border-x-[3px] border-x-transparent border-b-[5px] border-b-text-secondary" /> openers</span>}
+        {lab.result?.transcript && (
+          <button onClick={() => setLabLanes((v) => !v)} aria-pressed={labLanes} className={`inline-flex items-center gap-1 cursor-pointer hover:text-text-primary ${labLanes ? "text-text-secondary" : ""}`} title="Show a lane per player with every move, coloured by outcome">
+            <i className="w-2.5 h-1.5 rounded-sm bg-gradient-to-r from-accent-green via-accent-gold to-p2-light" /> moves
+          </button>
+        )}
         <span className="ml-auto font-mono text-text-secondary">{formatClock(p.currentTimeMs)}</span>
       </div>
       <ReviewTimeline
@@ -188,6 +202,7 @@ export function ReviewView(p: Props) {
         range={range}
         currentMs={p.currentTimeMs}
         onSeek={p.onSeek}
+        lab={lab.result ? { openers: lab.result.openers, events: labLanes ? lab.result.transcript?.events ?? null : null } : undefined}
       />
     </div>
   );
@@ -215,7 +230,7 @@ export function ReviewView(p: Props) {
             )}
           </div>
         )}
-        {selectedMatch && tab !== "overview" && tab !== "notes" && (
+        {selectedMatch && tab !== "overview" && tab !== "notes" && tab !== "lab" && (
           <div className="mb-2 text-[11px] text-text-secondary">
             Match {selectedMatch.match_index + 1} only ·{" "}
             <button onClick={() => p.onSelectMatch(null)} className="text-accent-purple hover:underline cursor-pointer">show all matches</button>
@@ -224,6 +239,7 @@ export function ReviewView(p: Props) {
         {tab === "rounds" && <RoundBreakdown rounds={rounds} onSeek={p.onRoundSeek} onExport={p.onExportClip} />}
         {tab === "highlights" && <HighlightsPanel highlights={highlights} onSeek={p.onSeek} onExport={p.onExportClip} />}
         {tab === "damage" && <DamageLog events={damage} onSeek={p.onSeek} />}
+        {tab === "lab" && <LabPanel lab={lab} onSeek={p.onSeek} canRun={!!p.dbPath && p.videoMode === "local" && !!p.videoPath} />}
         {tab === "notes" && (
           <NotesPanel
             notes={data.notes}

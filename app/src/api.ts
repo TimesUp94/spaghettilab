@@ -16,6 +16,7 @@ import type {
   StriveExportOptions,
   StriveExportSummary,
 } from "./types";
+import type { LabOptions, LabResult } from "./lib/lab";
 
 export async function getReplays(dbPath: string): Promise<Replay[]> {
   return invoke("get_replays", { dbPath });
@@ -224,4 +225,27 @@ export async function exportStriveReplays(options: StriveExportOptions): Promise
 /** Stop after the current replay (`now` false) or at once, finalising the current file. */
 export async function cancelStriveExport(now: boolean): Promise<void> {
   return invoke("cancel_strive_export", { now });
+}
+
+// Lab analysis (research models, see tools/ggst_logger/model/LAB_RESULT.md)
+
+export async function runLabAnalysis(dbPath: string, replayId: string, options: LabOptions): Promise<LabResult> {
+  return invoke("run_lab_analysis", { dbPath, replayId, options });
+}
+
+export async function cancelLabAnalysis(replayId?: string): Promise<void> {
+  return invoke("cancel_lab_analysis", { replayId: replayId ?? null });
+}
+
+/** The replay whose lab analysis is running, or null. */
+export async function labAnalysisRunning(): Promise<string | null> {
+  return invoke("lab_analysis_running");
+}
+
+export async function getLabResult(replayId: string): Promise<LabResult | null> {
+  return invoke("get_lab_result", { replayId });
+}
+
+export async function deleteLabResult(replayId: string): Promise<void> {
+  return invoke("delete_lab_result", { replayId });
 }

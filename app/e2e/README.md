@@ -29,6 +29,8 @@ Environment variables:
     to the checkout's `output/analysis.db`;
   - `SPAGHETTI_LAB_NO_GAME=1`: the backend refuses to run the Strive export, so a test can never press
     keys in the game;
+  - `SPAGHETTI_LAB_NO_MODELS=1`: the backend refuses to run the lab models (GPU); `14-lab` writes the
+    fixture `e2e/fixtures/lab_result.json` into the run's lab cache instead;
   - its own WebView2 profile and `--remote-debugging-port`.
 - **The fixture clip** is the first two games of a set (192 s, 720p), cut once into `e2e/.cache/` with
   ffmpeg. The analysis reads 4 rounds, all won by P1, as two games of 2–0 with one comeback
@@ -61,3 +63,4 @@ Environment variables:
 | 11-responsive | Review layout from 1920×1080 to 800×700 (16:9 video in the window, panel beside or below), every page at 640–1440 px |
 | 12-reanalyse | Reanalyse one video and the whole library (@slow) |
 | 13-library | Search in a large library (mocked list), set cards, the update banner |
+| 14-lab | Lab tab from a fixture result (never runs the models): run form, errors, progress / cancel, openers and timeline markers, moves filters, search presets and filters vs counts computed from the fixture, summary it/en and copy prompt, no-transcript fallback, delete |

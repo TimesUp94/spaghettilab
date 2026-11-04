@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import type { DamageEvent, Drawing, FrameDataPoint, Match, Note, RoundResult } from "../types";
 import { formatClock } from "../lib/matches";
+import { OUTCOME_COLOR, type LabEvent, type LabOpener } from "../lib/lab";
 
 interface Props {
   frameData: FrameDataPoint[];
@@ -16,6 +17,8 @@ interface Props {
   range: { start: number; end: number };
   currentMs: number;
   onSeek: (ms: number) => void;
+  /** Lab analysis: opener markers, and a lane per player with every move (coloured by outcome) */
+  lab?: { openers: LabOpener[]; events: LabEvent[] | null };
 }
 
 const P1 = "#e84040";
@@ -28,6 +31,7 @@ const HP_H = 64;
 const TEN_H = 10;
 const GAP = 4;
 const AXIS_H = 14;
+const LANE_H = 7;
 
 function useWidth<T extends HTMLElement>() {
   const ref = useRef<T>(null);
@@ -67,6 +71,7 @@ export function ReviewTimeline({
   range,
   currentMs,
   onSeek,
+  lab,
 }: Props) {
   const [wrapRef, width] = useWidth<HTMLDivElement>();
   const [hoverMs, setHoverMs] = useState<number | null>(null);
@@ -78,7 +83,10 @@ export function ReviewTimeline({
   const hpTop = ROUND_H + GAP;
   const t1Top = hpTop + HP_H + GAP;
   const t2Top = t1Top + TEN_H + 2;
-  const axisTop = t2Top + TEN_H + 2;
+  const lanes = !!lab?.events;
+  const l1Top = t2Top + TEN_H + 3;
+  const l2Top = l1Top + LANE_H + 2;
+  const axisTop = lanes ? l2Top + LANE_H + 2 : t2Top + TEN_H + 2;
   const height = axisTop + AXIS_H;
 
   // One sample per ~2 px: max-pool HP keeps short dips visible enough while staying light.
@@ -228,6 +236,29 @@ export function ReviewTimeline({
           {drawings.filter((d) => inRange(d.timestamp_ms)).map((d) => (
             <circle key={`dr${d.drawing_id}`} cx={x(d.timestamp_ms)} cy={hpTop + 3} r={3} fill={GOLD} />
           ))}
+
+          {/* lab: opener markers at the bottom of the health lane, by attacker */}
+          {lab?.openers.filter((o) => inRange(o.time_s * 1000)).map((o, i) => {
+            const ox = x(o.time_s * 1000);
+            const y = hpTop + HP_H;
+            return (
+              <path key={`lo${i}`} data-lab-opener="" d={`M${ox - 3.5},${y} L${ox},${y - 6} L${ox + 3.5},${y} z`}
+                fill={o.attacker === "P1" ? P1 : P2} stroke={o.hit_kind === "counter" ? GOLD : "none"} strokeWidth={1}>
+                <title>{`${o.attacker} ${o.attacker_char} ${o.move}${o.hit_kind === "counter" || o.hit_kind === "punish" ? `, ${o.hit_kind}` : ""}`}</title>
+              </path>
+            );
+          })}
+          {/* lab: a lane per player, one tick per move coloured by its outcome */}
+          {lanes && (
+            <>
+              <rect x={0} y={l1Top} width={width} height={LANE_H} rx={2} fill="#14141f" />
+              <rect x={0} y={l2Top} width={width} height={LANE_H} rx={2} fill="#14141f" />
+              {lab!.events!.filter((e) => inRange(e.t * 1000)).map((e, i) => (
+                <rect key={`le${i}`} data-lab-move={e.side} x={x(e.t * 1000) - 0.75} y={e.side === "P1" ? l1Top : l2Top} width={1.5} height={LANE_H}
+                  fill={OUTCOME_COLOR[e.outcome] ?? "#555570"} fillOpacity={e.move_p < 0.5 || (e.outcome_p ?? 1) < 0.5 ? 0.45 : 0.95} />
+              ))}
+            </>
+          )}
 
           {/* time axis */}
           {ticks.map((t) => (

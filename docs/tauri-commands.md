@@ -555,6 +555,84 @@ fn cancel_strive_export(now: bool) -> Result<(), String>
 
 ---
 
+## Lab Analysis Commands
+
+`app/src-tauri/src/lab.rs`. Run the research models (`tools/ggst_logger/model/lab_analyze.py`) on a replay's
+video and keep the result, `lab_result.json` (schema `spaghetti-lab-result/1`, described in
+`tools/ggst_logger/model/LAB_RESULT.md`), in a per-replay cache: `<data dir>/SpaghettiLab/lab/<replay_id>/lab_result.json`
+(`<data dir>` = `SPAGHETTI_LAB_DATA_DIR` or the user's local app data). It is not in the analysis DB, so there is no
+schema change and `.spag` / `.spagz` files and the web app are unaffected (a shared file does not carry the lab result).
+
+Errors that mean the lab isn't set up start with `Lab analysis is not installed` (`lab::NOT_INSTALLED`); the UI shows
+them as a setup hint rather than a failure.
+
+### run_lab_analysis
+
+```rust
+async fn run_lab_analysis(app_handle: AppHandle, db_path: String, replay_id: String, options: Option<LabOptions>) -> Result<serde_json::Value, String>
+
+pub struct LabOptions {
+    pub transcript: Option<String>,  // "auto" (default: only with CUDA) | "on" | "off"
+    pub light: Option<bool>,         // --light
+    pub device: Option<String>,      // "auto" | "cuda" | "cpu"
+    pub video_path: Option<String>,  // the video to read; else the replay's (resolve_video_for_replay)
+    pub models_dir: Option<String>,  // the app setting (Lab panel); see below
+}
+```
+
+**Process:**
+1. Refuses when `SPAGHETTI_LAB_NO_MODELS` is set (the e2e run) and while another lab run is going (one at a time: it can use the whole GPU).
+2. Finds the script (`<project root>/tools/ggst_logger/model/lab_analyze.py`), the models folder (`options.models_dir`, `SPAGHETTI_LAB_MODELS`, `GGST_MODEL_DIR`, then `<GGST_DATA or G:\Projects\replanal-data>/ggst_dataset/model`; the first that exists), the video and `require_python()`, and checks that the interpreter imports `torch`. Any of these missing is a "not installed" error.
+3. Spawns `<python> lab_analyze.py <video> --out <lab>/<id>/run --transcript MODE [--light] [--device D] [--analysis <output dir>]` (`--analysis` when the CV pipeline's `frames/<id>_frames.parquet` is there) with `GGST_MODEL_DIR` = the models folder and `GGST_FFMPEG` = `ffmpeg_bin()`.
+4. Forwards each `stage: <name> ...` stdout line as a `lab-progress` event; other lines go to the console.
+5. On success, checks the result (`parse_lab_result`: JSON object, `schema` `spaghetti-lab-result/1[.x]`, an `openers` list), writes it to the cache, keeps the run's other files in `<lab>/<id>/last_run/`, and returns it. A failed run leaves the previous result in place; a `ModuleNotFoundError` is reported as "not installed".
+
+**Events emitted:** `lab-progress` `{replay_id, stage, line}`; `stage` is `hud`, `detect`, `moves`, `transcript`, `facts` or `done` (the UI shows "Reading the HUD / Recognising moves / Transcript / Summary").
+
+**Errors:** `Cancelled` after `cancel_lab_analysis` (the UI ignores it); otherwise the script's last output lines.
+
+---
+
+### cancel_lab_analysis
+
+```rust
+fn cancel_lab_analysis(replay_id: Option<String>) -> Result<(), String>
+```
+
+**Purpose:** Kill the running lab analysis and its children (`taskkill /T /F` on Windows). With a `replay_id`, only if that replay's run is the one going. Errors when nothing runs.
+
+---
+
+### lab_analysis_running
+
+```rust
+fn lab_analysis_running() -> Option<String>
+```
+
+**Purpose:** The replay whose lab analysis is running, or null. The review screen uses it to show the progress again (and reload the result when it ends) after the user left and came back.
+
+---
+
+### get_lab_result
+
+```rust
+fn get_lab_result(replay_id: String) -> Result<Option<serde_json::Value>, String>
+```
+
+**Purpose:** The cached `lab_result.json` of a replay (checked like a fresh one), or null when it was never run. Errors on a corrupt or unsupported file.
+
+---
+
+### delete_lab_result
+
+```rust
+fn delete_lab_result(replay_id: String) -> Result<(), String>
+```
+
+**Purpose:** Remove `<lab>/<replay_id>/` (the result and the last run's files). Refused while that replay's analysis runs.
+
+---
+
 ## Utility Commands
 
 ### get_default_db_path

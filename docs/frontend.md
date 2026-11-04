@@ -171,8 +171,29 @@ Video path is resolved and converted to a Tauri asset URL via `convertFileSrc()`
   (`minmax(340px, 30%)`, 480 px from 2xl). The video column is the player (`fill`: the 16:9 video is fitted
   into the space left above the timeline, so it never overflows) and the `ReviewTimeline`.
 - **Narrow windows:** one scrolling column: video (full width), timeline, then the panel.
-- **Panel tabs:** Overview (`MatchOverview` stats + `MatchList` games), Rounds, Highlights, Damage, Notes.
+- **Panel tabs:** Overview (`MatchOverview` stats + `MatchList` games), Rounds, Highlights, Damage, Notes, Lab.
   With a game selected, Rounds / Highlights / Damage list only that game, and the timeline zooms to it.
+
+### LabPanel (the Lab tab)
+
+**Source:** `app/src/components/LabPanel.tsx` (`useLab` hook + panel), `app/src/lib/lab.ts` (types, presets).
+
+The research models' result for the replay (`run_lab_analysis` / `get_lab_result`, see `docs/tauri-commands.md`
+and `tools/ggst_logger/model/LAB_RESULT.md`). The website (FGCScoreboard) has the same panels; both follow
+LAB_RESULT.md, so the search presets must stay exactly as defined there.
+- **Run:** Transcript Auto / On / Off, Light, a models folder setting (localStorage), progress by stage
+  (`lab-progress`), Cancel, an error box ("not installed" errors as a setup hint). Local videos only.
+- **Openers:** the opener chain's list (side filter); click seeks a second before the moment. On the timeline,
+  a triangle per opener at the bottom of the health lane (attacker's colour, gold edge for a counter hit).
+- **Moves:** the transcript events, filtered by side / move / outcome. With a transcript the timeline has a lane
+  per player, one tick per move coloured by outcome (`OUTCOME_COLOR`; the "moves" legend entry hides them).
+- **Search:** the LAB_RESULT.md presets (move + outcome, counter-hit by, after blocked, after knockdown) and free
+  filters (side, character, move, category, outcome), with the count. Without the transcript the openers are the
+  events (LAB_RESULT.md mapping); after blocked / after knockdown are disabled.
+- **Summary:** `facts.md` in English or Italian (remembered), timestamps clickable, "Copy prompt" (`prompts`).
+  Nothing calls an LLM; the panel says so.
+- `move_p` / `outcome_p` / `hit_kind_p` below 0.5 are shown as uncertain (italic, "?").
+- No transcript (no GPU): openers, search over the openers and the summary, with a hint that the transcript needs a GPU.
 
 ### VideoPlayer
 

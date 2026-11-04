@@ -663,6 +663,8 @@ export default function App() {
         onSelectMatch={setSelectedMatchIndex}
         videoSrc={videoSrc}
         videoMode={videoMode}
+        dbPath={dbPath}
+        videoPath={videoPath}
         seekToMs={seekToMs}
         onSeek={handleSeek}
         onSeeked={() => setSeekToMs(null)}

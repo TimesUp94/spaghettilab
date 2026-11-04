@@ -2,7 +2,8 @@
 //
 // Isolation: SPAGHETTI_LAB_DATA_DIR sends the analysis DB, sessions and previews to e2e/.run/data
 // (never the checkout's output/analysis.db), WEBVIEW2_USER_DATA_FOLDER gives the WebView its own
-// profile (localStorage), and SPAGHETTI_LAB_NO_GAME makes the Strive export refuse to drive the game.
+// profile (localStorage), and SPAGHETTI_LAB_NO_GAME makes the Strive export refuse to drive the game
+// (SPAGHETTI_LAB_NO_MODELS: the lab analysis refuses to run the models).
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -110,6 +111,8 @@ export default async function globalSetup() {
       ...process.env,
       SPAGHETTI_LAB_DATA_DIR: DATA_DIR,
       SPAGHETTI_LAB_NO_GAME: "1",
+      // the lab specs load a fixture result: never run the research models (GPU) in a test
+      SPAGHETTI_LAB_NO_MODELS: "1",
       WEBVIEW2_USER_DATA_FOLDER: path.join(RUN_DIR, "webview"),
       WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${CDP_PORT}`,
     },
