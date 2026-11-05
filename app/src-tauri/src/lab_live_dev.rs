@@ -11,6 +11,8 @@
 // its window, `lab_auth::auth()` the app's session, with the app's own environment variables pointed at dev,
 // a data folder in the temp dir and its own credential-store service. Production is refused.
 //
+// lab_dev_real_clip is separate: one whole video (LAB_DEV_CLIP), signing in by itself. It refuses a second run.
+//
 // Only the no-browser sign-in is test code: the account file (outside the repo) gives a web JWT, which gets a
 // login code, and from there on it's the app's exchange. The website's Discord click needs a person. Status
 // codes, field names and counts are printed; never a token, the JWT, the account or an id.
@@ -186,7 +188,7 @@ impl Watch {
             }
             let mut stages = w.stages.lock().unwrap();
             if stages.last().map(|s| s.1.as_str()) != Some(stage.as_str()) {
-                println!("  {:7.1}s stage {} ({})", t, stage, payload["line"].as_str().unwrap_or(""));
+                println!("  {:7.1}s stage {} ({}){}", t, stage, payload["line"].as_str().unwrap_or(""), payload["total"].as_u64().map_or(String::new(), |b| format!(" {} bytes", b)));
                 stages.push((t, stage));
             }
         })
@@ -475,6 +477,47 @@ fn lab_dev_2_run() {
         let after = quota_now(&auth).await;
         c.eq("quota after", (after.free_remaining, after.credits), (before.free_remaining - 1, before.credits));
         check_cleanup(&mut c, &auth, &w, REPLAY).await;
+        c.finish();
+    });
+}
+
+/// One real video through the app's whole path, its 720p copy included. Each run pays for an AI summary, so
+/// a marker in the work folder refuses a second one: delete it by hand only with a new approval.
+#[test]
+#[ignore]
+fn lab_dev_real_clip() {
+    setup();
+    let video = std::env::var("LAB_DEV_CLIP").expect("LAB_DEV_CLIP: the video");
+    std::fs::create_dir_all(work_dir()).unwrap();
+    let marker = work_dir().join("real_clip_started");
+    assert!(!marker.exists(), "this already ran: it spends real money, see {}", marker.display());
+    let auth = lab_auth::auth().unwrap();
+    run(async {
+        let mut c = Checks::default();
+        sign_in(&auth).await;
+        let before = quota_now(&auth).await;
+        std::fs::write(&marker, "").unwrap();
+        let w = Watch::default();
+        let t0 = Instant::now();
+        let out = start_run(&w, REPLAY, video, false).await.unwrap();
+        timings(&w, t0.elapsed().as_secs_f64());
+        let job_id = w.job_id.lock().unwrap().clone();
+        if let Some(j) = job_id {
+            let a = auth.send_simple(Method::GET, &api::path_job(&j), CALL_TIMEOUT).await.expect("job");
+            show("the job at its end", &a);
+            println!("  job: status={} stage={} created={} started={} finished={}", a.json["status"], a.json["stage"], a.json["created"], a.json["started"], a.json["finished"]);
+        }
+        match out {
+            Ok(v) => {
+                dump_result("result_real.json", &v);
+                result_report(&mut c, &v);
+            }
+            Err(e) => c.check(&format!("the run succeeded, got {}: {}", e.code, e.message), false),
+        }
+        let after = quota_now(&auth).await;
+        println!("  spent: free {} -> {}, credits {} -> {}", before.free_remaining, after.free_remaining, before.credits, after.credits);
+        check_cleanup(&mut c, &auth, &w, REPLAY).await;
+        c.check("sign-out", lab_auth::lab_sign_out().await.is_ok());
         c.finish();
     });
 }

@@ -224,6 +224,8 @@ For the server agent (not desktop work). The first group is needed before produc
 - **Turn analysis on in production** after the fixes below, with `/status` answering 200.
 - **Fail a run that isn't a match.** No HUD or no openers should end `failed`, given back, with no AI summary (see "Open on the server side").
 - **Stop paying for withheld AI summaries.** Fix the fact check and prompt, or switch the summary off until then. The code is `lang_summary.check_answer`, in replanal.
+- **The fact check misreads Slayer's moves (2026-11-05, 10:12 set on dev, `8a51971`):** both languages were withheld after their repair call, and all 16 errors were `move_not_in_facts` for `214P`. `NOTATION_RE` in `lang_summary.py` stops at the `/` of the facts' own `214P/K~H`, so that notation can't pass even when quoted exactly.
+- **Timing on the same run:** 2,386 s on the service for 612 s of video (3.90x: hud 1,081 s, detect 76 s, moves 1,136 s, summary 85 s). A 15-minute match at that ratio takes about 3,510 s against `OPENERS_TIMEOUT_S` 3600.
 - **Check long matches against `OPENERS_TIMEOUT_S`.** Runs took about 3.7x the length of a 90 s clip, against about 1.2x for a 12.8-minute video. At 3.7x, a 15-minute match would hit the 30-minute limit.
 - **Confirm a 500 MB upload through production:** nginx `client_max_body_size` and read timeout, and `UPLOAD_MAX_SIZE_MB`.
 - **Set the dev test account to 0 free and 0 credits** (asked in project.fgc #36, not answered), so `lab_dev_7` can test `quota_exhausted`. Then reset it.
@@ -348,6 +350,8 @@ Event `lab-progress` keeps `{replay_id, stage, line}` and adds optional `percent
 | `hud`, `detect`, `moves`, `transcript`, `facts`, `summary` | as today (`lib/lab.ts`) | an unknown stage shows "Analysing" |
 | `result` | Getting the result | |
 | `done` | | |
+
+While a job is `running`, its `stage` can read `done` (the chain's last stage, before the AI summary). The app shows nothing new for that; only `status: done` ends it.
 
 ### Hosted run, in order
 
@@ -540,6 +544,8 @@ answers: `analysis_starting`, `quota_exhausted`, `one_at_a_time`, `queue_full`, 
 cd app/src-tauri
 LAB_LIVE_DEV=1 cargo test --lib lab_dev_0 -- --ignored --nocapture --test-threads=1   # one step at a time, 0 to 8
 ```
+
+`lab_dev_real_clip` (with `LAB_DEV_CLIP=<video>`) is one whole video through the app's path, signing in and out by itself. Each run pays for an AI summary, so a marker in the work folder refuses a second one.
 
 They run the shipped code (`run_remote` is `run_lab_analysis_remote` without its window), with the app's own environment
 variables pointed at dev, a data folder in the temp dir and the credential-store service `SpaghettiLabLiveDevTest`. Only the

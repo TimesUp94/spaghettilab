@@ -918,7 +918,9 @@ async fn follow_job(ctx: &Ctx, job_id: &str, cancel_first: bool) -> Result<Value
                 let stage = if job.status == "queued" { "queued".to_string() } else { job.stage.clone().unwrap_or_else(|| "starting".into()) };
                 set_run(&ctx.id, |i| i.phase = phase.clone());
                 let now = (stage.clone(), job.position);
-                if last.as_ref() != Some(&now) {
+                // The chain's last stage while the job still runs: the AI summary may come after it
+                let chain_end = job.status == "running" && now.0 == "done";
+                if !chain_end && last.as_ref() != Some(&now) {
                     let line = match job.position {
                         Some(p) if job.status == "queued" => format!("position {}", p),
                         _ => stage.clone(),
