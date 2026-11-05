@@ -11,6 +11,7 @@ Writes one sweep_<char>.jsonl per character (input tried, actions that came out)
 """
 import argparse
 import ctypes
+import ctypes.wintypes
 import glob
 import json
 import os
@@ -38,7 +39,8 @@ STATE = os.path.join(LOGS, "sweep_state.json")
 BTN = {"P": "i", "K": "j", "S": "o", "H": "l", "D": "p"}
 BATTLE_KEYS = {"space", "a", "s", "d"} | set(BTN.values())     # in battle up is Space; W only moves menus
 HUD_EMBLEM = (880, 70, 1040, 180)   # the round clock's infinity emblem: the same on every stage
-HUD_THR = 18.0
+HUD_CORR = 0.9
+RESET_KEY = "8"                     # "Reimposta posizioni" in this PC's key configuration
 PAUSE_TITLE = (480, 150, 960, 220)
 DIALOG_BOX = (480, 270, 1440, 800)
 SIDE_BOX = None
@@ -88,11 +90,25 @@ def free_commit_kb():
     return int(out) if out.isdigit() else 1 << 40
 
 
+def wait_for_monitor():
+    """The screen checks need the borderless 1920x1080 window on the monitor at WINDOW_POS."""
+    user32 = ctypes.windll.user32
+    user32.SetProcessDPIAware()
+    said = False
+    while not ggst.on_a_monitor(*ggst.WINDOW_POS):
+        if not said:
+            print(f"no monitor at {ggst.WINDOW_POS}: waiting, no key sent", flush=True)
+            said = True
+        time.sleep(30)
+
+
 def guard():
-    """Stop on a locked or remote session, or low disk; wait while free commit is under 6 GB."""
+    """Stop on a locked or remote session, or low disk; wait while free commit is under 6 GB
+    or the game's monitor is missing."""
     p = session_problem()
     if p:
         raise Stop(p)
+    wait_for_monitor()
     if shutil.disk_usage(LOGS).free < MIN_DISK:
         raise Stop("data drive under 25 GB free")
     said = False
@@ -146,7 +162,11 @@ def red_at(box):
 
 
 def on_training():
-    return nav.score("training", HUD_EMBLEM) < HUD_THR
+    """The round clock's emblem is there. Correlation, not difference: a bright stage shows through it
+    (0.99 on every stage so far; the pause menu, dialogs and character select are 0.3 or less)."""
+    cur = nav.half_res(capture())
+    ref = cv2.resize(cv2.imread(os.path.join(HERE, "ref", "training.jpg")), (1920, 1080))
+    return float(np.corrcoef(nav.thumb(cur, HUD_EMBLEM).ravel(), nav.thumb(ref, HUD_EMBLEM).ravel())[0, 1]) >= HUD_CORR
 
 
 def latest_log():
@@ -262,6 +282,34 @@ def targets(char):
     return t
 
 
+def roll(toks):
+    """Play tokens with no neutral between directions: the next keys go down before the last come up, like
+    a stick rolled by hand. Key-by-key calls left 4-13 neutral frames and motions failed (Bridget 236K)."""
+    hwnd = ggst.find_window()
+    if not hwnd:
+        raise SystemExit("Strive window not found")
+    down = set()
+    try:
+        for t in toks:
+            if t == "wait":                         # a repeated direction: 22H needs neutral between
+                for k in down:
+                    ggst._post(hwnd, ggst.SCAN[k], True)
+                down = set()
+                time.sleep(0.034)
+                continue
+            names, _, ms = t.partition(":")
+            now = set(names.split("+"))
+            for k in now - down:
+                ggst._post(hwnd, ggst.SCAN[k], False)
+            for k in down - now:
+                ggst._post(hwnd, ggst.SCAN[k], True)
+            down = now
+            time.sleep(int(ms or 50) / 1000)
+    finally:
+        for k in down:
+            ggst._post(hwnd, ggst.SCAN[k], True)
+
+
 def press(step, face, hold=34):
     air, charge, motion, button = step
     toks = []
@@ -273,11 +321,15 @@ def press(step, face, hold=34):
         name = t.split(":")[0].split("+")
         if t != "wait" and not set(name) <= BATTLE_KEYS:
             raise SystemExit(f"key outside the battle set: {t}")
-    for t in toks:
-        if t == "wait":
-            time.sleep(hold / 1000)
-        else:
-            ggst.keys(t, 0)
+    roll(toks)
+
+
+def reset_position():
+    """Training reset (key 8), only on the recognised training HUD."""
+    if not on_training():
+        raise SystemExit("not on the training screen; no reset sent")
+    ggst.keys(f"{RESET_KEY}:70", 200)
+    time.sleep(1.0)
 
 
 def walk_back(log):
@@ -388,7 +440,11 @@ def sweep_char(char, log, out):
 def pause_to_charsel():
     """Training -> pause menu -> character select, every screen checked."""
     if ref_score("pause", PAUSE_TITLE) >= 10:        # a stopped run can leave the pause menu open
-        if not on_training():
+        for _ in range(30):                          # a super's cinematic: look again
+            if on_training():
+                break
+            time.sleep(1)
+        else:
             raise SystemExit("not on the training screen")
         wait_idle(Log(), need=6, timeout=8)
         for _ in range(3):
@@ -429,7 +485,11 @@ def confirm_into_training():
             break
         ggst.keys("u", 300)
         time.sleep(3)
-    nav.wait_for("training", box=HUD_EMBLEM, timeout=60, thr=HUD_THR)
+    t0 = time.time()
+    while not on_training():
+        if time.time() - t0 > 60:
+            raise SystemExit("the training screen did not show; stopping")
+        time.sleep(1)
     time.sleep(2)
 
 
@@ -477,6 +537,7 @@ def go_to_cell(target):
 def start_game():
     """Start Strive through Steam after a crash; never closes or kills anything. The game takes
     about 5 GB of commit, so it starts only with room for that above the 6 GB floor."""
+    wait_for_monitor()
     said = False
     while free_commit_kb() < START_COMMIT_KB:
         if not said:
@@ -496,18 +557,41 @@ def start_game():
                 time.sleep(25)                 # a fresh launch can still close and relaunch itself
                 if not ggst.find_window():
                     time.sleep(45)
-                ggst.ensure_windowed()
-                ggst.place_window()
-                return
+                # A launch in exclusive fullscreen changes the monitor's mode for a moment, so the
+                # monitor can look missing; keep trying until the game area is right.
+                rc = ctypes.wintypes.RECT()
+                for _ in range(24):
+                    ggst.ensure_windowed()
+                    ggst.place_window()
+                    ctypes.windll.user32.GetClientRect(ggst.find_window(), ctypes.byref(rc))
+                    if (rc.right, rc.bottom) == (1920, 1080):
+                        return
+                    time.sleep(5)
+                raise SystemExit(f"game area is {rc.right}x{rc.bottom}, not 1920x1080; no key sent")
         except OSError:
             pass
         time.sleep(2)
     raise SystemExit("Strive did not start")
 
 
+def to_main_checked():
+    """Title -> main menu. Unlike nav.to_main, no key on a screen it does not recognise: wait, then stop."""
+    t0 = time.time()
+    while time.time() - t0 < 240:
+        if nav.score("main", nav.RETE_TAB) < 14:
+            print("  on 'main'", flush=True)
+            return
+        if nav.score("title") < 14:
+            ggst.keys("u", 300)
+            time.sleep(6)
+            continue
+        time.sleep(3)
+    raise SystemExit("neither the title nor the main menu showed; no key sent")
+
+
 def to_charsel_from_title():
     """Fresh game: title -> character select with nav's checked steps."""
-    nav.to_main()
+    to_main_checked()
     for name, box, keys, pause in nav.STEPS[:-1]:
         nav.wait_for(name, box=box, timeout=90)
         ggst.keys(keys, 300)

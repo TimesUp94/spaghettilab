@@ -58,6 +58,7 @@ def main():
     ap.add_argument("--chars", help="comma-separated (default: all 34)")
     ap.add_argument("--resume", action="store_true")
     a = ap.parse_args()
+    nav.to_main = ts.to_main_checked               # no key on an unrecognised screen, even after a restart
     batch.RECORD = False
     batch.LOGS = ts.LOGS
     batch.REC = ts.LOGS

@@ -41,7 +41,7 @@ F_ACTIVE, F_PUSH, F_CH, F_STRIKE, F_THROW, F_WAKE, F_CINE, F_AIR, F_LANDED = 1, 
 REST = {"CmnActStand", "CmnActCrouch", "CmnActStand2Crouch", "CmnActCrouch2Stand", "CmnActStandTurn",
         "CmnActCrouchTurn", "CmnActMidGuardEnd", "CmnActHighGuardEnd", "CmnActCrouchGuardEnd", ""}
 BASELINE = {"CmnActStand", "CmnActCrouch", "CmnActFWalk", "CmnActBWalk", "CmnActFDash", "CmnActBDash",
-            "CmnActJump", "CmnActJumpPre", "CmnActJumpLanding"}
+            "CmnActJump", "CmnActJumpPre", "CmnActJumpLanding", "CrouchFWalk", "CrouchBWalk"}
 # logger / moves.py character -> Dustloop page name
 DL_NAME = {"Sol": "Sol Badguy", "Ky": "Ky Kiske", "Axl": "Axl Low", "Chipp": "Chipp Zanuff",
            "Millia": "Millia Rage", "Ramlethal": "Ramlethal Valentine", "Leo": "Leo Whitefang",
@@ -128,12 +128,13 @@ def character_of(sprites):
 
 
 class Inst:
-    __slots__ = ("act", "start_frames", "rows", "x0", "face", "rest", "last_atime", "connected", "owner_act", "owner_at")
+    __slots__ = ("act", "start_frame", "rows", "x0", "face", "rest", "last_atime", "connected", "owner_act", "owner_at")
 
     def __init__(self, act, x0, face, rest):
         self.act, self.x0, self.face, self.rest = act, x0, face, rest
         self.rows = {}
         self.last_atime = -1
+        self.start_frame = 0
         self.connected = False
         self.owner_act, self.owner_at = "", 0
 
@@ -142,7 +143,8 @@ def new_stat():
     return {"n": 0, "n_rest": 0, "frames": collections.defaultdict(collections.Counter),
             "active_whiff": collections.Counter(), "active_hit": collections.Counter(),
             "dx": collections.defaultdict(list), "dx_rest": collections.defaultdict(list),
-            "dy": collections.defaultdict(list), "spawned_by": collections.Counter(), "sources": collections.Counter()}
+            "dy": collections.defaultdict(list), "spawned_by": collections.Counter(), "sources": collections.Counter(),
+            "flash": collections.Counter()}
 
 
 def close_inst(inst, stats, key, source):
@@ -158,7 +160,7 @@ def close_inst(inst, stats, key, source):
     for f, r in inst.rows.items():
         if f > MAX_FRAMES:
             continue
-        hit, hurt, other, push, a, ch, si, ti, thr, dx, dy = r
+        hit, hurt, other, push, a, ch, si, ti, thr, dx, dy, freeze = r
         st["frames"][f][(hit, hurt, other, push, a, ch, si, ti, thr)] += 1
         for name, v in (("dx", dx), ("dy", dy)):
             if len(st[name][f]) < MAX_DX_SAMPLES:
@@ -169,6 +171,9 @@ def close_inst(inst, stats, key, source):
             active.append(f)
     if has_hit or any(r[8] >= 0 for r in inst.rows.values()):
         st["active_hit" if inst.connected else "active_whiff"][tuple(sorted(active))] += 1
+        if active:
+            fa = min(active)
+            st["flash"][(fa, sum(1 for f, r in inst.rows.items() if f < fa and r[11]))] += 1
     if inst.owner_act:
         st["spawned_by"][(inst.owner_act, min(inst.owner_at, 10_000))] += 1
 
@@ -178,6 +183,38 @@ def keep_action(char, act, has_box_hit):
         return True
     mi = MV.move_info(char or "", act)
     return bool(mi and mi[0] and "nonattack" not in mi[3])
+
+
+_variants = None
+
+
+def variants_of(log):
+    """Runs of known character state, from variants.jsonl next to the logs: {"log", "f0", "f1", "side",
+    "variant"}, e.g. a Nagoriyuki blood level set from the training menu. Sampled moves get their own rows."""
+    global _variants
+    if _variants is None:
+        _variants = collections.defaultdict(list)
+        p = os.path.join(LOGS, "variants.jsonl")
+        if os.path.exists(p):
+            with open(p, encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        d = json.loads(line)
+                        _variants[d["log"]].append(d)
+    return _variants.get(log, [])
+
+
+# Nagoriyuki's S and H normals change with the blood level; a replay's level is unknown.
+_NAGO_VARIES = re.compile(r"NmlAtk(Air)?\d[CD](Near|Far)?")
+
+
+def variant_key(char, act, side, frame, runs):
+    for r in runs:
+        if r["side"] == side and r["f0"] <= frame <= r["f1"] and not act.startswith("Cmn"):
+            return f"{act}@{r['variant']}"
+    if char == "Nagoriyuki" and _NAGO_VARIES.fullmatch(act):
+        return f"{act}@level unknown"
+    return act
 
 
 def scan(path):
@@ -246,12 +283,13 @@ def scan(path):
                 prev = sd["prev"]
                 rest = bool(prev and prev[0] in REST and (sd["prevprev"] is None or sd["prevprev"][1] == prev[1]))
                 inst = Inst(act, prev[1] if prev else x, face, rest)
+                inst.start_frame = int(c[ix["game_frame"]])
                 inst.rows = {}
                 sd["inst"] = inst
             if at not in inst.rows:
                 s_inst = 1 if inst.face == 0 else -1
                 inst.rows[at] = (hit, hurt, other, push, bool(flags & F_ACTIVE), bool(flags & F_CH), bool(flags & F_STRIKE),
-                                 bool(flags & F_THROW), thr, s_inst * (x - inst.x0), y)
+                                 bool(flags & F_THROW), thr, s_inst * (x - inst.x0), y, bool(flags & F_WAKE))
             if flags & F_LANDED:
                 inst.connected = True
             inst.last_atime = at
@@ -285,7 +323,7 @@ def scan(path):
                 inst.face = face
             if at not in inst.rows:
                 inst.rows[at] = (hit, hurt, other, tuple(state[10:14]), bool(flags & F_ACTIVE), False, False, False, thr,
-                                 (1 if inst.face == 0 else -1) * (x - inst.x0), y)
+                                 (1 if inst.face == 0 else -1) * (x - inst.x0), y, False)
             if flags & F_LANDED:
                 inst.connected = True
             inst.last_atime = at
@@ -300,6 +338,7 @@ def scan(path):
     for key, inst in obj_inst.items():
         pending.append((key, inst))
     char = {s: character_of(sprites[s]) for s in (1, 2)}
+    runs = variants_of(os.path.basename(path))
     for key, inst in pending:
         if key in (1, 2):
             if not inst.rows:
@@ -307,7 +346,8 @@ def scan(path):
             ch = char[key]
             has_hit = any(r[0] or r[8] >= 0 for r in inst.rows.values())
             if keep_action(ch, inst.act, has_hit):
-                close_inst(inst, stats, ("move", ch or "?", inst.act), source)
+                act = variant_key(ch, inst.act, key, inst.start_frame, runs)
+                close_inst(inst, stats, ("move", ch or "?", act), source)
         else:
             owner = obj_owner.get(key, "")
             ch = char.get(int(owner[1])) if owner[:1] == "P" else None
@@ -337,7 +377,7 @@ def freeze(st):
     return {"n": st["n"], "n_rest": st["n_rest"], "frames": {k: dict(v) for k, v in st["frames"].items()},
             "active_whiff": dict(st["active_whiff"]), "active_hit": dict(st["active_hit"]),
             "dx": dict(st["dx"]), "dx_rest": dict(st["dx_rest"]), "dy": dict(st["dy"]),
-            "spawned_by": dict(st["spawned_by"]), "sources": dict(st["sources"])}
+            "spawned_by": dict(st["spawned_by"]), "sources": dict(st["sources"]), "flash": dict(st["flash"])}
 
 
 def merge(a, b):
@@ -347,7 +387,7 @@ def merge(a, b):
         d = a["frames"].setdefault(f, {})
         for k, v in cn.items():
             d[k] = d.get(k, 0) + v
-    for name in ("active_whiff", "active_hit", "spawned_by", "sources"):
+    for name in ("active_whiff", "active_hit", "spawned_by", "sources", "flash"):
         d = a[name]
         for k, v in b[name].items():
             d[k] = d.get(k, 0) + v
@@ -375,7 +415,8 @@ def ranges(frames):
 
 def summarize(key, st, push_centre):
     """DB entry of one move or object."""
-    kind, char, act = key
+    kind, char, full_act = key
+    act, _, variant = full_act.partition("@")
     frames = []
     total_n = st["n"]
     for f in sorted(st["frames"]):
@@ -405,6 +446,9 @@ def summarize(key, st, push_centre):
             first = active[0]
             cons = round(firsts[first] / sum(firsts.values()), 3)
     by_f = {r["f"]: r for r in frames}
+    # A super's flash keeps counting action_frames with the wake-up flag set: frames left without it.
+    fl = [(n, c) for (fa, n), c in st["flash"].items() if fa == first]
+    flash = max(fl, key=lambda v: v[1])[0] if fl else 0
     reach = behind = reach_moved = behind_moved = reach_cur = None
     top = bot = None
     throw = False
@@ -446,10 +490,11 @@ def summarize(key, st, push_centre):
         spawn_at = med(ats)
     else:
         spawned, spawn_at = None, None
-    return {"kind": kind, "char": char, "act": act, "input": (mi[0] if mi else "") or "", "name": (mi[1] if mi else "") or "",
+    return {"kind": kind, "char": char, "act": full_act, "base_act": act, "variant": variant, "input": (mi[0] if mi else "") or "", "name": (mi[1] if mi else "") or "",
             "category": (mi[2] if mi else ""), "flags": sorted(mi[3]) if mi else [],
             "n": total_n, "n_rest": st["n_rest"], "n_whiff": sum(st["active_whiff"].values()), "n_conn": sum(st["active_hit"].values()),
-            "sources": st["sources"], "first_active": first, "first_active_consistency": cons, "active_source": src if pool else None,
+            "sources": st["sources"], "first_active": first, "flash_frames": flash,
+            "first_active_no_flash": None if first is None else first - flash, "first_active_consistency": cons, "active_source": src if pool else None,
             "active_ranges": ranges(active), "active_frames": len(active), "box_consistency": box_share, "throw": throw,
             "reach": reach, "reach_cur_push": reach_cur, "behind": behind, "reach_moved": reach_moved, "behind_moved": behind_moved,
             "top": top, "bottom": bot, "dx_first_active": by_f.get(first, {}).get("dx") if first else None,
@@ -471,6 +516,17 @@ def load_dustloop():
     return by
 
 
+def parse_startup(raw):
+    """Dustloop 'startup' text -> frames before the hit: 10 stays 10; 7+2 (before + after a flash) = 9, flash left out."""
+    if not raw:
+        return None, False
+    s = re.sub(r"\([^)]*\)", " ", raw)
+    if "~" in s or "[" in s:
+        s = re.split(r"[~\[]", s)[0]
+    n = [int(x) for x in re.findall(r"\d+", s)]
+    return (sum(n), "+" in s) if n else (None, False)
+
+
 def parse_active(raw):
     """Dustloop 'active' text -> total frames (sum of plain numbers, gaps in parentheses left out) or None."""
     if not raw:
@@ -484,14 +540,15 @@ def compare_dustloop(entries, shift):
     by = load_dustloop()
     rows = []
     for e in entries:
-        if e["kind"] != "move" or not e["input"]:
-            continue
+        if e["kind"] != "move" or not e["input"] or e.get("variant"):
+            continue                                # a one-row Dustloop entry does not describe a variant
         dn = DL_NAME.get(e["char"], e["char"])
         cands = by.get((dn, nk(e["input"])))
         if not cands:
             continue
-        ours = e["first_active"]
+        ours = e["first_active_no_flash"]
         d = cands[0]
+        dl_st, flash_form = parse_startup(d.get("startup_raw"))
         reach_dl = [c["m"]["reach_norm"] for c in cands if c.get("m") and c["m"].get("reach_norm") is not None]
         reach_ours = None if e["reach"] is None else e["reach"] * PX_PER_UNIT
         best = min(reach_dl, key=lambda v: abs(v - reach_ours)) if reach_dl and reach_ours is not None else None
@@ -505,8 +562,8 @@ def compare_dustloop(entries, shift):
         if r:
             sh = r
         rows.append({"char": e["char"], "input": e["input"], "act": e["act"], "n": e["n"], "n_whiff": e["n_whiff"],
-                     "first_active": ours, "consistency": e["first_active_consistency"], "dl_startup": d.get("startup"), "dl_startup_raw": d.get("startup_raw"),
-                     "startup_diff": None if ours is None or d.get("startup") is None else ours - d["startup"],
+                     "first_active": e["first_active"], "flash_frames": e["flash_frames"], "first_active_no_flash": ours, "consistency": e["first_active_consistency"], "dl_startup": dl_st, "dl_startup_raw": d.get("startup_raw"), "dl_flash_form": flash_form,
+                     "startup_diff": None if ours is None or dl_st is None else ours - dl_st - (1 if flash_form and e["flash_frames"] else 0),   # 7+2 means active on frame 10
                      "active": e["active_frames"], "active_ranges": e["active_ranges"], "dl_active_raw": d.get("active_raw"), "dl_active": parse_active(d.get("active_raw")),
                      "active_diff": None if not e["active_frames"] or parse_active(d.get("active_raw")) is None else e["active_frames"] - parse_active(d.get("active_raw")),
                      "active_source": e["active_source"], "reach": e["reach"], "reach_px": None if reach_ours is None else round(reach_ours, 1),
@@ -567,7 +624,7 @@ def build(args):
     with open(os.path.join(OUT, "index.json"), "w", encoding="utf-8") as f:
         json.dump({"logs": n_files, "rows": n_rows, "logs_by_char": logs_by_char,
                    "box_types": {f"{t}{'' if real else ' (point)'}": n for (t, real), n in sorted(types.items())}, "moves": index}, f)
-    cols = ["char", "kind", "act", "input", "name", "category", "n", "n_whiff", "n_conn", "n_rest", "first_active", "first_active_consistency",
+    cols = ["char", "kind", "act", "variant", "input", "name", "category", "n", "n_whiff", "n_conn", "n_rest", "first_active", "flash_frames", "first_active_no_flash", "first_active_consistency",
             "active_ranges", "active_frames", "active_source", "box_consistency", "reach", "reach_cur_push", "behind", "reach_moved", "behind_moved",
             "dx_first_active", "top", "bottom", "total_frames", "spawn_at"]
     with open(os.path.join(OUT, "summary.csv"), "w", newline="", encoding="utf-8") as f:
@@ -578,7 +635,7 @@ def build(args):
     # coverage per character: table moves seen, with hit boxes
     cov = []
     for ch in sorted(set(by_char) | set(MV.M)):
-        es = {e["act"]: e for e in by_char.get(ch, []) if e["kind"] == "move"}
+        es = {e.get("base_act", e["act"]): e for e in by_char.get(ch, []) if e["kind"] == "move"}
         table = set(MV.M.get(ch, {}))
         seen = table & set(es)
         hb = [a for a in seen if es[a]["first_active"] is not None]
@@ -601,6 +658,18 @@ def build(args):
     print(json.dumps(report(index, cov, cmp_rows, types, n_files, n_rows), indent=1)[:6000])
 
 
+def fit_scale(rows):
+    """Normalised px per unit that best fits Dustloop's images, with the residual left. The clean cases only:
+    within 25 px, so moves whose image shows another pose or pushbox do not count."""
+    v = [(r["reach"], r["dl_reach_px"]) for r in rows if r.get("reach_diff_px") is not None and r["reach"] and abs(r["reach_diff_px"]) <= 25]
+    if not v:
+        return None
+    k = statistics.median(d / u for u, d in v)
+    res = sorted(abs(u * k - d) for u, d in v)
+    return {"n": len(v), "px_per_unit": round(k, 7), "median_abs_px": round(res[len(res) // 2], 2), "max_abs_px": round(res[-1], 2),
+            "median_abs_units": round(res[len(res) // 2] / k), "at_0.001518_median_abs_px": round(statistics.median(abs(u * 0.001518 - d) for u, d in v), 2)}
+
+
 def report(index, cov, rows, types, n_files, n_rows):
     mv = [e for e in index if e["kind"] == "move" and e["first_active"] is not None]
     st = [r for r in rows if r["startup_diff"] is not None]
@@ -615,6 +684,7 @@ def report(index, cov, rows, types, n_files, n_rows):
             "active": {"compared": len(ac), "agree": sum(r["active_diff"] == 0 for r in ac)},
             "reach": {"compared": len(rc), "median_abs_px": abs_med([r["reach_diff_px"] for r in rc]), "median_abs_units": abs_med([r["reach_diff_units"] for r in rc]),
                       "within_5px": sum(abs(r["reach_diff_px"]) <= 5 for r in rc), "median_abs_px_cur_push": abs_med([r["reach_cur_diff_px"] for r in rc if r["reach_cur_diff_px"] is not None])},
+            "scale_fit": fit_scale(rows),
             "shift": {"compared": len(sf), "median_abs_units": abs_med([r["shift_diff_units"] for r in sf]), "within_5000": sum(abs(r["shift_diff_units"]) <= 5000 for r in sf)},
             "coverage": [{k: c[k] for k in ("char", "logs", "table_moves", "seen", "with_hitbox", "normals_with_hitbox", "objects")} for c in cov]}
 
@@ -733,15 +803,16 @@ def export(args):
         dn = DL_NAME.get(ch, ch)
         keep = []
         for e in d["moves"]:
-            if e["first_active"] is None and not (e["act"] in BASELINE or e["kind"] == "object"):
+            if e["first_active"] is None and not (e.get("base_act", e["act"]) in BASELINE or e["kind"] == "object"):
                 continue
+            vt = f" [{e['variant']}]" if e.get("variant") else ""
             fr = [[r["f"], r["hit"], r["hurt"], r["other"], r["push"], r["a"], r["ch"], r["si"], r["ti"], r["dx"] or 0, r["dy"] or 0, r.get("throw_box")]
                   for r in e["frames"]]
-            cands = dust.get((dn, nk(e["input"]))) if e["input"] else None
+            cands = dust.get((dn, nk(e["input"]))) if e["input"] and not vt else None
             name = cands[0]["name"] if cands else e["name"]
-            keep.append({"id": e["act"], "k": e["kind"][0], "in": e["input"], "nm": name, "n": e["n"], "fa": e["first_active"],
+            keep.append({"id": e["act"], "k": e["kind"][0], "in": e["input"] + vt, "nm": name, "n": e["n"], "fa": e["first_active"],
                          "ar": e["active_ranges"], "af": e["active_frames"], "c": e["first_active_consistency"], "fr": fr, "dx": e["dx_first_active"]})
-            index.append({"c": dn, "k": e["kind"][0], "a": e["act"], "in": e["input"], "nm": name, "n": e["n"], "fa": e["first_active"],
+            index.append({"c": dn, "k": e["kind"][0], "a": e["act"], "in": e["input"] + vt, "nm": name, "n": e["n"], "fa": e["first_active"],
                           "af": e["active_frames"], "ar": e["active_ranges"], "r": e["reach"], "b": e["behind"], "rm": e["reach_moved"], "f": len(fr)})
         fname = re.sub(r"[^A-Za-z0-9]+", "_", dn)
         with open(os.path.join(dest, fname + ".js"), "w", encoding="utf-8") as f:
