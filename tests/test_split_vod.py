@@ -166,6 +166,11 @@ def test_names_relation(sv):
     # A swap with a name unread: not a new set by itself, the look decides
     assert sv.names_relation(("Alice", "Bob"), ("Bob", "")) == "unknown"
     assert sv.names_relation(("Alice", "Bob"), ("Carol", "Alice")) == "different"
+    # A host who stays on: only the opponent tells two sets apart, and two short handles can share
+    # letters ("Faker" / "AMBER" is 0.6). A one-letter misread of a short name still matches.
+    assert sv.names_relation(("Faker", "TimesUp"), ("TimesUp", "AMBER")) == "different"
+    assert sv.names_relation(("Faker", "TimesUp"), ("AMBER", "TimesUp")) == "different"
+    assert sv.names_relation(("Dona", "TimesUp"), ("Dana", "TimesUp")) == "same"
 
 
 def test_ocr_failures_degrade_to_the_look_fallback(sv, monkeypatch):

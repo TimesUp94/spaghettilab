@@ -73,7 +73,7 @@ TIMER_SUPPORT_WINDOW = 5   # a timer read needs a consistent read within N s
 GAMEPLAY_MERGE_GAP = 12    # merge HUD runs with < N second gaps (supers, round transitions)
 MIN_SEGMENT_HUD = 15       # discard segments with fewer timer-read seconds
 UNKNOWN_NAMES_MAX_GAP = 90  # without readable names, a longer gap starts a new set
-NAME_SAME = 0.6            # name similarity at/above this = same player
+NAME_SAME = 0.75           # name similarity at/above this = same player (like the vote clusters)
 NAME_SAMPLES = 9           # HUD frames OCR'd per segment (names are voted)
 PADDING_BEFORE = 10
 PADDING_AFTER = 20         # the HUD fades at the match-deciding KO; keep the win screen

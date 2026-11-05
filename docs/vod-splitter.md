@@ -235,7 +235,9 @@ look.
 Each segment is compared with the current set's names (votes pooled over its
 segments, side swaps aligned, `set_names`):
 
-- **Names:** a side "matches" at similarity >= 0.6. Same set when every side
+- **Names:** a side "matches" at similarity >= 0.75 (`NAME_SAME`, like the vote
+  clusters; at 0.6 "Faker" and "AMBER" matched, merging two sets of a host who
+  stays on, where only the opponent differs). Same set when every side
   read in both matches; a new set when a side read in both clearly differs
   (so a winner who stays on for the next set still starts a new one).
   Players may swap sides between games: the swapped pairing makes it the same
