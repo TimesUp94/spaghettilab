@@ -269,6 +269,7 @@ Full report and evidence: `reports/Fighting game video models.md`, notes in `res
 **In progress (started 2026-11-05):**
 1. Measurement pass: hue sweep, transcript on the 720p30 copies, bitrate ladder, 50/50 of fine-tuned V-JEPA 2 with v2, server CPU facts.
 2. Opener side attribution plus the HUD character read.
+   **Status 2026-11-05:** done. The `wrong_side` misses were real trades (172 of 180), so the fix is a second opener from the HUD's bars, not a side correction: chain 0.8859 -> 0.9046 old, 0.8606 -> 0.8775 new, 0.8872 -> 0.9052 on the 720p30 copies, bootstrap above zero on all three, precision unchanged. Details in the README (`video_openers.trade_partners`). `results_trades.json`.
 3. Retrain chain and transcript on about 1,700 replays, with a real 25/50/75/100% curve. Below 0.89 on old points to something other than data.
 
 **For later, in order:**

@@ -274,6 +274,49 @@ def continues_combo(n: np.ndarray, i: int) -> bool:
     return False
 
 
+# A trade: both players hit each other on the same frame. The net has one class per step, so it marks one of the two (nearly always
+# P1, as the labels of a step can hold only one side) and the other player's opener is lost. On the HUD a trade shows as the marked
+# attacker's own bar falling at the hit, with its red pending segment growing by the same amount (a misread bar has no such match).
+# Windows in steps around the detection, thresholds in bar fractions; set on the training folds' crossfit detections (results_trades.json).
+TRADE_BEFORE, TRADE_AFTER = (-5, -1), (4, 12)
+TRADE_MIN, TRADE_GAP = 0.01, 0.03
+BAR_COLUMNS = ["p1_health_raw", "p2_health_raw", "p1_pending_pct", "p2_pending_pct"]
+
+
+def _window_median(a: np.ndarray, i: int, w: tuple[int, int]) -> float:
+    x = a[max(0, i + w[0]):max(0, i + w[1])]
+    x = x[np.isfinite(x)]
+    return float(np.median(x)) if len(x) else float("nan")
+
+
+def own_bar_falls(hp: np.ndarray, pending: np.ndarray, i: int) -> bool:
+    """hp, pending: one side's raw readings (NaN = no reading); i: a step that side is marked attacking at. True when its own bar loses
+    what its red pending segment gains: that side is being hit too."""
+    lost = _window_median(hp, i, TRADE_BEFORE) - _window_median(hp, i, TRADE_AFTER)
+    red = _window_median(pending, i, TRADE_AFTER) - _window_median(pending, i, TRADE_BEFORE)
+    return bool(lost >= TRADE_MIN and red >= TRADE_MIN and abs(lost - red) <= TRADE_GAP)
+
+
+def trade_partners(kept, detected, hp: dict, pending: dict, shown: dict | None = None) -> list[tuple[int, int, float]]:
+    """kept: the (step, side, score) combo starts; detected: every peak, also those dropped; hp, pending: {side: readings}; shown:
+    {side: counter_readings}. -> the other player's (step, side, score) of each start that is a trade, unless the net already marks that
+    side there or that side's counter shows it is inside a combo."""
+    out = []
+    for i, s, sc in kept:
+        o = 3 - s
+        if not own_bar_falls(hp[s], pending[s], i) or any(d[1] == o and abs(d[0] - i) <= MATCH for d in detected):
+            continue
+        if shown is None or not continues_combo(shown[o], i):
+            out.append((i, o, sc))
+    return out
+
+
+def hud_bars(table: dict) -> tuple[dict, dict]:
+    """({side: raw HP}, {side: red pending}) from a frames parquet's columns, NaN where there is no reading."""
+    arr = lambda c: np.array([np.nan if v is None else v for v in table[c]], dtype=np.float64)
+    return {s: arr(f"p{s}_health_raw") for s in (1, 2)}, {s: arr(f"p{s}_pending_pct") for s in (1, 2)}
+
+
 def labels_for(X, tru):
     y = np.zeros(len(X), np.int64)
     w = np.ones(len(X), np.float32)

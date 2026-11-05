@@ -5,6 +5,7 @@ Chain (final weights, trained on every logged replay):
 1. the app's CV pipeline (scripts/analyze_replay.py) reads the HUD, unless --analysis has it;
 2. video_openers: the frames combos start at, and the attacker's side (from the HUD readings and,
    when the weights were trained with it, the whole frame at 64x36: video_tiny);
+   a start where the marked attacker's own bar falls too is a trade: both players get an opener;
 3. hud_chars: both characters from the game's own HUD (portrait, then the name on the bar), per stretch of the video
    (a tournament set can change characters between games); video_players + video_crops: both players
    on each frame around the starts, the attacker crop, and the characters' visual vote as the fallback;
@@ -63,7 +64,8 @@ def analysis(video: Path, out: Path, given: Path | None) -> Path:
 
 
 def detect(video: Path, parquet: Path, fps: float) -> tuple[list[dict], list[dict]]:
-    """(combo starts, the detections dropped because the attacker's combo counter shows they continue a combo)."""
+    """(combo starts, the detections dropped because the attacker's combo counter shows they continue a combo). Both players' starts of a
+    trade carry trade=True: the net marks one, the HUD's bars tell when the other was hit too."""
     import pyarrow.parquet as pq
     import video_openers as vo
     import video_tiny as vt
@@ -71,11 +73,18 @@ def detect(video: Path, parquet: Path, fps: float) -> tuple[list[dict], list[dic
     net = vo.load(OUT / "video_openers_final.pt")
     im = vt.tiny_frames(video, frames) if net.tiny is not None else None
     f60 = np.round(frames * 60.0 / fps).astype(int)
-    hud = pq.read_table(parquet, columns=["combo_side", "combo_count"]).to_pydict()
+    hud = pq.read_table(parquet, columns=["combo_side", "combo_count"] + vo.BAR_COLUMNS).to_pydict()
     shown = {s: vo.counter_readings(hud["combo_side"], hud["combo_count"], s) for s in (1, 2)}
-    kept, dropped = [], []
-    for i, s, sc in vo.peaks(vo.predict(net, X, im), vo.THR):
-        (dropped if vo.continues_combo(shown[s], i) else kept).append(dict(frame=int(f60[i]), side=s, score=round(sc, 4), row=None))
+    found = vo.peaks(vo.predict(net, X, im), vo.THR)
+    starts = [d for d in found if not vo.continues_combo(shown[d[1]], d[0])]
+    partners = vo.trade_partners(starts, found, *vo.hud_bars(hud), shown)
+    traded = {(i, 3 - s) for i, s, _ in partners} | {(i, s) for i, s, _ in partners}
+
+    def entry(i, s, sc):
+        d = dict(frame=int(f60[i]), side=s, score=round(sc, 4), row=None)
+        return dict(d, trade=True) if (i, s) in traded else d
+    kept = [entry(*d) for d in sorted(starts + partners)]
+    dropped = [entry(*d) for d in found if d not in starts]
     return kept, dropped
 
 
@@ -124,7 +133,7 @@ def run_chain(video: Path, out: Path, given: Path | None = None, light: bool = F
         check_hud(pq_path)
     stage("detect")
     dets, dropped = detect(video, pq_path, fps)
-    print(f"{len(dets)} combo starts found, {len(dropped)} dropped inside a combo ({time.time() - t0:.0f}s)", flush=True)
+    print(f"{len(dets)} combo starts found ({sum(bool(d.get('trade')) for d in dets)} in trades), {len(dropped)} dropped inside a combo ({time.time() - t0:.0f}s)", flush=True)
     stage("moves")
     ref_chars, hud_scores = read_characters(video, pq_path)
     hud_segs = hc.resolve(hud_scores, ref_chars) if hud_scores is not None else None
@@ -161,7 +170,7 @@ def run_chain(video: Path, out: Path, given: Path | None = None, light: bool = F
         vs.process((video.stem, str(video), str(cdir), str(sdir)))
     # the crops stay; each detection's moves are restricted to the characters of its stretch of the video
     items = [dict(stem=f"v{hc.segment_index(segs, d['frame'] / 60.0)}", file=str(cdir / d["file"]), frame=d["frame"], side=d["side"],
-                  score=d["score"], row=None, scene=str(sdir / d["file"])) for d in idx["dets"]]
+                  score=d["score"], row=None, scene=str(sdir / d["file"]), trade=d.get("trade", False)) for d in idx["dets"]]
     P = vm.predict(net, items, ck["voc"], pairs, shifts=shifts)
     voc = ck["voc"]
     hk = {(d["frame"], d["side"]): p for d, p in zip(dets, br.hit_kind(video, dets))}
@@ -183,6 +192,7 @@ def run_chain(video: Path, out: Path, given: Path | None = None, light: bool = F
             normal=voc["normal"][int(P["normal"][i].argmax())] if cat == "normal" else None,
             hit_kind=br.CLASSES[int(hk[(it["frame"], it["side"])].argmax())],
             hit_kind_p=round(float(hk[(it["frame"], it["side"])].max()), 3),
+            **({"trade": True} if it["trade"] else {}),
         ))
     doc = dict(video=str(video), fps=fps, size=[w, h], **hc.characters_fields(segs),
                dropped_in_combo=[dict(time_s=round(d["frame"] / 60.0, 3), attacker=f"P{d['side']}", detector_score=d["score"]) for d in dropped],

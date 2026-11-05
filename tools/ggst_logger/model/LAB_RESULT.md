@@ -49,6 +49,10 @@ opener's combo as the game's hit counter showed them (`lab_combos.py`). It is th
 starts from 0.5 s before the opener to 3 s after it, and before that side's next opener. Absent when the counter showed
 nothing, the reader missed it, or the HUD parquet was written before the counter was stored.
 
+Added by `recognize.py` (optional, additive; read it as absent in older results): `trade: true` on both openers of a trade, when
+the two players hit each other at the same moment. The two entries have the same `time_s` and `detector_score` and opposite
+`attacker`. Absent on every other opener.
+
 ### `transcript.events[]`
 
 | field | type | meaning |
