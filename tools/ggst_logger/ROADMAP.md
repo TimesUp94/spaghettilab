@@ -261,3 +261,28 @@ never released; weights stay private until decided otherwise.
 the current chain any time the server needs it. As of 2026-11-04: 1-4 have first versions and 5
 its local part; next is 6 (the transcript student), with 5's provider decision and checker gaps
 in parallel.
+
+## Next steps from the November research
+
+Full report and evidence: `reports/Fighting game video models.md`, notes in `research_notes/Fighting game video models/`. Gains are estimates against 0.887 / 0.855 (chain) and 0.735 / 0.716 (transcript move F1@4); adopt a change only if a paired bootstrap over replays is above zero and it gains about 0.01 chain or 0.02 on the sub-metric, measured on the 720p30 copies.
+
+**In progress (started 2026-11-05):**
+1. Measurement pass: hue sweep, transcript on the 720p30 copies, bitrate ladder, 50/50 of fine-tuned V-JEPA 2 with v2, server CPU facts.
+2. Opener side attribution plus the HUD character read.
+3. Retrain chain and transcript on about 1,700 replays, with a real 25/50/75/100% curve. Below 0.89 on old points to something other than data.
+
+**For later, in order:**
+4. Transcript head round: Soft-NMS, merge beyond 8, two slots per tubelet, loss and threshold tuned for whiffs.
+5. Distil the ResNet18+50 ensemble into the server's ResNet18 (production runs `--light`, 0.878).
+6. 4x4 grid tokens on the 563-replay subset.
+7. Small per-frame spotter (RegNet-Y 200-400MF with gated shift) on player crops at 30 fps: the route to a transcript on the CPU server.
+8. Clean V-JEPA 2 fine-tune on dense move starts (the 4-epoch run hit NaN), then re-extract tokens; also the teacher for 5 and 7.
+9. Train the opener move net on all logged move starts, not only openers.
+10. 15 Hz tokens, only if step 4 leaves real close-start or whiff misses.
+11. Post-hoc long-tail: weight-decay sweep, logit adjustment, classifier retraining; report macro and natural-frequency.
+12. Colour augmentation, only if the hue sweep shows a gap.
+13. Record or generate rare moves up to about 20 instances each, prioritised by attribution.
+14. In-domain V-JEPA pretraining, ExPLoRA-style, only if a frozen probe beats 0.844 / 0.792.
+15. Resolution ladder at 128 / 192 / 288 px: settles the question; if 128 loses little, stop.
+
+**Rejected for now:** a higher-resolution upload tier, super-resolution, tiling, learned crop policies, pose or skeleton streams, 60 fps production inputs, colour-equivariant networks, and Hiera's video weights (CC BY-NC).
