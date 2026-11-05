@@ -77,3 +77,22 @@ def test_paths_screen_lists(monkeypatch, cs):
     assert not sr.key_allowed("pause", "8") and not sr.key_allowed("pause", "enter")
     assert not sr.key_allowed("pause", "d") and not sr.key_allowed("train_settings", "a")
     assert not sr.key_allowed("nowhere", "w")
+
+
+def test_spell_list_keys(cs, monkeypatch):
+    monkeypatch.setattr(cs, "spell_screen", lambda: True)
+    for key in ("a", "d", "8", "enter", "i"):
+        with pytest.raises(SystemExit):
+            cs.press_spell(key)
+    assert cs._calls == []
+    monkeypatch.setattr(cs, "spell_screen", lambda: False)
+    with pytest.raises(SystemExit):
+        cs.press_spell("u")
+    assert cs._calls == []
+
+
+def test_slot_opens_only_from_that_slot_row(cs, monkeypatch):
+    monkeypatch.setattr(cs, "go_to", lambda label: "Spell: Slot 2")
+    with pytest.raises(SystemExit):
+        cs.open_slot(1)
+    assert cs._calls == []

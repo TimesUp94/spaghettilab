@@ -33,7 +33,9 @@ DATA = os.environ.get("GGST_DATA", r"G:\Projects\replanal-data")
 LOGS = os.path.join(DATA, "ggst_boxlogs")
 OUT = os.path.join(DATA, "ggst_hitboxes")
 DUST = os.path.join(DATA, "dustloop_hitboxes")
-PX_PER_UNIT = 0.001518         # normalised px of Dustloop's images per game unit (our calibration)
+# Normalised px of Dustloop's images per game unit. Fitted on 28 clean reaches (report.json, scale_fit):
+# median error 0.5 px; the earlier pushbox-width estimate 0.001518 left 7.4 px.
+PX_PER_UNIT = 0.0015019
 MAX_FRAMES = 300
 MAX_DX_SAMPLES = 400
 HIT_TYPES = {1, 18}            # hit, follow-up hit

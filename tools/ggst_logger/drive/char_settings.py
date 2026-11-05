@@ -21,6 +21,7 @@ VALUE_X = (985, 1365)
 ROWS_Y = (150, 1000)
 ROW_H = 53
 ALLOWED = {"w", "s", "a", "d", "o"}           # move, change a value, O = back
+SPELL_KEYS = {"w", "s", "u", "o"}             # the SPELL list: move, choose, back; no A/D
 _reader = None
 
 
@@ -101,6 +102,46 @@ def options(label, max_values=12):
     for _ in range(steps):
         press("a")
     return seen, 0
+
+
+def spell_screen():
+    """The SPELL list opened from a "Spell: Slot N" row."""
+    ref = cv2.imread(os.path.join(ts.REFS, "spell.png"))
+    return ref is not None and title_diff(ts.capture(), ref) < 12
+
+
+def press_spell(key, after=0.25):
+    if key not in SPELL_KEYS:
+        raise SystemExit(f"key '{key}' is not allowed on the spell list")
+    if not spell_screen():
+        raise SystemExit("not on the spell list; no key sent")
+    ggst.keys(f"{key}:60", 80)
+    time.sleep(after)
+
+
+def open_slot(n):
+    """U only on the row read back as that slot; nowhere else on this screen."""
+    label = go_to(f"Spell: Slot {n}")
+    if not norm(label).endswith(f"slot{n}"):
+        raise SystemExit(f"highlighted row is '{label}', not slot {n}; stopping")
+    if not on_screen():
+        raise SystemExit("not on the character settings screen; no key sent")
+    ggst.keys("u:70", 200)
+    time.sleep(1.0)
+    if not spell_screen():
+        raise SystemExit("the spell list did not open")
+
+
+def spell_highlighted():
+    """Text of the red row on the spell list."""
+    im = ts.capture()
+    band = im[ROWS_Y[0]:ROWS_Y[1], 520:1300]
+    red = (band[:, :, 2] > 150) & (band[:, :, 1] < 40) & (band[:, :, 0] < 40)
+    rows = np.where(red.mean(axis=1) > 0.5)[0]
+    if not len(rows):
+        return None
+    y0, y1 = rows[0] + ROWS_Y[0], rows[-1] + ROWS_Y[0]
+    return _ocr(cv2.resize(im[y0:y1, 500:1370], None, fx=2, fy=2))
 
 
 def closest(text, opts):

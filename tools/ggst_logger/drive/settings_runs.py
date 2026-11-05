@@ -478,6 +478,85 @@ def chipp():
     print("done Chipp", flush=True)
 
 
+def asuka_list():
+    """Read the spell list once, top to bottom, from the open SPELL screen. Comes back to where it started."""
+    start = cs.spell_highlighted()
+    names, steps = [start], 0
+    for _ in range(90):
+        cs.press_spell("s")
+        steps += 1
+        n = cs.spell_highlighted()
+        if cs.norm(n) == cs.norm(start):
+            break
+        names.append(n)
+    # rotate so the list starts at the first row
+    first = next(i for i, n in enumerate(names) if cs.norm(n) == "normale")
+    ordered = names[first:] + names[:first]
+    json.dump(ordered, open(os.path.join(ts.LOGS, "asuka_spells.json"), "w"), indent=0)
+    print("  spell list", len(ordered), ordered, flush=True)
+    return ordered
+
+
+def asuka(deadline_hhmm="19:40"):
+    """Each spell in slot 1, cast with 236P after a reset; which objects it makes is the spell's identity."""
+    log = switch("Asuka")
+    names = json.load(open(os.path.join(ts.LOGS, "asuka_spells.json")))
+    original = "Delayed Howling Metron"
+    with outfile("Asuka") as out:
+        cur = cs.closest(original, names)
+        for i, name in enumerate(names):
+            if time.strftime("%H:%M") >= deadline_hhmm:
+                print(f"  deadline: stopped before spell {i} {name}", flush=True)
+                break
+            open_settings()
+            cs.open_slot(1)
+            # the cursor opens on the slot's current spell
+            for _ in range(abs(i - cur)):
+                cs.press_spell("s" if i > cur else "w", after=0.1)
+            raw = cs.spell_highlighted()
+            if cs.closest(raw, names) != i:
+                print(f"  spell {i} {name}: cursor reads '{raw}', not confirmed, skipped", flush=True)
+                cs.press_spell("o", after=1.0)
+                close_settings()
+                continue
+            cs.press_spell("u", after=1.0)
+            cur = i
+            close_settings()
+            ts.reset_position()
+            time.sleep(1.0)
+            r0 = log.last()
+            f0, face = int(r0["game_frame"]), int(r0["p1_face"])
+            run_ops(log, ["236P", "~1800"], face)
+            ts.wait_idle(log, need=4, timeout=4)
+            objs, acts = set(), []
+            for x in log.rows(500):
+                if int(x["game_frame"]) < f0:
+                    continue
+                if x["p1_act"] not in ts.IDLE and (not acts or acts[-1] != x["p1_act"]):
+                    acts.append(x["p1_act"])
+                for it in filter(None, x["objs"].split("|")):
+                    v = it.split("/")
+                    if len(v) >= 3 and "Magic" in v[2]:
+                        objs.add(v[2])
+            out.write(json.dumps({"spell_index": i, "spell": name, "ocr": raw, "slot": 1, "deck": "Test case 2", "acts": acts,
+                                  "objects": sorted(objs), "log": os.path.basename(log.path), "f0": f0}) + "\n")
+            out.flush()
+            print(f"  spell {i} {name}: {acts} objects {sorted(objs)}", flush=True)
+    # the user's spell back
+    open_settings()
+    cs.open_slot(1)
+    target = cs.closest(original, names)
+    for _ in range(abs(target - cur)):
+        cs.press_spell("s" if target > cur else "w", after=0.1)
+    raw = cs.spell_highlighted()
+    if cs.closest(raw, names) != target:
+        raise SystemExit(f"could not put slot 1 back: cursor reads '{raw}'")
+    cs.press_spell("u", after=1.0)
+    print("  slot 1 now reads", cs.highlighted(), flush=True)
+    close_settings()
+    print("done Asuka; slot 1 back on", original, flush=True)
+
+
 # Moves the sweep never saw that the user says are not in the game, or are the same move under another name.
 NOT_MOVES = {"ElysionDriverEx", "SunVoid_Air", "AirZanseiRouga", "Zweihander_Land_Add", "SoregaOrenonada_exe"}
 
@@ -522,7 +601,7 @@ if __name__ == "__main__":
     ts.MV = moves
     runs = {"nagoriyuki": nagoriyuki, "aba": aba, "zato": zato, "johnny": johnny, "jacko": jacko, "leo": leo, "ky": ky,
             "faust": faust, "faust2": faust2, "leo2": leo2, "johnny2": johnny2, "kydi": kydi,
-            "testament": testament, "chipp": chipp}
+            "testament": testament, "chipp": chipp, "asuka": asuka}
     for name in sys.argv[1:]:
         ts.guard()
         try:
