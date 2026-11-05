@@ -354,3 +354,95 @@ Not solved:
 - The checker gaps above, which matter before any real answer is shown to a user.
 - The uncertain threshold (p < 0.5) is not calibrated; recalibrate on val.
 - One prompt for a whole set (citations like [M2 1:23.4]) is not built. The facts and prompts of one match are in `lab_analyze.py`'s `lab_result.json` (CPU server included); no LLM is called.
+
+### Measurement pass (2026-11)
+
+Step 1 of the plan in `reports/Fighting game video models.md`. No production model changed; it decides later steps. Scripts: `model/exp_measure_{hue,transcript,ladder,ensemble,timing}.py`. Results: `model/results_exp_measure_*.json`. Logs: `ggst_dataset/measure/`. All chain numbers are against the v2 detections and chain (0.887 / 0.855), old 144 / new 76 unless a subset is stated, so they don't include the later trade and mid-combo changes. Intervals are 95% paired bootstraps over replays.
+
+**Colour (`exp_measure_hue.py`).** v2 ensemble on the test fold's own tiles, detections fixed. The 0° run reproduces the saved probabilities (argmax agreement 1.00000).
+
+| Transform | Chain | Exact move | Category | Chain with its own vote | Vote: replays right |
+|---|---|---|---|---|---|
+| none | 0.887 / 0.855 | 0.944 / 0.915 | 0.935 / 0.949 | 0.887 / 0.863 | 144/144, 76/76 |
+| hue +30° | 0.876 / 0.839 | 0.936 / 0.905 | 0.925 / 0.945 | 0.821 / 0.786 | 125/144, 66/76 |
+| hue +60° | 0.791 / 0.756 | 0.903 / 0.862 | 0.864 / 0.877 | 0.582 / 0.477 | 79/144, 26/76 |
+| hue +90° | 0.670 / 0.645 | 0.856 / 0.815 | 0.744 / 0.765 | 0.367 / 0.304 | 49/144, 20/76 |
+| hue +120° | 0.558 / 0.543 | 0.804 / 0.765 | 0.640 / 0.669 | 0.303 / 0.226 | 49/144, 16/76 |
+| hue +180° | 0.476 / 0.466 | 0.735 / 0.698 | 0.577 / 0.577 | 0.292 / 0.209 | 57/144, 14/76 |
+| R and B swapped | 0.731 / 0.719 | 0.886 / 0.855 | 0.816 / 0.814 | 0.555 / 0.500 | 80/144, 34/76 |
+| hue sectors, whole image | 0.709 / 0.666 | 0.851 / 0.806 | 0.767 / 0.747 | 0.556 / 0.428 | 91/144, 32/76 |
+| hue +180°, crop stream only | 0.879 / 0.837 | 0.937 / 0.899 | 0.931 / 0.948 | 0.879 / 0.845 | unchanged |
+| hue +180°, whole-frame stream only | 0.592 / 0.565 | 0.829 / 0.784 | 0.675 / 0.674 | 0.367 / 0.260 | 57/144, 14/76 |
+| hue sectors, crop stream only | 0.882 / 0.843 | 0.938 / 0.903 | 0.934 / 0.939 | 0.882 / 0.851 | unchanged |
+| **boxes on the players, hue sectors** | **0.879 / 0.840** | 0.938 / 0.902 | 0.927 / 0.943 | 0.879 / 0.841 | 144/144, 75/76 |
+| boxes on the players, hue +60° | 0.879 / 0.834 | 0.937 / 0.896 | 0.927 / 0.944 | 0.879 / 0.841 | 144/144, 76/76 |
+| boxes on the players, hue +180° | 0.875 / 0.837 | 0.934 / 0.900 | 0.929 / 0.943 | 0.875 / 0.841 | 144/144, 75/76 |
+
+- Chain change for the player boxes, against no transform: sectors -0.008 [-0.012, -0.004] / -0.015 [-0.021, -0.009]; +60° -0.008 [-0.012, -0.004] / -0.021 [-0.029, -0.014]; +180° -0.012 [-0.017, -0.007] / -0.018 [-0.027, -0.009].
+- How far to read it: a global rotation also recolours the stage, the HUD and the effects, which an alternate colour doesn't, so its large losses are not what a palette does. They show the whole-frame stream and the vote depend on the global colour. The player boxes (340 × 520 px of 1080p, one random palette per player) are the nearest thing tried, but they also recolour the background inside the box and don't follow materials. They are a stand-in, not a measure of real colours.
+- The vote survives the boxes, yet it was wrong on 8 of 44 sides on a real tournament VOD (alternate colours). So the simulation misses at least part of what real colours do to the vote; don't read the boxes as clearing it. `hud_chars.py` is the fix there, and it is not swept here.
+- The own-vote baseline on new is 0.863, not 0.855: this vote (whole-frame tiles, every third frame) was right on all 76 new replays, where the stored vote isn't.
+- The detector isn't swept: the tiles come from the 0° detections.
+
+**Transcript on the 720p30 copies (`exp_measure_transcript.py`).** ens5grid unchanged, on the 144 old copies at 3 Mbit/s; the new 76 have no copies. 21,889 events.
+
+| Micro F1, 1080p60 → 720p30 | k=2 | k=4 | k=8 |
+|---|---|---|---|
+| category | 0.749 → 0.746 | 0.815 → 0.814 | 0.840 → 0.838 |
+| button/stance | 0.656 → 0.649 | 0.712 → 0.706 | 0.729 → 0.723 |
+| exact move | 0.685 → 0.682 | **0.735 → 0.733** | 0.750 → 0.748 |
+| outcome | 0.705 → 0.703 | 0.770 → 0.770 | 0.795 → 0.795 |
+
+- Exact move F1@4 difference -0.001 [-0.008, +0.007]. Openers recovered@4 0.845 → 0.844. Found by outcome, k=4: whiff 0.608 → 0.603, interrupted 0.646 → 0.657, hit 0.922 → 0.914, block 0.912 → 0.911. Character vote right on 288 of 288 sides.
+- Button/stance is the one slip whose interval leaves zero, at k=2 and k=8: -0.007 [-0.013, -0.002] and -0.006 [-0.011, -0.0003].
+- Features took 1.46 h for all 144 (309,314 sampled frames, 1.63 GB GPU peak), 1.4 GB under `transcript/degraded/`. One combined pass replaces the two passes: the tokens match the dataset's at cosine 1.000 (grid at least 0.9994) on 256 sampled frames of each of two test replays.
+- The HUD timeline matters. Reading a 30 fps parquet's frame numbers as 60 fps ones, as `lab_analyze.py` did before `d6d1f3e`, gives exact move F1@4 0.360 instead of 0.733 on the same features.
+
+**Bitrate ladder (`exp_measure_ladder.py`).** The first 30 old test replays by name (900 openers), libx264 `veryfast`, whole chain re-run from the HUD pass, against the existing copies on the same replays. These replays score higher than the fold as a whole (0.908 against 0.888), so read the differences. Stopped by the 0.02 rule: 480p and the transcript were not run.
+
+| Copy | Detected | Category | Exact move | Chain | Chain against 3 Mbit/s | Light chain | Against 3 Mbit/s |
+|---|---|---|---|---|---|---|---|
+| 720p30, 3 Mbit/s | 0.953 | 0.963 | 0.955 | 0.908 | | 0.899 | |
+| 720p30, 1.5 Mbit/s | 0.954 | 0.948 | 0.948 | 0.901 | -0.007 [-0.014, 0.000] | 0.898 | -0.001 [-0.011, +0.009] |
+| 720p30, 0.75 Mbit/s | 0.951 | 0.895 | 0.896 | 0.840 | **-0.068 [-0.086, -0.052]** | 0.832 | -0.067 [-0.085, -0.049] |
+
+Detection holds; naming breaks. Category at 1.5 Mbit/s already falls -0.015 [-0.023, -0.008]. Characters stayed right on every opener. About 1 h per rung and 2-2.5 GB; everything was deleted afterwards.
+
+**50/50 of the fine-tuned V-JEPA 2 with v2 (`exp_measure_ensemble.py`).** Saved probabilities, 1080p60.
+
+| | v2 | 50/50 | Difference |
+|---|---|---|---|
+| chain, old | 0.887 | 0.890 | +0.003 [-0.002, +0.008] |
+| chain, new | 0.855 | 0.861 | +0.007 [-0.002, +0.015] |
+| move, old | 0.944 | 0.946 | +0.002 [-0.003, +0.007] |
+| move, new | 0.915 | 0.922 | +0.007 [-0.001, +0.016] |
+| category, new | 0.949 | 0.958 | +0.010 [+0.003, +0.017] |
+
+Not adopted: it misses the adoption bar (lower bound above zero and about +0.01 chain) on both subsets, and it would need a ViT pass at inference.
+
+**Timing on 2 threads (`exp_measure_timing.py`).** `recognize.run_chain` light, CPU, pinned to 2 logical CPUs, thread limits as the service sets them, 720p30 3 Mbit/s copies, working files on C:. An i9-10900K at 80-100% load from other jobs, so the wall times are upper bounds, and they say nothing exact about the server. Peak memory was not measured.
+
+| Video | Length | Detections | Openers | Wall | Wall / length | CPU-s | HUD + detector + character read (CPU-s) | Crops + scene + moves + banners (CPU-s) |
+|---|---|---|---|---|---|---|---|---|
+| clip | 90 s | 17 | 14 | 255 s | 2.8× | 369 | 167 | 201 |
+| set | 252 s | 32 | 31 | 2,413 s | 9.6× | 1,414 | 802 | 612 |
+| set | 752 s | 116 | 96 | 2,954 s | 3.9× | 3,740 | 1,816 | 1,923 |
+
+- Fixed cost is negligible (loading the move net about 3 s). CPU is about 2.4 CPU-s per second of video (HUD 1.6-2.8) plus about 16 CPU-s per detection (crops 8-14). Wall time is unreliable under this load: the 252 s run's 9.6× comes from waiting, since it used only 0.6 of a core on average.
+- The HUD pass's wall time moved about threefold between runs, in both directions: the 12-minute set 3,176 s (files on G:) against 1,149 s (C:), the 252 s video 407 s (G:) against 1,289 s (C:). That is other jobs' load, not a disk effect I can separate here, so use the CPU seconds.
+- A 15-minute set is about 4,480 CPU-s at the 12-minute set's density, so at least 2,240 s even on 2 free cores. That fails the old 30-minute limit. At the wall ratios seen (2.8-3.9×) it takes 2,550-3,540 s, and the server's own 2.8-3.7× gives 2,520-3,330 s: inside today's 3,600 s, with little margin on the slow side. A denser set can go over.
+- The server's 3.7× on 90 s against 1.2× on 12.8 minutes isn't explained by fixed cost. A likely cause, not confirmed on the server: FFmpeg refused a `select` of over 100 frame spans ("Cannot allocate memory"; reproduced at exactly 101), so long sets got no crops and skipped the expensive stages. Fixed in `6d3a87e`.
+- One run segfaulted during crop cutting (the 252 s video, once in two runs); the cause is unknown.
+
+**What it decides:**
+
+| Later step | Decision |
+|---|---|
+| 12, colour augmentation | Not urgent. About 1-2 points of chain at stake on the nearest simulation, so a try per material on the crop and player regions may reach the 0.01 bar at best; no global hue on the whole frame. Test on real rare colours first |
+| 2, HUD character read | Supported: the vote is the part most exposed to colour |
+| 6-8, transcript work | Can be judged at 720p30, where it holds; 1080p isn't needed for it |
+| Compression augmentation | Only if low-bitrate VODs matter: the chain holds at 1.5 Mbit/s and breaks by 0.75 |
+| 1 / backbones | V-JEPA 2 fine-tune stays out of the opener chain |
+| Service | 3,600 s is needed for 15-minute sets; the 30-minute limit was not enough |
+
+Open: the server's `lscpu` and its VNNI flags, its `OPENERS_THREADS` and RAM (asked in project.fgc, #42); 480p and anything between 0.75 and 1.5 Mbit/s; timing on a quiet machine; real alternate colours.
