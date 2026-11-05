@@ -78,10 +78,10 @@ STEPS = [
 ]
 
 def to_main():
-    """Title screen -> main menu. The title loops into an attract video after a
-    while; a key press there returns to the title, so retry until the menu shows."""
+    """Title screen -> main menu. No key on a screen it doesn't recognise. The title's attract video should
+    go back to the title by itself, so wait, and stop if neither shows (an Enter here once opened Settings)."""
     t0 = time.time()
-    while time.time() - t0 < 180:
+    while time.time() - t0 < 240:
         if score("main", RETE_TAB) < 14:
             print("  on 'main'")
             return
@@ -89,12 +89,8 @@ def to_main():
             ggst.keys("u", 300)
             time.sleep(6)
             continue
-        if score("server") < 14:  # "communicating with the server" dialog
-            time.sleep(3)
-            continue
-        ggst.keys("enter", 300)  # attract video: skip back to the title
-        time.sleep(3)
-    raise SystemExit("could not reach the main menu")
+        time.sleep(3)  # the "communicating with the server" dialog, the attract video, or an unknown screen
+    raise SystemExit("neither the title nor the main menu showed; no key sent")
 
 
 if __name__ == "__main__" and sys.argv[1:] == ["main"]:
