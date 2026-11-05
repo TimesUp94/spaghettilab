@@ -97,6 +97,8 @@ def visual_span(idx: dict, names: list[str]):
 
     def visual(a: float, b: float):
         lp = [v for t, v in votes if a <= t < b]
+        if not lp and idx["chars_logp"] is None:          # no combo start in the whole video: nothing to vote with
+            return None, None
         s = np.sum(lp, 0) if lp else np.array(idx["chars_logp"])
         return names[int(s[0].argmax())], names[int(s[1].argmax())]
     return visual

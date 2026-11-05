@@ -90,7 +90,7 @@ def frames_at(video, wanted):
         b = f
     ranges.append((a, b))
     keep = set(wanted)
-    sel = "+".join(f"between(n\\,{x}\\,{y})" for x, y in ranges)
+    sel = vc.select_expr(ranges)
     cmd = [vc.FFMPEG, "-hide_banner", "-v", "error", "-threads", "4", "-i", str(video), "-vf",
            f"{pre}select='{sel}',scale={W}:{H}:flags=area", "-fps_mode", "passthrough",
            "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]

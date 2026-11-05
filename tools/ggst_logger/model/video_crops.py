@@ -45,10 +45,21 @@ def video_format(video):
     return out
 
 
+def select_expr(ranges) -> str:
+    """ffmpeg select expression for frame spans [(first, last)], as a balanced tree of sums: ffmpeg refuses an expression
+    nested over 100 deep, so a flat a+b+c... stops at 100 spans ("Cannot allocate memory"), which a 12 minute set passes."""
+    terms = [f"between(n\\,{x}\\,{y})" for x, y in ranges]
+    while len(terms) > 1:
+        terms = [f"({'+'.join(terms[i:i + 2])})" for i in range(0, len(terms), 2)]
+    return terms[0]
+
+
 def read_frames(video, wanted):
     """Yield (frame index, BGR image) for the sorted frame indices in wanted. Frames are always
     1920x1080 at 60 fps (the recordings the models learnt on): any other video is converted on
     decode, and the indices count 60 fps frames."""
+    if not wanted:
+        return
     fps, w, h = video_format(video)
     canon = ""
     if abs(fps - 60) > 0.5:
@@ -63,14 +74,16 @@ def read_frames(video, wanted):
             a = f
         b = f
     ranges.append((a, b))
-    sel = "+".join(f"between(n\\,{x}\\,{y})" for x, y in ranges)
+    sel = select_expr(ranges)
     cmd = [FFMPEG, "-hide_banner", "-v", "error", "-threads", "4", "-i", str(video), "-vf", f"{canon}select='{sel}'",
            "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=FW * FH * 3 * 4)
     n = FW * FH * 3
-    for f in wanted:
+    for k, f in enumerate(wanted):
         buf = p.stdout.read(n)
         if len(buf) < n:
+            if k == 0 and p.wait() != 0:
+                raise RuntimeError(f"ffmpeg gave no frames of {video} (exit {p.returncode})")
             break
         yield f, np.frombuffer(buf, np.uint8).reshape(FH, FW, 3)
     p.stdout.close()
