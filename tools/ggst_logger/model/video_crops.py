@@ -45,6 +45,13 @@ def video_format(video):
     return out
 
 
+def source_frame(f: int, fps: float) -> int:
+    """The video's own frame number of 60 fps frame f, the inverse of the chain's f = round(n * 60 / fps): the frame the
+    pipeline read as n, at any rate and through dropped frames. Timestamps can't do this: a stream hiccup bunches the lost
+    frames (a 59.82 fps set: all of them in 5 s), so its frames sit up to 2 s from n / fps either way."""
+    return int(f * fps / 60 + 0.499)     # at 30 fps: an odd f stays on the frame before it, as fps=60 did
+
+
 def select_expr(ranges) -> str:
     """ffmpeg select expression for frame spans [(first, last)], as a balanced tree of sums: ffmpeg refuses an expression
     nested over 100 deep, so a flat a+b+c... stops at 100 spans ("Cannot allocate memory"), which a 12 minute set passes."""
@@ -54,38 +61,39 @@ def select_expr(ranges) -> str:
     return terms[0]
 
 
-def read_frames(video, wanted):
-    """Yield (frame index, BGR image) for the sorted frame indices in wanted. Frames are always
-    1920x1080 at 60 fps (the recordings the models learnt on): any other video is converted on
-    decode, and the indices count 60 fps frames."""
+def read_frames(video, wanted, native=False):
+    """Yield (frame index, BGR image) for the sorted frame indices in wanted. Frames are 1920x1080 (the recordings the models
+    learnt on), or the video's own size with native. The indices count 60 fps frames: any other rate maps to its own frames
+    (source_frame), a frame repeating when two indices land on it."""
     if not wanted:
         return
     fps, w, h = video_format(video)
-    canon = ""
-    if abs(fps - 60) > 0.5:
-        canon += "fps=60,"
-    if (w, h) != (FW, FH):
-        canon += f"scale={FW}:{FH}:flags=bicubic,"
+    canon = f"scale={FW}:{FH}:flags=bicubic," if (w, h) != (FW, FH) and not native else ""
+    ow, oh = (w, h) if native else (FW, FH)
+    src = [source_frame(f, fps) for f in wanted]
     ranges, a = [], None
-    for f in wanted:
-        if a is None or f > b + 1:
+    for s in src:
+        if a is None or s > b + 1:
             if a is not None:
                 ranges.append((a, b))
-            a = f
-        b = f
+            a = s
+        b = s
     ranges.append((a, b))
     sel = select_expr(ranges)
     cmd = [FFMPEG, "-hide_banner", "-v", "error", "-threads", "4", "-i", str(video), "-vf", f"{canon}select='{sel}'",
            "-fps_mode", "passthrough", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
-    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=FW * FH * 3 * 4)
-    n = FW * FH * 3
-    for k, f in enumerate(wanted):
-        buf = p.stdout.read(n)
-        if len(buf) < n:
-            if k == 0 and p.wait() != 0:
-                raise RuntimeError(f"ffmpeg gave no frames of {video} (exit {p.returncode})")
-            break
-        yield f, np.frombuffer(buf, np.uint8).reshape(FH, FW, 3)
+    n = ow * oh * 3
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=n * 4)
+    last, buf = None, None
+    for k, (f, s) in enumerate(zip(wanted, src)):
+        if s != last:
+            buf = p.stdout.read(n)
+            if len(buf) < n:
+                if k == 0 and p.wait() != 0:
+                    raise RuntimeError(f"ffmpeg gave no frames of {video} (exit {p.returncode})")
+                break
+            last = s
+        yield f, np.frombuffer(buf, np.uint8).reshape(oh, ow, 3)
     p.stdout.close()
     p.wait()
 

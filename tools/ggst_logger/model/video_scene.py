@@ -2,7 +2,7 @@
 of video_crops.py (same frames, same file names), so projectiles, summons and hits away from the
 attacker crop are in view. Mirrored like the crop (the attacker, by the crop's positions, faces
 right). Frames are read by seeking to the keyframe before each window (cv2), so only ~1/5 of the
-video is decoded; a 30 fps video gives frame n // 2 for 60 fps frame n.
+video is decoded; video_crops.source_frame maps 60 fps frame n to the video's own (a 30 fps video: n // 2).
 
     .venv/Scripts/python.exe tools/ggst_logger/model/video_scene.py --crops vcrops_test --jobs 5
     .venv/Scripts/python.exe tools/ggst_logger/model/video_scene.py --crops degraded/vcrops --video-dir degraded
@@ -24,31 +24,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import DATA, low_priority  # noqa: E402
 
 SW, SH = 384, 216
-SEEK = 90                         # read on (no seek) when the next frame is closer than this
 
 
 def frames_at(video, wanted):
     """{60 fps frame index: SWxSH BGR frame} for the sorted indices."""
     import cv2
-    cap = cv2.VideoCapture(str(video))
-    step = 2 if abs(cap.get(cv2.CAP_PROP_FPS) - 30) < 1 else 1
-    out, cache, pos = {}, {}, None
-    for f in wanted:
-        s = f // step
-        if s not in cache:
-            if pos is None or s < pos or s - pos > SEEK:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, s)
-                pos = s
-            while pos < s:
-                cap.grab()
-                pos += 1
-            ok, img = cap.read()
-            pos += 1
-            if not ok:
-                break
-            cache = {s: cv2.resize(img, (SW, SH), interpolation=cv2.INTER_AREA)}
-        out[f] = cache[s]
-    cap.release()
+    from video_crops import read_frames
+    # the decoder's own count, not a seek: OpenCV turns a frame number into a time at the mean rate, off after dropped frames
+    out, prev, small = {}, None, None
+    for f, img in read_frames(video, wanted, native=True):
+        if img.base is not prev:                     # a repeated frame (below 60 fps) shares its buffer
+            prev, small = img.base, cv2.resize(img, (SW, SH), interpolation=cv2.INTER_AREA)
+        out[f] = small
     return out
 
 

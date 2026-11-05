@@ -80,27 +80,28 @@ def frames_at(video, wanted):
     the spans around them: a frame list overflows the command line)."""
     import video_crops as vc
     fps, _, _ = vc.video_format(video)
-    pre = "fps=60," if abs(fps - 60) > 0.5 else ""
-    ranges, a = [], None
+    at = {}                                     # the video's own frame -> the 60 fps indices on it
     for f in wanted:
-        if a is None or f > b + OFFS[1] - OFFS[0]:
+        at.setdefault(vc.source_frame(f, fps), []).append(f)
+    ranges, a = [], None
+    for s in at:
+        if a is None or s > b + OFFS[1] - OFFS[0]:
             if a is not None:
                 ranges.append((a, b))
-            a = f
-        b = f
+            a = s
+        b = s
     ranges.append((a, b))
-    keep = set(wanted)
     sel = vc.select_expr(ranges)
     cmd = [vc.FFMPEG, "-hide_banner", "-v", "error", "-threads", "4", "-i", str(video), "-vf",
-           f"{pre}select='{sel}',scale={W}:{H}:flags=area", "-fps_mode", "passthrough",
+           f"select='{sel}',scale={W}:{H}:flags=area", "-fps_mode", "passthrough",
            "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, bufsize=W * H * 3 * 4)
     n = W * H * 3
-    for f in (f for x, y in ranges for f in range(x, y + 1)):
+    for s in (s for x, y in ranges for s in range(x, y + 1)):
         buf = p.stdout.read(n)
         if len(buf) < n:
             break
-        if f in keep:
+        for f in at.get(s, ()):
             yield f, np.frombuffer(buf, np.uint8).reshape(H, W, 3)
     p.stdout.close()
     p.wait()
