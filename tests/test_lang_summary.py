@@ -201,6 +201,43 @@ def test_check_wrong_move_at_a_real_time(doc):
     assert [e["kind"] for e in r["errors"]] == ["move_time_mismatch"]
 
 
+def _moves_doc(doc, *moves):
+    """The fixture's facts with these moves listed for P1 (the real run's Slayer and Unika moves)."""
+    d = json.loads(json.dumps(doc))
+    ix = d["index"]
+    ix["moves"]["Sol"] = sorted(set(ix["moves"]["Sol"]) | set(moves))
+    ix["times"] = ix["times"] + [dict(t_s=44.0 + i, char="Sol", move=m) for i, m in enumerate(moves)]
+    return d
+
+
+@pytest.mark.parametrize("written", ["214P/K~H", "214P/K", "214P", "214K", "214P~H", "214K~K", "[4]6S", "41236K~4~H", "41236K", "5H H"])
+def test_check_takes_a_facts_move_however_it_is_written(doc, written):
+    """A real run's two summaries were withheld for quoting the facts' own 214P/K~H, which the check cut down to 214P."""
+    d = _moves_doc(doc, "214P/K~H", "214P/K~K", "[4]6S", "41236K~4~H", "5H H")
+    r = ls.check_answer(f"## Coaching notes\n1. Try {written} here.\n", d)
+    assert "move_not_in_facts" not in {e["kind"] for e in r["errors"]}
+
+
+@pytest.mark.parametrize("written", ["214H", "214P~D", "236P/K", "6S"])
+def test_check_still_catches_a_move_not_in_the_facts(doc, written):
+    d = _moves_doc(doc, "214P/K~H", "[4]6S")
+    r = ls.check_answer(f"## Coaching notes\n1. Try {written} here.\n", d)
+    assert {"kind": "move_not_in_facts", "text": written} in r["errors"]
+
+
+def test_move_time_check_takes_the_short_form(doc):
+    d = _moves_doc(doc, "214P/K~H")
+    t = d["index"]["times"][-1]["t_s"]
+    r = ls.check_answer(f"## Coaching notes\n1. The 214P at [{ls.ts(t)}] started it.\n", d)
+    assert "move_time_mismatch" not in {e["kind"] for e in r["errors"]}
+
+
+def test_repair_lists_a_problem_once(doc):
+    p = ls.build_prompt(doc, "en")
+    e = dict(kind="move_not_in_facts", text="214P")
+    assert ls.repair_prompt(p, "draft", [e, e, e])["user"].count("move_not_in_facts: 214P") == 1
+
+
 def collections_counter(it):
     import collections
     return collections.Counter(it)

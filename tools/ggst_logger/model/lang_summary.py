@@ -736,7 +736,7 @@ REPAIR = {
 
 def repair_prompt(prompt: dict, draft: str, errors: list[dict]) -> dict:
     """The same prompt plus a failed draft and what the check found: one fresh call, no conversation state."""
-    problems = "\n".join(f"- {e['kind']}: {e['text']}" for e in errors)
+    problems = "\n".join(dict.fromkeys(f"- {e['kind']}: {e['text']}" for e in errors))
     extra = REPAIR[prompt["lang"]].format(draft=draft, problems=problems)
     return dict(prompt, user=f"{prompt['user']}\n\n---\n{extra}")
 
@@ -815,7 +815,8 @@ def provider(name: str = "none", **kw) -> Provider:
 # ---- grounding check -------------------------------------------------------------------------------
 
 TS_RE = re.compile(r"(?<![\d:])(\d{1,2}:\d{2}(?:\.\d+)?)(?![\d:])")
-NOTATION_RE = re.compile(r"(?<![\w.])((?:j\.|c\.|f\.)?[1-9]{1,7}[PKSHD](?:~[1-9]*[PKSHD])?|[cfj]\.[PKSHD]|(?:j\.)?Throw|Burst|RC)(?![\w])")
+# a whole move: charge ([4]6S), alternatives (214P/K), follow-ups (214P/K~H, 41236K~4~H)
+NOTATION_RE = re.compile(r"(?<![\w.])((?:\[[1-9]\])?(?:j\.|c\.|f\.)?[1-9]{1,7}[PKSHD](?:/[PKSHD])*(?:~[1-9]*[PKSHD]?(?:/[PKSHD])*)*|[cfj]\.[PKSHD]|(?:j\.)?Throw|Burst|RC)(?![\w])")
 FRAME_RE = re.compile(
     r"(?i)(\b\d+\s*(?:frames?|fotogramm[ia]|f)\b|[+-]\d+\s*(?:on block|on hit|in parata|a segno|frames?|f\b)|"
     r"\b(?:startup|recovery|active frames|frame advantage|frame data|(?:s?vantaggio) di frame|frame trap)\b)")
@@ -837,6 +838,26 @@ def _char_aliases() -> dict[str, str]:
     return al
 
 
+def _alternatives(part: str) -> list[str]:
+    """214P/K -> 214P, 214K; anything without a / is itself."""
+    m = re.fullmatch(r"(.*?)([PKSHD](?:/[PKSHD])+)", part)
+    return [m.group(1) + b for b in m.group(2).split("/")] if m else [part]
+
+
+def move_forms(move: str) -> set[str]:
+    """Every way of writing a move in the facts that still names that move: 214P/K~H is also 214P/K, 214P, 214K,
+    214P~H and 214K~H, and "5H H" is also 5H."""
+    head = re.split(r"[ (]", move, maxsplit=1)[0]
+    forms = {move, head}
+    parts = head.split("~")
+    for n in range(1, len(parts) + 1):
+        prefixes = [""]
+        for part in parts[:n]:
+            prefixes = [(p + "~" if p else "") + a for p in prefixes for a in {part, *_alternatives(part)}]
+        forms.update(prefixes)
+    return forms
+
+
 def check_answer(answer: str, doc: dict, tol: float = TOL_S) -> dict:
     """Grounding check of an LLM answer against the facts document it was given.
     errors: unknown timestamps, characters not in the match, moves not in the facts, frame data,
@@ -848,6 +869,7 @@ def check_answer(answer: str, doc: dict, tol: float = TOL_S) -> dict:
     chars = set(doc["characters"].values()) | {g[s] for g in doc.get("character_segments", []) for s in ("P1", "P2")}
     moves = {c: set(v) for c, v in ix["moves"].items()}
     all_moves = set().union(*moves.values()) if moves else set()
+    all_forms = {f for x in all_moves for f in move_forms(x)}
     errors, warnings = [], []
 
     def near(t):
@@ -872,7 +894,7 @@ def check_answer(answer: str, doc: dict, tol: float = TOL_S) -> dict:
     for m in NOTATION_RE.finditer(answer):
         mv = m.group(1)
         named.append((m.start(), mv))
-        if not any(mv == x or x.startswith(mv + "~") or x.startswith(mv + " ") or x.startswith(mv + "(") for x in all_moves):
+        if mv not in all_forms:
             errors.append(dict(kind="move_not_in_facts", text=mv))
     names = {}       # move name (and its short form: "S Volcanic Viper" -> "Volcanic Viper") -> full names
     for ch, nm in catalog()["names"].items():
@@ -923,7 +945,7 @@ def check_answer(answer: str, doc: dict, tol: float = TOL_S) -> dict:
             for x in here:
                 for mv in [x.get("move")] + list(x.get("moves") or []):
                     if mv:
-                        have.add(mv)
+                        have.update(move_forms(mv))
                         nm = move_name(x.get("char", ""), mv)
                         if nm:
                             have.add(nm)
