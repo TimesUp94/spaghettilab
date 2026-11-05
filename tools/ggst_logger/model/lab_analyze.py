@@ -289,6 +289,21 @@ def transcript_ready() -> bool:
                                             f"state_embed_exp_se_{STATE_NAME}.pt"))
 
 
+def hud_rows(X, frames, fps: float, n_frames: int):
+    """The HUD inputs on the transcript's grid: row j is 60 fps frame 2j. The parquet's frame numbers are the video's
+    own, so a 30 fps video's frame f is row f (not f // 2, which squeezed the match into its first half)."""
+    n30 = (n_frames + 1) // 2
+    out = np.zeros((n30, X.shape[1]), np.float32)
+    ok = np.zeros(n30, bool)
+    idx = np.round(np.asarray(frames) * FPS60 / fps).astype(int) // 2
+    keep = (idx >= 0) & (idx < n30)
+    out[idx[keep]] = X[keep]
+    ok[idx[keep]] = True
+    last = np.maximum.accumulate(np.where(ok, np.arange(n30), -1))
+    out = np.where((last >= 0)[:, None], out[np.maximum(last, 0)], 0)
+    return out.astype(np.float16), ok
+
+
 def transcript_features(video: Path, parquet: Path, work: Path, stem: str, workers: int = 1, limit: int = 0):
     """transcript_feats + transcript_feats_grid for one video, into work/feats and work/feats_grid (the modules'
     dataset paths are redirected there; the HUD comes from the given parquet). limit: sampled frames (smoke tests)."""
@@ -301,18 +316,11 @@ def transcript_features(video: Path, parquet: Path, work: Path, stem: str, worke
     pca = dict(np.load(grid_pca()))
     tf.TR, tf.FEATS, tfg.GRID = work, work / "feats", work / "feats_grid"
 
+    fps = video_info(video)[1]
+
     def hud(_stem, n_frames):           # tf.hud, on this video's parquet
         X, fr = vo.parquet_inputs(parquet)
-        n30 = (n_frames + 1) // 2
-        out = np.zeros((n30, X.shape[1]), np.float32)
-        ok = np.zeros(n30, bool)
-        idx = np.asarray(fr) // 2
-        keep = (idx >= 0) & (idx < n30)
-        out[idx[keep]] = X[keep]
-        ok[idx[keep]] = True
-        last = np.maximum.accumulate(np.where(ok, np.arange(n30), -1))
-        out = np.where((last >= 0)[:, None], out[np.maximum(last, 0)], 0)
-        return out.astype(np.float16), ok
+        return hud_rows(X, fr, fps, n_frames)
     tf.hud = hud
     task = [(stem, str(video))]
     r = tf.run(task, str(OUT / PLAYERS_NET), workers=workers, threads=4, limit=limit)

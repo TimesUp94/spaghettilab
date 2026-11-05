@@ -253,3 +253,20 @@ def test_require_match(tmp_path):
     la.require_match(parquet("clip.parquet", 2700, 2))            # 90 s clip, half the frames read
     with pytest.raises(SystemExit):
         la.require_match(parquet("empty.parquet", 1, 0))
+
+
+def test_hud_rows_follow_the_video_fps():
+    """Row j of the transcript's HUD is 60 fps frame 2j, whatever the video's frame rate."""
+    X = np.arange(1, 7, dtype=np.float32)[:, None]
+    # 30 fps: frames 0..5 are rows 0..5, not squeezed into rows 0..2
+    out, ok = la.hud_rows(X, np.arange(6), 30.0, 12)
+    assert ok.all()
+    assert out[:, 0].tolist() == [1, 2, 3, 4, 5, 6]
+    # 60 fps, every 2nd frame sampled: the same rows
+    out, ok = la.hud_rows(X, np.arange(6) * 2, 60.0, 12)
+    assert ok.all()
+    assert out[:, 0].tolist() == [1, 2, 3, 4, 5, 6]
+    # past the readings the last one is held, and flagged
+    out, ok = la.hud_rows(X[:3], np.arange(3), 30.0, 10)
+    assert ok.tolist() == [True, True, True, False, False]
+    assert out[:, 0].tolist() == [1, 2, 3, 3, 3]
