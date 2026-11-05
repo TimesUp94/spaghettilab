@@ -205,7 +205,11 @@ export interface Connection {
 
 async function connect(): Promise<{ browser: Browser; page: Page }> {
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`);
-  const page = browser.contexts()[0].pages().find((p) => p.url().startsWith("http://tauri.localhost"));
+  // The port opens before the window has loaded, which takes a while on a busy machine
+  const window = () => browser.contexts()[0].pages().find((p) => p.url().startsWith("http://tauri.localhost"));
+  const until = Date.now() + 60_000;
+  while (!window() && Date.now() < until) await new Promise((r) => setTimeout(r, 250));
+  const page = window();
   if (!page) throw new Error("The app window was not found over CDP");
   await page.addInitScript(installMocks);
   await page.evaluate(installMocks);
