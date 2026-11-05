@@ -79,6 +79,13 @@ jobs:
           tauriScript: npx tauri
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
 
+      - name: The build has no local models path
+        shell: bash
+        run: |
+          BIN=app/src-tauri/target/${{ matrix.target }}/release/spaghetti-lab
+          [ -f "$BIN.exe" ] && BIN="$BIN.exe"
+          python3 scripts/check_published_binary.py "$BIN"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:

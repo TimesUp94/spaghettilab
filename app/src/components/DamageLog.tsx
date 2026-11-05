@@ -1,5 +1,6 @@
 import { useState, useMemo } from "react";
 import type { DamageEvent } from "../types";
+import { eventHitsLabel, eventHitsTitle } from "../lib/combos";
 
 interface Props {
   events: DamageEvent[];
@@ -35,6 +36,9 @@ export function DamageLog({ events, onSeek }: Props) {
       }
     });
   }, [events, sortKey, filterSide]);
+
+  // A replay analysed before combos existed, or a counter that never showed: no empty column
+  const anyHits = useMemo(() => events.some((e) => e.combo_hits.length > 0), [events]);
 
   return (
     <div>
@@ -90,6 +94,7 @@ export function DamageLog({ events, onSeek }: Props) {
               <th className="text-left py-2 px-3 font-medium">Time</th>
               <th className="text-left py-2 px-3 font-medium">Target</th>
               <th className="text-right py-2 px-3 font-medium">Damage</th>
+              {anyHits && <th className="text-right py-2 px-3 font-medium">Hits</th>}
               <th className="text-right py-2 px-3 font-medium">Pre HP</th>
               <th className="text-right py-2 px-3 font-medium">Post HP</th>
               <th className="py-2 px-3 w-24"></th>
@@ -132,6 +137,15 @@ export function DamageLog({ events, onSeek }: Props) {
                       </span>
                     </div>
                   </td>
+                  {anyHits && (
+                    <td
+                      className={`py-1.5 px-3 text-right whitespace-nowrap ${e.combo_continued ? "text-text-muted" : "text-text-primary"}`}
+                      title={eventHitsTitle(e)}
+                      data-testid={e.combo_hits.length ? "damage-hits" : undefined}
+                    >
+                      {eventHitsLabel(e)}
+                    </td>
+                  )}
                   <td className="py-1.5 px-3 text-right font-mono text-text-secondary">
                     {(e.pre_health_pct * 100).toFixed(0)}%
                   </td>

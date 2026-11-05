@@ -11,7 +11,7 @@ import path from "node:path";
 import { clearTestCredentials, startApp } from "./app-process";
 import { startMockBackend } from "./mock-lab-backend";
 import {
-  APP_DIR, CACHE_DIR, CDP_PORT, CLIP_SECONDS, DATA_DIR, EXE, FILES_DIR, FIXTURE_VIDEO,
+  APP_DIR, CACHE_DIR, CDP_PORT, CLIP_SECONDS, DATA_DIR, EXE, FILES_DIR, FIXTURE_VIDEO, LOCAL_EXE,
   REPO_DIR, RUN_DIR, SOURCE_VIDEO,
 } from "./env";
 
@@ -49,19 +49,27 @@ function prepareFixture() {
 
 function build() {
   if (process.env.E2E_SKIP_BUILD) {
-    if (!fs.existsSync(EXE)) throw new Error(`E2E_SKIP_BUILD is set but ${EXE} does not exist`);
+    for (const exe of [EXE, LOCAL_EXE]) {
+      if (!fs.existsSync(exe)) throw new Error(`E2E_SKIP_BUILD is set but ${exe} does not exist`);
+    }
     return;
   }
   // A debug build with the frontend embedded (a `tauri dev` binary would load the dev server).
-  console.log("[e2e] building the app (tauri build --debug --no-bundle)");
+  // Two of them: the specs that reach the local mode need the feature, everything else runs what we publish.
   const cargoBin = path.join(process.env.USERPROFILE ?? process.env.HOME ?? "", ".cargo", "bin");
-  const r = spawnSync("npx", ["tauri", "build", "--debug", "--no-bundle"], {
-    cwd: APP_DIR,
-    stdio: "inherit",
-    shell: true,
-    env: { ...process.env, PATH: `${cargoBin}${path.delimiter}${process.env.PATH}` },
-  });
-  if (r.status !== 0) throw new Error("tauri build failed");
+  const tauriBuild = (...extra: string[]) => {
+    console.log(`[e2e] building the app (tauri build --debug --no-bundle ${extra.join(" ")})`);
+    const r = spawnSync("npx", ["tauri", "build", "--debug", "--no-bundle", ...extra], {
+      cwd: APP_DIR,
+      stdio: "inherit",
+      shell: true,
+      env: { ...process.env, PATH: `${cargoBin}${path.delimiter}${process.env.PATH}` },
+    });
+    if (r.status !== 0) throw new Error("tauri build failed");
+  };
+  tauriBuild("--features", "local-models");
+  fs.copyFileSync(EXE, LOCAL_EXE);
+  tauriBuild();
 }
 
 async function portInUse(): Promise<boolean> {

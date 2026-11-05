@@ -15,7 +15,8 @@ Environment variables:
 
 | Variable | Effect |
 |---|---|
-| `E2E_SKIP_BUILD=1` | Reuse `src-tauri/target/debug/spaghetti-lab.exe` (it must come from `tauri build --debug`, not `tauri dev`) |
+| `E2E_SKIP_BUILD=1` | Reuse `src-tauri/target/debug/spaghetti-lab.exe` and `spaghetti-lab-local.exe` (they must come from `tauri build --debug`, not `tauri dev`) |
+| `E2E_REAL_MODELS=1` | Enables `16-lab-local-real`: the real models on the GPU, `--timeout 3600000`; writes `e2e/.run/real/` |
 | `E2E_REUSE_DATA=1` | Keep the previous run's data dir (its analysed DB) instead of starting empty; for iterating on one spec |
 | `E2E_SOURCE_VIDEO` | Where the fixture clip is cut from (default `data/sets_v2/05_UF_Jason_vs_EneroNeJR.mp4`) |
 | `E2E_CDP_PORT` | DevTools port (default 9333) |
@@ -26,7 +27,9 @@ Environment variables:
 ## How it works
 
 - **One app instance** for the run (`global-setup.ts`). It builds with `tauri build --debug --no-bundle`
-  (frontend embedded), then starts the exe with:
+  (frontend embedded) twice: first with the `local-models` feature, kept as `spaghetti-lab-local.exe` for the specs that
+  reach the local mode (`connection.restart({ E2E_LOCAL_BUILD: "1" })`), then without it. The one that runs is the second,
+  so the suite tests what we publish. It starts the exe with:
   - `SPAGHETTI_LAB_DATA_DIR=e2e/.run/data`: the analysis DB, sessions and previews go there, never
     to the checkout's `output/analysis.db`;
   - `SPAGHETTI_LAB_NO_GAME=1`: the backend refuses to run the Strive export, so a test can never press
@@ -68,5 +71,6 @@ Environment variables:
 | 11-responsive | Review layout from 1920×1080 to 800×700 (16:9 video in the window, panel beside or below), every page at 640–1440 px |
 | 12-reanalyse | Reanalyse one video and the whole library (@slow) |
 | 13-library | Search in a large library (mocked list), set cards, the update banner |
-| 14-lab | Lab tab from a fixture result, on an instance with `SPAGHETTI_LAB_MODELS` (never runs the models): run form, errors, progress / cancel, openers and timeline markers, moves filters, search presets and filters vs counts computed from the fixture, summary it/en and copy prompt, no-transcript fallback, delete |
-| 15-lab-hosted | Sign-in and hosted analysis with the real Rust code against the mock server: signed-out gate, cached result, login failures and wrong state, quota line, notice once, upload, queue, stages, result, upload deleted, re-analyse, every refusal, 503 status, failed job and give-back, cancel by phase, 401 refresh and retry, refresh refused, sign-out with revoke, resume after a restart, local mode only with the variable |
+| 14-lab | Lab tab from a fixture result, on the `local-models` build (never runs the models): run form, errors, progress / cancel, openers and timeline markers, moves filters, search presets and filters vs counts computed from the fixture, summary it/en and copy prompt, no-transcript fallback, delete |
+| 15-lab-hosted | Sign-in and hosted analysis with the real Rust code against the mock server: signed-out gate, cached result, login failures and wrong state, quota line, notice once, upload, queue, stages, result, upload deleted, re-analyse, every refusal, 503 status, failed job and give-back, cancel by phase, 401 refresh and retry, refresh refused, sign-out with revoke, resume after a restart, the published build has no local mode or command to start one, the local-models build does |
+| 16-lab-local-real | Only with `E2E_REAL_MODELS=1`: the local-models build's real run on the fixture clip, full transcript on the GPU |

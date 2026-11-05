@@ -22,6 +22,8 @@ export interface LabOpener {
   normal?: string | null;
   hit_kind: "counter" | "punish" | "none" | string;
   hit_kind_p?: number;
+  /** The combo's hits, from the game's hit counter (LAB_RESULT.md); absent when none was read or in older results */
+  combo_hits?: number;
 }
 
 export interface LabEvent {
@@ -358,8 +360,10 @@ export const saveModelsDir = (d: string) => (d.trim() ? localStorage.setItem(MOD
 // ── hosted analysis and sign-in (docs/desktop-login.md) ──────────────────────
 
 export interface LabConfig {
-  /** SPAGHETTI_LAB_MODELS is set: the local research mode is offered */
+  /** This build has the local research mode (the `local-models` cargo feature; never the published builds) */
   local_models: boolean;
+  /** The models folder that build finds by itself, null when there is none */
+  models_dir?: string | null;
   web_url: string;
 }
 

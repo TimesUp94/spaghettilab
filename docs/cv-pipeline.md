@@ -415,6 +415,12 @@ split 13 -> 2, phantom 15 -> 1, right hit count 11 -> 20, zero-damage combos 45 
 sets 02/07/09/13: 20 merges (4 checked on frames, all one combo through a super or wallbreak),
 10 drops (8 zero-damage leftovers).
 
+Where it shows (2026-11-05, 16 replays in `output/analysis.db`, `combos.rs`): 41 % of damage events get a hit count, 63 % of
+the damage. The rest are mostly real single hits, which show no counter. 666 of the 668 combos find their event. Known reader gaps, seen on
+the video: 03_UF_SlayThatDude_vs_Salkazko has 36 % of its damage covered because the pale counter on its bright stage is
+missed ("five", "three" and "two" were on screen for events with no count), and a big "10" was read as 11 at 90 s of
+01_WRI_Slycoops_vs_Leftover.
+
 ## HealthAggregator
 
 **Source:** `replanal/aggregator.py`, `replanal/health_clean.py`
@@ -633,6 +639,8 @@ Algorithm:
 | `video_path` | TEXT | Full path to source video |
 | `duration_ms` | REAL | Video duration |
 | `frame_count` | INTEGER | Total frame count |
+
+**combos table** (written by `write_combos`; in `.spag`/`.spagz` since schema v2): one row per combo the hit counter showed: `replay_id`, `attacker_side`, `frame_start`, `frame_end`, `start_ms`, `end_ms`, `max_hits`, `hp_before`, `hp_after`, `damage_pct`.
 
 **frame_data table:**
 | Column | Type |

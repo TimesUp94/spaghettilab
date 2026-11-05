@@ -3,7 +3,7 @@ import { test, expect, type App } from "../fixtures";
 import { DEFAULT_DB, EXPECTED, REPLAY_ID } from "../env";
 
 type Round = { round_index: number; winner: string; round_start_ms: number; round_end_ms: number; is_comeback: boolean };
-type Damage = { timestamp_ms: number; target_side: number | null; damage_pct: number };
+type Damage = { timestamp_ms: number; target_side: number | null; damage_pct: number; combo_hits: number[]; combo_continued: boolean };
 
 const data = (app: App) => ({
   rounds: () => app.invoke<Round[]>("get_rounds", { dbPath: DEFAULT_DB, replayId: REPLAY_ID }),
@@ -128,6 +128,26 @@ test("damage tab filters, sorts and jumps", async ({ app }) => {
   const biggest = [...dmg].sort((a, b) => b.damage_pct - a.damage_pct)[0];
   await page.getByRole("button", { name: "Jump" }).first().click();
   await expect.poll(() => app.videoTime()).toBeCloseTo(biggest.timestamp_ms / 1000, 0);
+});
+
+test("damage tab and timeline show the combos' hit counts", async ({ app }) => {
+  const { page } = app;
+  const dmg = await data(app).damage();
+  const withHits = dmg.filter((d) => d.combo_hits.length > 0);
+  const combos = await app.invoke<{ max_hits: number }[]>("get_combos", { dbPath: DEFAULT_DB, replayId: REPLAY_ID });
+  expect(combos.length, "the fixture's pipeline run reads combos").toBeGreaterThan(0);
+  expect(withHits.length).toBeGreaterThan(0);
+  expect(withHits.length).toBeLessThanOrEqual(dmg.length);
+
+  await page.getByRole("tab", { name: /^Damage/ }).click();
+  await expect(page.locator("th", { hasText: "Hits" })).toBeVisible();
+  const label = (d: Damage) => `${d.combo_continued ? "↳ " : ""}${d.combo_hits.join("+")} hits`;
+  await expect(page.getByTestId("damage-hits")).toHaveText(withHits.map(label));
+
+  // the timeline's big hits, where a count fits
+  const big = dmg.filter((d) => d.damage_pct >= 0.3 && d.combo_hits.length > 0 && !d.combo_continued);
+  const onTimeline = await page.locator("svg [data-combo-hits]").evaluateAll((els) => els.map((e) => e.getAttribute("data-combo-hits")));
+  expect(onTimeline).toEqual(big.map((d) => d.combo_hits.join("+")));
 });
 
 test("timeline: click and drag to seek, hover shows the time", async ({ app }) => {

@@ -199,6 +199,18 @@ fn get_damage_events(db_path: String, replay_id: String) -> Result<Vec<DamageEve
 
 HP values of older (0.875-scale) data are rescaled as in `get_frame_data`.
 
+**Hit counts:** each event also has `combo_hits` and `combo_continued`, from the `combos` table (`combos.rs`, none when the table or its rows are missing). A combo belongs to an event when the event's target is the combo's defender, the event ended at most 3 s before the combo's first counter frame and started at most 0.5 s after its last, and they lost the same stretch of HP (at least half of the smaller drop). `combo_hits` is `[7]`, `[3, 2]` when the counter restarted inside the event, or `[]`. A later event of a combo already shown has `combo_continued: true`.
+
+---
+
+### get_combos
+
+```rust
+fn get_combos(db_path: String, replay_id: String) -> Result<Vec<Combo>, String>
+```
+
+**Purpose:** A replay's combos by time, for the Lab tab's opener rows. Empty when the database has no such table.
+
 ---
 
 ### get_rounds
@@ -410,6 +422,7 @@ async fn export_spag(db_path: String, replay_id: String, output_path: String) ->
 2. Create a temporary database with only this replay's data using `ATTACH DATABASE`:
    - Copy `replays` row (rewrite video_path to `video.mp4`)
    - Copy `frame_data` rows
+   - Copy `combos` rows (`combos::copy_to_dst`, shared with `copy_replay_tables_to_dst`; an empty table when the source has none, and the source is left as it is)
    - Copy `damage_events` rows
    - Copy `notes` rows
 3. Build a ZIP file:
@@ -559,8 +572,8 @@ fn cancel_strive_export(now: bool) -> Result<(), String>
 
 Normal users analyse on the Spaghetti Showdown servers behind a sign-in: those commands (`lab_sign_in`,
 `run_lab_analysis_remote`, `lab_quota`...) and their structured errors are in `docs/desktop-login.md`, in
-`lab_api.rs`, `lab_auth.rs` and `lab_remote.rs`. `run_lab_analysis` below is the local research mode: the UI offers it
-only with `SPAGHETTI_LAB_MODELS` set.
+`lab_api.rs`, `lab_auth.rs` and `lab_remote.rs`. `run_lab_analysis` and `cancel_lab_analysis` below are the local research
+mode: they exist only in our own build, with the `local-models` cargo feature (`lab_local.rs`; `docs/desktop-login.md`, "Local build").
 
 | Command | What it does |
 |---|---|

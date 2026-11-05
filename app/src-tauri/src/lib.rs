@@ -5,9 +5,12 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use tauri::{Emitter, Manager};
 
+mod combos;
 mod lab;
 mod lab_api;
 mod lab_auth;
+#[cfg(feature = "local-models")]
+mod lab_local;
 mod lab_remote;
 
 #[cfg(target_os = "windows")]
@@ -343,6 +346,11 @@ pub struct DamageEvent {
     pub damage_pct: f64,
     pub pre_health_pct: f64,
     pub post_health_pct: f64,
+    /// The hit counts of the combos at this event (see combos.rs): usually one, [3, 2] when the counter
+    /// restarted inside the event, empty when there was no counter or no combos data.
+    pub combo_hits: Vec<i64>,
+    /// A later part of a combo already shown on an earlier event.
+    pub combo_continued: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -2386,11 +2394,12 @@ fn generate_highlights(
                 timestamp_ms: e.timestamp_ms,
                 end_ms: e.timestamp_ms + 2000.0,
                 details: format!(
-                    "{} took {:.0}% damage ({:.0}% -> {:.0}%)",
+                    "{} took {:.0}% damage ({:.0}% -> {:.0}%){}",
                     target,
                     e.damage_pct * 100.0,
                     e.pre_health_pct * 100.0,
-                    e.post_health_pct * 100.0
+                    e.post_health_pct * 100.0,
+                    combo_hits_note(e)
                 ),
                 severity: e.damage_pct,
             });
@@ -2512,9 +2521,8 @@ fn get_frame_data(db_path: String, replay_id: String) -> Result<Vec<FrameDataPoi
     Ok(points)
 }
 
-#[tauri::command]
-fn get_damage_events(db_path: String, replay_id: String) -> Result<Vec<DamageEvent>, String> {
-    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+/// A replay's damage events by time, with their combos' hit counts and HP on the 0..1 scale.
+fn load_damage_events(conn: &Connection, replay_id: &str) -> Result<Vec<DamageEvent>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT event_id, replay_id, timestamp_ms, frame_start, frame_end,
@@ -2526,7 +2534,7 @@ fn get_damage_events(db_path: String, replay_id: String) -> Result<Vec<DamageEve
         .map_err(|e| e.to_string())?;
 
     let mut events: Vec<DamageEvent> = stmt
-        .query_map([&replay_id], |row| {
+        .query_map([replay_id], |row| {
             Ok(DamageEvent {
                 event_id: row.get(0)?,
                 replay_id: row.get(1)?,
@@ -2537,14 +2545,23 @@ fn get_damage_events(db_path: String, replay_id: String) -> Result<Vec<DamageEve
                 damage_pct: row.get(6)?,
                 pre_health_pct: row.get(7)?,
                 post_health_pct: row.get(8)?,
+                combo_hits: Vec::new(),
+                combo_continued: false,
             })
         })
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
         .collect();
-    rescale_events(&mut events, replay_hp_full(&conn, &replay_id));
-
+    // Before rescaling: a combo's HP is on the scale its replay was written with
+    combos::attach_hits(&mut events, &combos::load(conn, replay_id));
+    rescale_events(&mut events, replay_hp_full(conn, replay_id));
     Ok(events)
+}
+
+#[tauri::command]
+fn get_damage_events(db_path: String, replay_id: String) -> Result<Vec<DamageEvent>, String> {
+    let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
+    load_damage_events(&conn, &replay_id)
 }
 
 #[tauri::command]
@@ -2597,34 +2614,18 @@ fn get_match_stats(db_path: String, replay_id: String) -> Result<MatchStats, Str
     let rounds = detect_rounds_for_replay(&conn, &replay_id)?;
 
     // Get damage events
-    let mut stmt = conn
-        .prepare(
-            "SELECT event_id, replay_id, timestamp_ms, frame_start, frame_end,
-                    target_side, damage_pct, pre_health_pct, post_health_pct
-             FROM damage_events WHERE replay_id = ? ORDER BY timestamp_ms",
-        )
-        .map_err(|e| e.to_string())?;
-
-    let mut events: Vec<DamageEvent> = stmt
-        .query_map([&replay_id], |row| {
-            Ok(DamageEvent {
-                event_id: row.get(0)?,
-                replay_id: row.get(1)?,
-                timestamp_ms: row.get(2)?,
-                frame_start: row.get(3)?,
-                frame_end: row.get(4)?,
-                target_side: row.get(5)?,
-                damage_pct: row.get(6)?,
-                pre_health_pct: row.get(7)?,
-                post_health_pct: row.get(8)?,
-            })
-        })
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
-    rescale_events(&mut events, replay_hp_full(&conn, &replay_id));
+    let events = load_damage_events(&conn, &replay_id)?;
 
     Ok(compute_match_stats(&replay, &rounds, &events))
+}
+
+/// ", 7 hits" for a highlight's details; nothing without a count.
+fn combo_hits_note(e: &DamageEvent) -> String {
+    if e.combo_hits.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = e.combo_hits.iter().map(|h| h.to_string()).collect();
+    format!(", {} hits", parts.join("+"))
 }
 
 #[tauri::command]
@@ -2632,32 +2633,7 @@ fn get_highlights(db_path: String, replay_id: String) -> Result<Vec<Highlight>, 
     let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
     let rounds = detect_rounds_for_replay(&conn, &replay_id)?;
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT event_id, replay_id, timestamp_ms, frame_start, frame_end,
-                    target_side, damage_pct, pre_health_pct, post_health_pct
-             FROM damage_events WHERE replay_id = ? ORDER BY timestamp_ms",
-        )
-        .map_err(|e| e.to_string())?;
-
-    let mut events: Vec<DamageEvent> = stmt
-        .query_map([&replay_id], |row| {
-            Ok(DamageEvent {
-                event_id: row.get(0)?,
-                replay_id: row.get(1)?,
-                timestamp_ms: row.get(2)?,
-                frame_start: row.get(3)?,
-                frame_end: row.get(4)?,
-                target_side: row.get(5)?,
-                damage_pct: row.get(6)?,
-                pre_health_pct: row.get(7)?,
-                post_health_pct: row.get(8)?,
-            })
-        })
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
-    rescale_events(&mut events, replay_hp_full(&conn, &replay_id));
+    let events = load_damage_events(&conn, &replay_id)?;
 
     Ok(generate_highlights(&rounds, &events))
 }
@@ -3198,11 +3174,14 @@ fn set_questionnaire_answer(db_path: String, replay_id: String, question_key: St
 // Version history:
 //   0 → 1 : questionnaire_answers keys gained a template-id prefix
 //           ("roundstart.main_options" → "ggst.roundstart.main_options").
+//   1 → 2 : the `combos` table is part of the file (additive; a file from before has no hit counts).
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 fn ensure_schema_version(conn: &Connection) -> Result<(), String> {
     ensure_questionnaire_answers_table(conn)?;
+    // v1 → v2: additive, and created on every open like the table above
+    combos::ensure_table(conn)?;
     let current: u32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
         .map(|n| n as u32)
@@ -3974,6 +3953,8 @@ async fn export_spag(
             [&replay_id],
         ).map_err(|e| e.to_string())?;
 
+        combos::copy_to_dst(&src_conn, &replay_id)?;
+
         // Stamp destination with current schema version
         src_conn.execute_batch(&format!("PRAGMA dst.user_version = {}", SCHEMA_VERSION))
             .map_err(|e| e.to_string())?;
@@ -4223,6 +4204,8 @@ fn copy_replay_tables_to_dst(src_conn: &Connection, replay_id: &str, rewrite_vid
         "INSERT INTO dst.questionnaire_answers SELECT * FROM main.questionnaire_answers WHERE replay_id = ?",
         [replay_id],
     ).map_err(|e| e.to_string())?;
+
+    combos::copy_to_dst(src_conn, replay_id)?;
 
     // Stamp the destination with our current schema version so re-openers
     // know no migrations are needed.
@@ -4610,6 +4593,7 @@ pub fn run() {
             get_replays,
             get_frame_data,
             get_damage_events,
+            combos::get_combos,
             get_rounds,
             get_match_stats,
             get_highlights,
@@ -4625,8 +4609,10 @@ pub fn run() {
             cut_vod_sets,
             export_strive_replays,
             cancel_strive_export,
-            lab::run_lab_analysis,
-            lab::cancel_lab_analysis,
+            #[cfg(feature = "local-models")]
+            lab_local::run_lab_analysis,
+            #[cfg(feature = "local-models")]
+            lab_local::cancel_lab_analysis,
             lab::lab_analysis_running,
             lab::get_lab_result,
             lab::delete_lab_result,
@@ -4670,6 +4656,186 @@ pub fn run() {
                 lab_remote::on_app_exit();
             }
         });
+}
+
+#[cfg(test)]
+mod spag_combos_tests {
+    use super::*;
+
+    /// A source database like the pipeline's: one replay, one damage event, its combo when `with_combos`.
+    fn source_db(dir: &std::path::Path, with_combos: bool) -> (String, String) {
+        let video = dir.join("video.mp4");
+        std::fs::write(&video, b"not really a video").unwrap();
+        let db = dir.join("analysis.db").to_string_lossy().to_string();
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE replays (replay_id TEXT PRIMARY KEY, video_path TEXT, video_url TEXT, duration_ms REAL, frame_count INTEGER);
+             CREATE TABLE frame_data (replay_id TEXT, frame_number INTEGER, timestamp_ms REAL, p1_health_pct REAL, p2_health_pct REAL,
+                 timer_value INTEGER, p1_rounds_won INTEGER, p2_rounds_won INTEGER, p1_tension_pct REAL, p2_tension_pct REAL);
+             CREATE TABLE damage_events (event_id INTEGER PRIMARY KEY AUTOINCREMENT, replay_id TEXT, timestamp_ms REAL, frame_start INTEGER,
+                 frame_end INTEGER, target_side INTEGER, damage_pct REAL, pre_health_pct REAL, post_health_pct REAL);
+             INSERT INTO damage_events (replay_id, timestamp_ms, frame_start, frame_end, target_side, damage_pct, pre_health_pct, post_health_pct)
+                 VALUES ('r', 40400, 1212, 1345, 2, 0.28, 0.452, 0.172);",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO replays VALUES ('r', ?, NULL, 60000, 1800)", [video.to_string_lossy()]).unwrap();
+        ensure_winner_overrides_table(&conn).unwrap();
+        if with_combos {
+            combos::ensure_table(&conn).unwrap();
+            conn.execute_batch(
+                "INSERT INTO combos (replay_id, attacker_side, frame_start, frame_end, start_ms, end_ms, max_hits, hp_before, hp_after, damage_pct)
+                     VALUES ('r', 1, 1256, 1362, 41867, 45400, 9, 0.452, 0.172, 0.28),
+                            ('other', 1, 1, 2, 3, 4, 5, 0.9, 0.8, 0.1);",
+            )
+            .unwrap();
+        }
+        (db, "r".into())
+    }
+
+    fn replay_db_of(file: &str, dir: &std::path::Path) -> String {
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(file).unwrap()).unwrap();
+        let mut entry = archive.by_name("replay.db").unwrap();
+        let out = dir.join(format!("{}.db", std::path::Path::new(file).file_name().unwrap().to_string_lossy()));
+        std::io::copy(&mut entry, &mut std::fs::File::create(&out).unwrap()).unwrap();
+        out.to_string_lossy().to_string()
+    }
+
+    fn hits_in(db: &str) -> Vec<(Vec<i64>, bool)> {
+        get_damage_events(db.into(), "r".into()).unwrap().into_iter().map(|e| (e.combo_hits, e.combo_continued)).collect()
+    }
+
+    fn user_version(db: &str) -> i64 {
+        Connection::open(db).unwrap().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn combos_survive_both_exports_and_a_second_round() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (db, id) = source_db(tmp.path(), true);
+        assert_eq!(hits_in(&db), vec![(vec![9], false)]);
+
+        let spag = tmp.path().join("a.spag").to_string_lossy().to_string();
+        let spagz = tmp.path().join("a.spagz").to_string_lossy().to_string();
+        tauri::async_runtime::block_on(export_spag(db.clone(), id.clone(), spag.clone())).unwrap();
+        tauri::async_runtime::block_on(export_spagz(db.clone(), id.clone(), spagz.clone())).unwrap();
+
+        for file in [&spag, &spagz] {
+            let inside = replay_db_of(file, tmp.path());
+            assert_eq!(user_version(&inside), SCHEMA_VERSION as i64, "{}", file);
+            assert_eq!(hits_in(&inside), vec![(vec![9], false)], "{}", file);
+            let conn = Connection::open(&inside).unwrap();
+            let rows: i64 = conn.query_row("SELECT COUNT(*) FROM combos", [], |r| r.get(0)).unwrap();
+            assert_eq!(rows, 1, "only this replay's combos");
+            // Opening the file changes nothing
+            ensure_schema_version(&conn).unwrap();
+            assert_eq!(hits_in(&inside), vec![(vec![9], false)], "{}", file);
+        }
+
+        // A session's database goes out again
+        let session = replay_db_of(&spagz, tmp.path());
+        let again = tmp.path().join("b.spagz").to_string_lossy().to_string();
+        tauri::async_runtime::block_on(export_spagz(session, id, again.clone())).unwrap();
+        let inside = replay_db_of(&again, tmp.path());
+        assert_eq!(hits_in(&inside), vec![(vec![9], false)]);
+    }
+
+    #[test]
+    fn a_source_without_combos_exports_an_empty_table_and_stays_as_it_was() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (db, id) = source_db(tmp.path(), false);
+        assert_eq!(hits_in(&db), vec![(vec![], false)]);
+        let spag = tmp.path().join("a.spag").to_string_lossy().to_string();
+        let spagz = tmp.path().join("a.spagz").to_string_lossy().to_string();
+        tauri::async_runtime::block_on(export_spag(db.clone(), id.clone(), spag.clone())).unwrap();
+        tauri::async_runtime::block_on(export_spagz(db.clone(), id, spagz.clone())).unwrap();
+        let has_combos: i64 = Connection::open(&db)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'combos'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(has_combos, 0);
+        for file in [&spag, &spagz] {
+            let inside = replay_db_of(file, tmp.path());
+            assert_eq!(hits_in(&inside), vec![(vec![], false)]);
+            let rows: i64 = Connection::open(&inside).unwrap().query_row("SELECT COUNT(*) FROM combos", [], |r| r.get(0)).unwrap();
+            assert_eq!(rows, 0);
+        }
+    }
+
+    /// On the real database, read-only (only ever a copy is exported):
+    /// COMBO_REPORT_DIR=<dir> cargo test --lib real_combo_report -- --ignored --nocapture --test-threads=1
+    /// Prints the coverage per replay and writes <dir>/hits.json, <dir>/real.spagz and <dir>/real.replay.db.
+    #[test]
+    #[ignore]
+    fn real_combo_report() {
+        use rusqlite::OpenFlags;
+        let db = "C:/Projects/replanal/output/analysis.db";
+        let dir = std::path::PathBuf::from(std::env::var("COMBO_REPORT_DIR").expect("COMBO_REPORT_DIR"));
+        let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let ids: Vec<String> = {
+            let mut st = conn.prepare("SELECT DISTINCT replay_id FROM combos ORDER BY replay_id").unwrap();
+            let rows = st.query_map([], |r| r.get(0)).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        let (mut all, mut matched, mut dmg, mut dmg_matched, mut combos_all, mut parts, mut continued) = (0, 0, 0.0, 0.0, 0, 0, 0);
+        let mut dump = serde_json::Map::new();
+        for id in &ids {
+            let events = load_damage_events(&conn, id).unwrap();
+            let combos_here = combos::load(&conn, id);
+            let n = events.iter().filter(|e| !e.combo_hits.is_empty()).count();
+            let d: f64 = events.iter().map(|e| e.damage_pct).sum();
+            let dm: f64 = events.iter().filter(|e| !e.combo_hits.is_empty()).map(|e| e.damage_pct).sum();
+            println!("{:40} events {:3} with count {:3} ({:3.0}%) damage {:3.0}% combos {:3}", id, events.len(), n, 100.0 * n as f64 / events.len() as f64, 100.0 * dm / d, combos_here.len());
+            all += events.len();
+            matched += n;
+            dmg += d;
+            dmg_matched += dm;
+            combos_all += combos_here.len();
+            parts += events.iter().filter(|e| e.combo_hits.len() > 1).count();
+            continued += events.iter().filter(|e| e.combo_continued).count();
+            dump.insert(id.clone(), serde_json::json!(events.iter().map(|e| serde_json::json!([e.event_id, e.combo_hits, e.combo_continued])).collect::<Vec<_>>()));
+        }
+        println!("ALL events {} with count {} ({:.1}%), damage {:.1}%, combos {}, events with two combos {}, later parts {}", all, matched, 100.0 * matched as f64 / all as f64, 100.0 * dmg_matched / dmg, combos_all, parts, continued);
+        std::fs::write(dir.join("hits.json"), serde_json::Value::Object(dump).to_string()).unwrap();
+        // The export writes to its source (`ALTER TABLE` for video_url): a copy, never the real file
+        let copy = dir.join("copy.db");
+        std::fs::copy(db, &copy).unwrap();
+        let spagz = dir.join("real.spagz").to_string_lossy().to_string();
+        tauri::async_runtime::block_on(export_spagz(copy.to_string_lossy().to_string(), "01_WRI_Slycoops_vs_Leftover".into(), spagz.clone())).unwrap();
+        let inside = replay_db_of(&spagz, &dir);
+        std::fs::copy(inside, dir.join("real.replay.db")).unwrap();
+    }
+
+    /// What the web app wrote back (FGCScoreboard, sqliteDb.exportBytes) opens here with the same counts.
+    #[test]
+    #[ignore]
+    fn real_web_file_back() {
+        let dir = std::path::PathBuf::from(std::env::var("COMBO_REPORT_DIR").expect("COMBO_REPORT_DIR"));
+        let back = dir.join("web.replay.db").to_string_lossy().to_string();
+        ensure_schema_version(&Connection::open(&back).unwrap()).unwrap();
+        let id = "01_WRI_Slycoops_vs_Leftover";
+        let hits: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("hits.json")).unwrap()).unwrap();
+        let conn = Connection::open(&back).unwrap();
+        let events = load_damage_events(&conn, id).unwrap();
+        let got = serde_json::json!(events.iter().map(|e| serde_json::json!([e.combo_hits, e.combo_continued])).collect::<Vec<_>>());
+        let want: Vec<serde_json::Value> = hits[id].as_array().unwrap().iter().map(|r| serde_json::json!([r[1], r[2]])).collect();
+        assert_eq!(got, serde_json::json!(want));
+        println!("web file back: {} events, the same counts", events.len());
+    }
+
+    #[test]
+    fn a_v1_file_without_the_table_opens_and_shows_no_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (db, _) = source_db(tmp.path(), false);
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("PRAGMA user_version = 1").unwrap();
+        ensure_schema_version(&conn).unwrap();
+        assert_eq!(user_version(&db), 2);
+        assert_eq!(hits_in(&db), vec![(vec![], false)]);
+        // and a file from a newer app is left alone
+        conn.execute_batch("PRAGMA user_version = 3").unwrap();
+        ensure_schema_version(&conn).unwrap();
+        assert_eq!(user_version(&db), 3);
+    }
 }
 
 #[cfg(test)]

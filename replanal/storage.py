@@ -104,7 +104,8 @@ def write_combos(conn: sqlite3.Connection, replay_id: str, combos: list) -> None
     Kept in its own table on purpose: ``frame_data`` is copied with
     ``SELECT *`` into a fixed column list by the desktop app's .spag export and
     must stay in lockstep with the web app, so new per-frame columns would break
-    export. The desktop app does not read or export this table (yet).
+    export. The desktop app reads it and both exports copy it (app/src-tauri/src/combos.rs,
+    schema v2), so keep its columns in step with COMBOS_DDL there and the web app's sqliteDb.js.
     """
     conn.execute("""
         CREATE TABLE IF NOT EXISTS combos (

@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 export const APP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const REPO_DIR = path.resolve(APP_DIR, "..");
 export const EXE = path.join(APP_DIR, "src-tauri", "target", "debug", "spaghetti-lab.exe");
+/** The same app with the `local-models` feature (only where a spec asks for it: `E2E_LOCAL_BUILD` in its env). */
+export const LOCAL_EXE = path.join(APP_DIR, "src-tauri", "target", "debug", "spaghetti-lab-local.exe");
 
 /** DevTools port of the app's WebView2 (only the e2e instance opens it). */
 export const CDP_PORT = Number(process.env.E2E_CDP_PORT ?? 9333);

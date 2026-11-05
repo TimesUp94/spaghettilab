@@ -40,6 +40,11 @@ unknown fields. A breaking change becomes `spaghetti-lab-result/2`.
 `move_p`, `move_top3` (`[[move, p], ...]`), `normal` (`"H/stand"` etc. for normals, else null),
 `hit_kind` (`"counter"` / `"punish"` / `"none"`, from the game's banner), `hit_kind_p`.
 
+Added by `lab_analyze` (optional, additive; read it as absent in older results): `combo_hits` (int >= 2), the hits of the
+opener's combo as the game's hit counter showed them (`lab_combos.py`). It is the first combo of the same attacker that
+starts from 0.5 s before the opener to 3 s after it, and before that side's next opener. Absent when the counter showed
+nothing, the reader missed it, or the HUD parquet was written before the counter was stored.
+
 ### `transcript.events[]`
 
 | field | type | meaning |

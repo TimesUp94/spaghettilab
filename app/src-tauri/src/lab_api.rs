@@ -108,11 +108,6 @@ pub fn test_mode() -> bool {
         && web_base().map_or(false, |b| is_loopback(&b))
 }
 
-/// Whether the local research mode is offered at all.
-pub fn local_models_enabled(value: Option<&std::ffi::OsStr>) -> bool {
-    value.map_or(false, |v| !v.is_empty())
-}
-
 pub fn client_for(base: &str) -> reqwest::Client {
     // reqwest is built without a default crypto provider (as the updater's); ignore "already installed"
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -367,13 +362,6 @@ mod tests {
     fn lab_defaults_are_production() {
         assert_eq!(check_base(DEFAULT_API_URL, false).unwrap(), "https://backend.spaghettishowdown.it");
         assert_eq!(check_base(DEFAULT_WEB_URL, false).unwrap(), "https://spaghettishowdown.it");
-    }
-
-    #[test]
-    fn lab_local_mode_needs_the_variable() {
-        assert!(!local_models_enabled(None));
-        assert!(!local_models_enabled(Some(std::ffi::OsStr::new(""))));
-        assert!(local_models_enabled(Some(std::ffi::OsStr::new("C:/models"))));
     }
 
     #[test]

@@ -2,6 +2,7 @@
 // shared time axis, with the playhead. Click or drag anywhere on it to seek.
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import type { DamageEvent, Drawing, FrameDataPoint, Match, Note, RoundResult } from "../types";
+import { hitsLabel } from "../lib/combos";
 import { formatClock } from "../lib/matches";
 import { OUTCOME_COLOR, type LabEvent, type LabOpener } from "../lib/lab";
 
@@ -221,10 +222,21 @@ export function ReviewTimeline({
           )}
 
           {/* big hits */}
-          {damageEvents.filter((e) => e.damage_pct >= 0.3 && inRange(e.timestamp_ms)).map((e) => (
-            <line key={`d${e.event_id}`} x1={x(e.timestamp_ms)} x2={x(e.timestamp_ms)} y1={hpTop} y2={hpTop + HP_H}
-              stroke={e.target_side === 1 ? P1 : P2} strokeOpacity={0.35} strokeWidth={2} />
-          ))}
+          {damageEvents.filter((e) => e.damage_pct >= 0.3 && inRange(e.timestamp_ms)).map((e) => {
+            const hits = e.combo_continued ? "" : e.combo_hits.join("+");
+            return (
+              <g key={`d${e.event_id}`}>
+                <title>{`${Math.round(e.damage_pct * 100)}% damage${hits ? `, ${hitsLabel(e.combo_hits)}` : ""}`}</title>
+                <line x1={x(e.timestamp_ms)} x2={x(e.timestamp_ms)} y1={hpTop} y2={hpTop + HP_H}
+                  stroke={e.target_side === 1 ? P1 : P2} strokeOpacity={0.35} strokeWidth={2} />
+                {hits && (
+                  <text x={x(e.timestamp_ms) + 3} y={hpTop + 10} fontSize={9} fill={e.target_side === 1 ? P1 : P2} data-combo-hits={hits} style={{ pointerEvents: "none" }}>
+                    {hits}
+                  </text>
+                )}
+              </g>
+            );
+          })}
 
           {/* notes and drawings: small flags at the top of the health lane */}
           {notes.filter((n) => inRange(n.timestamp_ms)).map((n) => (

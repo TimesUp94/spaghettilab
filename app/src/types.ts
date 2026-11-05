@@ -23,6 +23,23 @@ export interface DamageEvent {
   damage_pct: number;
   pre_health_pct: number;
   post_health_pct: number;
+  /** The game's hit counter for this damage: [7], [3, 2] when it restarted inside the event, [] without one. */
+  combo_hits: number[];
+  /** A later part of a combo already shown on an earlier event. */
+  combo_continued: boolean;
+}
+
+/** A combo the CV pipeline read from the game's hit counter (`combos` table). */
+export interface Combo {
+  attacker_side: number;
+  frame_start: number;
+  frame_end: number;
+  start_ms: number;
+  end_ms: number;
+  max_hits: number;
+  hp_before: number | null;
+  hp_after: number | null;
+  damage_pct: number | null;
 }
 
 export interface RoundResult {

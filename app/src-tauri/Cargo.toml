@@ -7,6 +7,10 @@ edition = "2021"
 name = "spaghetti_lab_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
+[features]
+# Our own build: run the research models on this PC (lab_local.rs). Published builds never set this.
+local-models = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

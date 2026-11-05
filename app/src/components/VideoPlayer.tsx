@@ -1,5 +1,6 @@
 import { useRef, useEffect, useState, useCallback } from "react";
 import type { RoundResult, DamageEvent, Match, Note, Drawing } from "../types";
+import { hitsLabel } from "../lib/combos";
 import type { VideoSourceType } from "../lib/videoSourceDetect";
 import { DrawingOverlay } from "./DrawingOverlay";
 import { DrawingToolbar } from "./DrawingToolbar";
@@ -626,6 +627,7 @@ export function VideoPlayer({
                 key={`dmg-${i}`}
                 className={`absolute top-0 bottom-0 w-0.5 ${e.target_side === 1 ? "bg-p1/40" : "bg-p2/40"}`}
                 style={{ left: `${toBarPct(e.timestamp_ms / 1000)}%` }}
+                title={[`${Math.round(e.damage_pct * 100)}% damage`, hitsLabel(e.combo_hits)].filter(Boolean).join(", ")}
               />
             ))}
           {notes?.map((note, i) => (

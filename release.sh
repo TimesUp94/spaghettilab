@@ -120,6 +120,11 @@ NSIS_EXE="$TAURI_DIR/target/release/bundle/nsis/Spaghetti Lab_${VERSION}_x64-set
 NSIS_SIG="${NSIS_EXE}.sig"
 STANDALONE_EXE="$TAURI_DIR/target/release/spaghetti-lab.exe"
 
+# A published build never has the local models path (a --skip-build could reuse our own build)
+PYTHON_CMD=python3
+command -v "$PYTHON_CMD" >/dev/null 2>&1 && "$PYTHON_CMD" --version >/dev/null 2>&1 || PYTHON_CMD=python
+"$PYTHON_CMD" "$REPO_ROOT/scripts/check_published_binary.py" "$STANDALONE_EXE"
+
 if [[ ! -f "$NSIS_EXE" ]]; then
     echo "Error: NSIS installer not found: $NSIS_EXE" >&2
     exit 1

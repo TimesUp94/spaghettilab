@@ -178,7 +178,9 @@ Video path is resolved and converted to a Tauri asset URL via `convertFileSrc()`
 
 **Source:** `app/src/components/LabPanel.tsx` (`useLab` hook + panel), `app/src/components/LabHosted.tsx` (sign-in panel, account and quota line, hosted form and progress, errors), `app/src/lib/lab.ts` (types, presets, notice text).
 
-Normal users analyse on the server: signed out they get a sign-in panel saying what leaves the PC, signed in the quota line, what the run is expected to spend, the upload notice once, and cancel warnings by phase. Cached results stay readable signed out, and nothing goes on the network before the tab is opened. The local form below shows only with `SPAGHETTI_LAB_MODELS` set. See `docs/desktop-login.md`.
+Normal users analyse on the server: signed out they get a sign-in panel saying what leaves the PC, signed in the quota line, what the run is expected to spend, the upload notice once, and cancel warnings by phase. Cached results stay readable signed out, and nothing goes on the network before the tab is opened. The local form below shows only in our own `local-models` build (`lab_config.local_models`). See `docs/desktop-login.md`, "Local build".
+
+An opener row shows its combo's hits ("7 hits"): the result's `combo_hits` when it has it, otherwise the replay's combos (`get_combos`, `openerHitsFromCombos` in `lib/combos.ts`, for results made before the field).
 
 - **Cancel:** pressing it asks Rust for the job's current state (`lab_remote_cancel_phase`), and the warning comes from that. Afterwards the note compares the quota before and after, because the DELETE doesn't say whether it refunded.
 - **Try again:** collects a paid job whose result or start wasn't confirmed, even with no quota left and no local video.
@@ -282,6 +284,7 @@ Each highlight shows kind, label, timestamp, details, and a seek button.
 
 Scrollable table of all damage events:
 - Timestamp, target player, damage percentage, health before/after
+- Hits column ("7 hits", "3+2 hits" when the counter restarted inside the damage, "↳ 7 hits" on a later part of the same combo), hidden when no event has a count. `ReviewTimeline` shows the number beside its big-hit lines. See `lib/combos.ts`
 - Click-to-seek
 
 ### NotesPanel

@@ -589,16 +589,20 @@ fn open_external(app: &tauri::AppHandle, url: &str) -> Result<(), RemoteError> {
 
 #[derive(Serialize)]
 pub struct LabConfig {
+    /// This build can run the models on this PC (the `local-models` feature; never the published builds).
     pub local_models: bool,
+    /// The models folder that build finds by itself, null when it finds none (or has no local mode)
+    pub models_dir: Option<String>,
     pub web_url: String,
 }
 
 #[tauri::command]
 pub fn lab_config() -> Result<LabConfig, RemoteError> {
-    Ok(LabConfig {
-        local_models: api::local_models_enabled(std::env::var_os("SPAGHETTI_LAB_MODELS").as_deref()),
-        web_url: api::web_base()?,
-    })
+    #[cfg(feature = "local-models")]
+    let models_dir = crate::lab_local::default_models_dir().map(|p| p.display().to_string());
+    #[cfg(not(feature = "local-models"))]
+    let models_dir = None;
+    Ok(LabConfig { local_models: cfg!(feature = "local-models"), models_dir, web_url: api::web_base()? })
 }
 
 #[tauri::command]

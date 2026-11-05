@@ -3,8 +3,8 @@
 // tools/ggst_logger/model/fixtures/lab_result_sample.json) written into the run's data dir, and the
 // "running" flow is a mocked run_lab_analysis that sends the same progress events as the real one.
 // The expected search counts are computed here from the fixture, independently of the app's code.
-// The local mode only exists with SPAGHETTI_LAB_MODELS set, so this spec runs on an instance that has it
-// (the folder is never read: SPAGHETTI_LAB_NO_MODELS refuses first). 15-lab-hosted covers normal users.
+// The local mode only exists in the local-models build, so this spec runs on that one (SPAGHETTI_LAB_NO_MODELS
+// refuses before anything is read). 15-lab-hosted covers normal users and the published build.
 import fs from "node:fs";
 import path from "node:path";
 import { test, expect, type App } from "../fixtures";
@@ -45,7 +45,7 @@ async function expectSeekedTo(app: App, t: number) {
 }
 
 test.beforeAll(async ({ connection }) => {
-  await connection.restart({ SPAGHETTI_LAB_MODELS: path.join(DATA_DIR, "no-models-here") });
+  await connection.restart({ E2E_LOCAL_BUILD: "1", SPAGHETTI_LAB_MODELS: path.join(DATA_DIR, "no-models-here") });
 });
 
 test.afterAll(async ({ connection }) => {
@@ -151,6 +151,17 @@ test("openers: list, timeline markers and click to seek", async ({ app }) => {
   await expect(page.locator("[data-lab-move]")).toHaveCount(0);
   await page.getByRole("button", { name: "moves", exact: true }).click();
   await expect(page.locator("[data-lab-move]")).toHaveCount(doc.transcript.events.length);
+});
+
+test("openers: a row shows its combo's hits when the result has them", async ({ app }) => {
+  const doc = fixture();
+  const sorted = [...doc.openers].sort((a: { time_s: number }, b: { time_s: number }) => a.time_s - b.time_s);
+  sorted[0].combo_hits = 7;
+  writeCache(doc);
+  await openLab(app);
+  const hits = app.page.getByTestId("lab-opener-hits");
+  await expect(hits.first()).toHaveText("7 hits");
+  await expect(app.page.getByRole("button", { name: new RegExp(`${sorted[0].move} opener`) }).first()).toContainText("7 hits");
 });
 
 test("moves: filters, uncertain items, seek", async ({ app }) => {

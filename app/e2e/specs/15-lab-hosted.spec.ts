@@ -757,9 +757,37 @@ test("a second launch opens its file in the running app and ends", async ({ conn
   }
 });
 
-test.describe("with SPAGHETTI_LAB_MODELS", () => {
+test.describe("the published build", () => {
   test.beforeAll(async ({ connection }) => {
     await connection.restart({ SPAGHETTI_LAB_MODELS: path.join(DATA_DIR, "no-models-here") });
+  });
+  test.afterAll(async ({ connection }) => {
+    await connection.restart();
+  });
+
+  test("has no local mode, even with the variable set, and no command to start one", async ({ app }) => {
+    await ensureSignedOut(app);
+    writeCache(null);
+    await openLab(app);
+    await expect(signInPanel(app)).toBeVisible();
+    await expect(app.page.getByRole("group", { name: "Analysis mode" })).toHaveCount(0);
+    await expect(app.page.getByRole("group", { name: "Transcript" })).toHaveCount(0);
+    const config = await app.invoke<{ local_models: boolean; models_dir: string | null }>("lab_config");
+    expect(config.local_models).toBe(false);
+    expect(config.models_dir).toBeNull();
+    for (const cmd of ["run_lab_analysis", "cancel_lab_analysis"]) {
+      const refused = await app.page.evaluate(
+        (c) => (window as any).__TAURI_INTERNALS__.invoke(c, { dbPath: "x", replayId: "y", options: {} }).then(() => "ran", (e: unknown) => String(e)),
+        cmd,
+      );
+      expect(refused).toContain("not found");
+    }
+  });
+});
+
+test.describe("the local-models build", () => {
+  test.beforeAll(async ({ connection }) => {
+    await connection.restart({ E2E_LOCAL_BUILD: "1", SPAGHETTI_LAB_MODELS: path.join(DATA_DIR, "no-models-here") });
   });
   test.afterAll(async ({ connection }) => {
     await connection.restart();

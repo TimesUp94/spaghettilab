@@ -263,7 +263,8 @@ the upload; the server still decides and `quota_exhausted` is still handled.
 - `lab_api.rs`: base URLs, every path, request and response types, and body parsing that tolerates non-JSON.
 - `lab_auth.rs`: loopback listener, PKCE, exchange, refresh, revoke, keyring.
 - `lab_remote.rs`: transcode, upload, start, poll, cleanup.
-- `lab.rs` keeps the local mode, the cache and `parse_lab_result`.
+- `lab.rs` keeps the cache and `parse_lab_result`.
+- `lab_local.rs`: the local mode, compiled only with the `local-models` feature (see "Local build").
 
 Dependencies: `reqwest` (async; 0.13 is already in the lockfile through the updater; JSON, multipart, stream, rustls),
 `keyring` 3 (native Windows and macOS stores, Secret Service on Linux, which needs `libdbus` in the release workflow),
@@ -280,13 +281,13 @@ Dependencies: `reqwest` (async; 0.13 is already in the lockfile through the upda
 | `SPAGHETTI_LAB_NO_PROD` | unset | any non-loopback base URL is refused; set by every test run |
 | `SPAGHETTI_LAB_TEST_BROWSER` | unset | Rust only requests a website link instead of opening a browser (no redirect is followed; the test calls the loopback callback); works only when both base URLs are loopback |
 | `SPAGHETTI_LAB_TEST_POLL_MS` | unset | the job poll's interval, only in that test mode |
-| `SPAGHETTI_LAB_MODELS` | unset | shows the local mode, labelled "local models" |
+| `SPAGHETTI_LAB_MODELS` | unset | the models folder, in the local-models build only; ignored by published builds |
 
 ### Rust commands and TS wrappers (`api.ts`)
 
 | Command | Wrapper | Returns |
 |---|---|---|
-| `lab_config` | `labConfig()` | `{local_models: bool, web_url}` |
+| `lab_config` | `labConfig()` | `{local_models: bool, models_dir: string\|null, web_url}`; `local_models` is true only in the `local-models` build, `models_dir` is the folder it finds by itself |
 | `lab_account` | `labAccount()` | `{signed_in, nickname, avatar, session_only, store_unavailable}`; no tokens, ever |
 | `lab_sign_in` | `labSignIn()` | the account; resolves when the flow ends |
 | `lab_sign_in_reopen` | `labSignInReopen()` | opens the same login page again |
@@ -430,7 +431,7 @@ The refund depends on the job's status when the DELETE arrives, so pressing Canc
   - Before starting: "This will use a free analysis" or "This will use a credit", worded as what's expected. After `start`, the real `analysis_source`.
   - A cached result: "Analyse again" with a confirmation that it spends an analysis, even for the same video.
 - **Exhausted**: reset date and a button opening `{web}/support` in the system browser. No payments in the app. (The site's own link adds `?from=lab` for its source tracking; add it if the server agent wants it counted.)
-- **Local mode** only with `SPAGHETTI_LAB_MODELS` set: selected by default, labelled "local models" next to "server", existing options, no login, no spending. Normal users never see `NOT_INSTALLED`.
+- **Local mode** only in the `local-models` build: selected by default, labelled "local models" next to "server", existing options, no login, no spending. Normal users never see `NOT_INSTALLED`.
 - Hints that only hold locally (the GPU note on a missing transcript, "nothing is sent anywhere", the API key hint) show only with the local mode.
 - **Upload notice** before the first upload, remembered in `localStorage` by text version, so a material change asks again.
 
@@ -470,6 +471,25 @@ An Italian version is needed too, as those pages are in Italian. Things this tex
 - There's no endpoint for "my active job", so a job running on the website or another PC is only found after the upload (service 429). An endpoint would save that upload.
 - `/terms` doesn't state that cancelling a running analysis is not refunded (mismatch 16).
 
+## Local build
+
+Our own build runs the research models on this PC: no sign-in, nothing spent. Builds we publish can't.
+
+```powershell
+cd app
+npm run tauri:local         # dev: npx tauri dev --features local-models (or .\build-local.ps1)
+npm run tauri:local:build   # a standalone exe, target\release\spaghetti-lab.exe (or .\build-local.ps1 -Build)
+```
+
+- **The switch** is the cargo feature `local-models`, default off. It compiles in `lab_local.rs`, the only code that starts
+  `tools/ggst_logger/model/lab_analyze.py`, and registers `run_lab_analysis` and `cancel_lab_analysis`. `lab_config.local_models`
+  tells the frontend, which hides the form otherwise. The form's code stays in the published frontend bundle, unreachable.
+- **No variable is needed** when `G:\Projects\replanal-data\ggst_dataset\model` exists. The order: the Lab panel's folder,
+  `SPAGHETTI_LAB_MODELS`, `GGST_MODEL_DIR`, `GGST_DATA`'s `ggst_dataset\model`, that default. The script and Python come from the checkout (`find_project_root`, `require_python`), so run it from there.
+- **Default mode** is local, with "server" one click away. The AI summary checkbox stays and needs `ANTHROPIC_API_KEY` in the environment.
+- **It doesn't update itself:** the update check is skipped, because an update would replace it with a published build.
+- **Proof for the published builds:** `scripts/check_published_binary.py <exe>` fails when the binary has a string of `lab_local.rs`. It runs in `.gitea/workflows/ci.yml` on a default `cargo build`, in `build-windows.yml`, `.github/workflows/release.yml`, `release.sh` and `release.ps1` after the build. CI also runs `cargo check --features local-models` so our build keeps compiling, and `cargo test --lib published_build`.
+
 ## Tests and the mock backend
 
 Every test run sets `SPAGHETTI_LAB_API_URL` and `SPAGHETTI_LAB_WEB_URL` to the mock, `SPAGHETTI_LAB_NO_PROD=1`,
@@ -506,7 +526,9 @@ answers: `analysis_starting`, `quota_exhausted`, `one_at_a_time`, `queue_full`, 
 - Notice shown once, stages and upload progress, cancel warnings by phase, refund notes, the error rows.
 - Re-analyse confirmation, cached result signed out, resume after a restart, cleanup calls in `/__mock/log`, and local mode shown only with the variable.
 
-`14-lab` restarts the app with `SPAGHETTI_LAB_MODELS` set (`connection.restart(env)`) to reach the local form, and back afterwards.
+`14-lab` restarts on the `local-models` build (`connection.restart({ E2E_LOCAL_BUILD: "1" })`) to reach the local form, and back afterwards.
+`15-lab-hosted` checks that the default build has neither the form nor the commands, with `SPAGHETTI_LAB_MODELS` set.
+`16-lab-local-real` (`E2E_REAL_MODELS=1`) is the local build's real run, see "Local build".
 
 ### Live tests on dev
 

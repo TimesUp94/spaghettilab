@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   Replay,
   FrameDataPoint,
+  Combo,
   DamageEvent,
   RoundResult,
   MatchStats,
@@ -27,6 +28,10 @@ export async function getFrameData(
   replayId: string
 ): Promise<FrameDataPoint[]> {
   return invoke("get_frame_data", { dbPath, replayId });
+}
+
+export async function getCombos(dbPath: string, replayId: string): Promise<Combo[]> {
+  return invoke("get_combos", { dbPath, replayId });
 }
 
 export async function getDamageEvents(

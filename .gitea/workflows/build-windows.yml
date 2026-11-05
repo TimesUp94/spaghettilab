@@ -34,6 +34,8 @@ jobs:
           New-Item -ItemType Directory -Force ..\dist-installer | Out-Null
           Copy-Item "$env:CARGO_TARGET_DIR\release\bundle\nsis\*" ..\dist-installer\
           Get-ChildItem ..\dist-installer
+          & C:\Projects\replanal\.venv\Scripts\python.exe ..\scripts\check_published_binary.py "$env:CARGO_TARGET_DIR\release\spaghetti-lab.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v3
         with:
           name: spaghetti-lab-windows

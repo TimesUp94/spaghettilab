@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { labConfig } from "../api";
 
 export function UpdateBanner() {
   const [updateAvailable, setUpdateAvailable] = useState<{
@@ -16,6 +17,8 @@ export function UpdateBanner() {
     // Check after a short delay so the app loads first
     const timer = setTimeout(async () => {
       try {
+        // Our own local-models build: an update would replace it with a published one, without the local mode
+        if ((await labConfig().catch(() => null))?.local_models) return;
         const update = await check();
         if (!cancelled && update?.available) {
           setUpdateAvailable({

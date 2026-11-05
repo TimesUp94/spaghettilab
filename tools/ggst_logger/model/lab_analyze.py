@@ -34,6 +34,7 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
+import lab_combos  # noqa: E402
 import lang_summary as ls  # noqa: E402
 
 SCHEMA = "spaghetti-lab-result/1"
@@ -450,6 +451,7 @@ def main():
     st = Stages()
     duration, fps = video_info(a.video)
     openers_doc, pq_path = rec.run_chain(a.video, out, a.analysis, a.light, stage=st, check_hud=require_match)
+    lab_combos.add_combo_hits(openers_doc["openers"], pq_path)
     preds = states = None
     if want_transcript(a.transcript):
         st("transcript")

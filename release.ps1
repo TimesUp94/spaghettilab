@@ -114,6 +114,10 @@ if (-not $SkipBuild) {
 $nsisExe = Join-Path $TauriDir "target\release\bundle\nsis\Spaghetti Lab_${Version}_x64-setup.exe"
 $standaloneExe = Join-Path $TauriDir "target\release\spaghetti-lab.exe"
 
+# A published build never has the local models path (a -SkipBuild could reuse our own build)
+python (Join-Path $RepoRoot "scripts\check_published_binary.py") $standaloneExe
+if ($LASTEXITCODE -ne 0) { throw "The build contains the local models path" }
+
 if (-not (Test-Path $nsisExe)) {
     Write-Error "NSIS installer not found: $nsisExe"
     exit 1

@@ -1,7 +1,7 @@
 // Sharing: export .spag / .spagz, open them again (with or without the video), save a session.
 import fs from "node:fs";
 import { test, expect } from "../fixtures";
-import { FIXTURE_VIDEO } from "../env";
+import { FIXTURE_VIDEO, DEFAULT_DB, REPLAY_ID } from "../env";
 
 const SPAG = "shared.spag";
 const SPAGZ = "shared.spagz";
@@ -73,6 +73,12 @@ test.describe.serial("share files", () => {
     await expect(page.getByText("Video file not found")).toBeVisible();
     await expect(page.getByRole("tab", { name: /^Overview/ })).toBeVisible();
     await expect(page.getByRole("button", { name: "Save .spagz" })).toBeVisible();
+
+    // the combos travel in the file: the same hit counts as the library's replay
+    const inLibrary = await app.invoke<{ combo_hits: number[] }[]>("get_damage_events", { dbPath: DEFAULT_DB, replayId: REPLAY_ID });
+    await page.getByRole("tab", { name: /^Damage/ }).click();
+    await expect(page.getByTestId("damage-hits")).toHaveCount(inLibrary.filter((e) => e.combo_hits.length > 0).length);
+    await expect(page.getByTestId("damage-hits")).not.toHaveCount(0);
 
     await app.queueDialogs(FIXTURE_VIDEO);
     await page.getByRole("button", { name: "Locate video" }).first().click();

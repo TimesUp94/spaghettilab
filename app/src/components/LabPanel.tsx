@@ -1,6 +1,6 @@
 // The "Lab" tab of the review screen: analyses the replay on the Spaghetti Showdown servers
-// (run_lab_analysis_remote, behind a sign-in; see docs/desktop-login.md) or, only with SPAGHETTI_LAB_MODELS
-// set, with the local research models (run_lab_analysis). Then shows the result: combo openers, the move
+// (run_lab_analysis_remote, behind a sign-in; see docs/desktop-login.md) or, only in our own `local-models`
+// build, with the local research models (run_lab_analysis). Then shows the result: combo openers, the move
 // transcript, a search over it and the match summary. Cached results stay readable signed out.
 // The same panels exist on the website (FGCScoreboard); both follow tools/ggst_logger/model/LAB_RESULT.md.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import { Badge, Button, EmptyState, Spinner } from "./ui";
 import {
-  cancelLabAnalysis, cancelLabAnalysisRemote, deleteLabResult, getLabResult, labAccount, labAnalysisRunning, labConfig, labOpenWeb,
+  cancelLabAnalysis, cancelLabAnalysisRemote, deleteLabResult, getCombos, getLabResult, labAccount, labAnalysisRunning, labConfig, labOpenWeb,
   labQuota, labRemoteCancelPhase, labRemoteResume, labRemoteRunning, labRemoteTakeError, labServiceStatus, labSignIn, labSignInCancel, labSignInReopen,
   labSignOut, runLabAnalysis, runLabAnalysisRemote,
 } from "../api";
@@ -22,6 +22,8 @@ import {
   type Hit, type LabAccount, type LabConfig, type LabEvent, type LabLang, type LabOpener, type LabOptions, type LabProgress,
   type LabQuota, type LabResult, type LabServiceStatus, type OutcomeWant, type RemoteError, type RemoteRunning, type Side,
 } from "../lib/lab";
+import { hitsLabel, openerHitsFromCombos } from "../lib/combos";
+import type { Combo } from "../types";
 import { AccountBar, HostedForm, HostedProgress, RemoteErrorNote } from "./LabHosted";
 
 // ── state ────────────────────────────────────────────────────────────────────
@@ -41,6 +43,7 @@ export interface LabState {
   // the hosted analysis and its sign-in
   /** null until known */
   config: LabConfig | null;
+  combos: Combo[];
   account: LabAccount | null;
   quota: LabQuota | null;
   service: LabServiceStatus | null;
@@ -118,6 +121,13 @@ export function useLab(replayId: string, dbPath: string | null, videoPath: strin
   useEffect(() => {
     labConfig().then(setConfig).catch(() => setConfig({ local_models: false, web_url: "" }));
   }, []);
+
+  // The replay's combos, for the hit counts of openers in results that don't carry them
+  const [combos, setCombos] = useState<Combo[]>([]);
+  useEffect(() => {
+    setCombos([]);
+    if (dbPath) getCombos(dbPath, replayId).then(setCombos).catch(() => {});
+  }, [dbPath, replayId]);
 
   const refreshRemote = useCallback(async () => {
     const acc = await labAccount().catch(() => null);
@@ -376,6 +386,7 @@ export function useLab(replayId: string, dbPath: string | null, videoPath: strin
   }, [replayId]);
 
   return {
+    combos,
     result, loading, running, stages, lastLine, error, run, cancel, remove,
     config, account, quota, service, hosted, progress, source, cancelling, remoteError, note, signingIn, loginError,
     refreshRemote, runRemote, cancelPhase, cancelRemote, signIn, signInReopen, signInCancel, signOut, openWeb,
@@ -504,9 +515,11 @@ function Capped<T>({ items, render, empty }: { items: T[]; render: (x: T, i: num
 
 // ── sections ─────────────────────────────────────────────────────────────────
 
-function OpenersList({ r, onSeek }: { r: LabResult; onSeek: (ms: number) => void }) {
+function OpenersList({ r, combos, onSeek }: { r: LabResult; combos: Combo[]; onSeek: (ms: number) => void }) {
   const [side, setSide] = useState<Side | "any">("any");
   const list = useMemo(() => [...r.openers].sort((a, b) => a.time_s - b.time_s).filter((o) => side === "any" || o.attacker === side), [r.openers, side]);
+  // A result from before `combo_hits`: the replay's own combos
+  const fromCombos = useMemo(() => openerHitsFromCombos(r.openers, combos), [r.openers, combos]);
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center gap-2">
@@ -525,7 +538,12 @@ function OpenersList({ r, onSeek }: { r: LabResult; onSeek: (ms: number) => void
                 or {o.move_top3.slice(1).map(([m, p]) => `${m} ${Math.round(p * 100)}%`).join(", ")}
               </span>
             )}
-            <span className="ml-auto">
+            <span className="ml-auto flex items-center gap-1.5">
+              {(o.combo_hits ?? fromCombos.get(o) ?? 0) > 1 && (
+                <span className="text-[10px] text-text-secondary whitespace-nowrap" data-testid="lab-opener-hits" title="The combo's hits, from the game's hit counter">
+                  {hitsLabel([(o.combo_hits ?? fromCombos.get(o))!])}
+                </span>
+              )}
               {o.hit_kind === "counter" || o.hit_kind === "punish" ? (
                 <Badge tone="gold" className={isUncertain(o.hit_kind_p) ? "opacity-60 italic" : ""}>
                   {o.hit_kind}
@@ -993,7 +1011,7 @@ export function LabPanel({ lab, onSeek, canRun }: { lab: LabState; onSeek: (ms: 
             value={modelsDir}
             onChange={(e) => setModelsDir(e.target.value)}
             onBlur={() => saveModelsDir(modelsDir)}
-            placeholder="default: SPAGHETTI_LAB_MODELS, else the research data folder"
+            placeholder={lab.config?.models_dir ? `default: ${lab.config.models_dir}` : "no default folder found: SPAGHETTI_LAB_MODELS, GGST_MODEL_DIR or the research data folder"}
             className="h-7 rounded-md bg-surface-2 border border-surface-4 text-xs px-2 text-text-primary"
           />
         </label>
@@ -1125,7 +1143,7 @@ export function LabPanel({ lab, onSeek, canRun }: { lab: LabState; onSeek: (ms: 
         ))}
       </div>
 
-      {section === "openers" && <OpenersList r={r} onSeek={onSeek} />}
+      {section === "openers" && <OpenersList r={r} combos={lab.combos} onSeek={onSeek} />}
       {section === "moves" && <MovesList r={r} onSeek={onSeek} local={localAllowed} />}
       {section === "search" && <SearchPanel r={r} onSeek={onSeek} />}
       {section === "summary" && <SummaryPanel r={r} onSeek={onSeek} local={localAllowed} />}
