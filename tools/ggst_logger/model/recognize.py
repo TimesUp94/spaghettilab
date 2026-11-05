@@ -5,8 +5,9 @@ Chain (final weights, trained on every logged replay):
 1. the app's CV pipeline (scripts/analyze_replay.py) reads the HUD, unless --analysis has it;
 2. video_openers: the frames combos start at, and the attacker's side (from the HUD readings and,
    when the weights were trained with it, the whole frame at 64x36: video_tiny);
-3. video_players + video_crops: both players on each frame around them, the attacker crop, and
-   both characters by vote over every frame seen;
+3. hud_chars: both characters from the game's own HUD (portrait, then the name on the bar), per stretch of the video
+   (a tournament set can change characters between games); video_players + video_crops: both players
+   on each frame around the starts, the attacker crop, and the characters' visual vote as the fallback;
 4. video_moves: the opener's classes ('none' = not an opener after all, dropped), with the whole
    frame around each start too (video_scene) when the weights were trained with it;
 5. banner_reader: counter / punish from the game's banner (in place of video_moves' guess).
@@ -61,15 +62,44 @@ def analysis(video: Path, out: Path, given: Path | None) -> Path:
     return next(rd.glob("frames/*_frames.parquet"))
 
 
-def detect(video: Path, parquet: Path, fps: float):
+def detect(video: Path, parquet: Path, fps: float) -> tuple[list[dict], list[dict]]:
+    """(combo starts, the detections dropped because the attacker's combo counter shows they continue a combo)."""
+    import pyarrow.parquet as pq
     import video_openers as vo
     import video_tiny as vt
     X, frames = vo.parquet_inputs(parquet)
     net = vo.load(OUT / "video_openers_final.pt")
     im = vt.tiny_frames(video, frames) if net.tiny is not None else None
     f60 = np.round(frames * 60.0 / fps).astype(int)
-    return [dict(frame=int(f60[i]), side=s, score=round(sc, 4), row=None)
-            for i, s, sc in vo.peaks(vo.predict(net, X, im), vo.THR)]
+    hud = pq.read_table(parquet, columns=["combo_side", "combo_count"]).to_pydict()
+    shown = {s: vo.counter_readings(hud["combo_side"], hud["combo_count"], s) for s in (1, 2)}
+    kept, dropped = [], []
+    for i, s, sc in vo.peaks(vo.predict(net, X, im), vo.THR):
+        (dropped if vo.continues_combo(shown[s], i) else kept).append(dict(frame=int(f60[i]), side=s, score=round(sc, 4), row=None))
+    return kept, dropped
+
+
+def read_characters(video: Path, parquet: Path) -> tuple[list | None, dict | None]:
+    """The HUD's scores over the video's gameplay and the references' character names; (None, None) without references."""
+    import hud_chars as hc
+    path = hc.refs_path()
+    if not path.exists():
+        print(f"no {path.name}: characters from the visual vote", flush=True)
+        return None, None
+    refs = hc.Refs(path)
+    return refs.chars, hc.read_video(video, refs, parquet)
+
+
+def visual_span(idx: dict, names: list[str]):
+    """The visual vote over a span of the video: visual(start_s, end_s) -> (P1, P2). The detections' own votes (frame numbers at 60 fps);
+    the whole video's when the span has none."""
+    votes = [(d["frame"] / 60.0, np.array(d["chlp"])) for d in idx["dets"] if d.get("chlp") is not None]
+
+    def visual(a: float, b: float):
+        lp = [v for t, v in votes if a <= t < b]
+        s = np.sum(lp, 0) if lp else np.array(idx["chars_logp"])
+        return names[int(s[0].argmax())], names[int(s[1].argmax())]
+    return visual
 
 
 def run_chain(video: Path, out: Path, given: Path | None = None, light: bool = False, stage=None, check_hud=None) -> tuple[dict, Path]:
@@ -78,6 +108,7 @@ def run_chain(video: Path, out: Path, given: Path | None = None, light: bool = F
     right after the HUD pass and may raise, before the models spend any CPU."""
     import torch
     import banner_reader as br
+    import hud_chars as hc
     import video_crops as vc
     import video_moves as vm
     import video_scene as vs
@@ -90,17 +121,34 @@ def run_chain(video: Path, out: Path, given: Path | None = None, light: bool = F
     if check_hud:
         check_hud(pq_path)
     stage("detect")
-    dets = detect(video, pq_path, fps)
-    print(f"{len(dets)} combo starts found ({time.time() - t0:.0f}s)", flush=True)
+    dets, dropped = detect(video, pq_path, fps)
+    print(f"{len(dets)} combo starts found, {len(dropped)} dropped inside a combo ({time.time() - t0:.0f}s)", flush=True)
     stage("moves")
+    ref_chars, hud_scores = read_characters(video, pq_path)
+    hud_segs = hc.resolve(hud_scores, ref_chars) if hud_scores is not None else None
+    print(f"HUD read ({time.time() - t0:.0f}s)", flush=True)
+
+    def known_at(frame: int):
+        """Both characters at a frame, when the HUD is sure of them."""
+        if not hud_segs:
+            return None
+        g = hc.segment_at(hud_segs, frame / 60.0)
+        return (g["P1"]["char"], g["P2"]["char"]) if g["P1"]["char"] and g["P2"]["char"] else None
     cdir = out / "crops"
     if (cdir / "index.json").exists():
         (cdir / "index.json").unlink()
-    vc.process((video.stem, str(video), dets, str(cdir), str(OUT / "video_players_final.pt")))
+    vc.process((video.stem, str(video), dets, str(cdir), str(OUT / "video_players_final.pt"), known_at))
     idx = json.loads((cdir / "index.json").read_text())
     players_ck = torch.load(OUT / "video_players_final.pt", map_location="cpu")
-    lp = np.array(idx["chars_logp"])
-    chars = (players_ck["chars"][int(lp[0].argmax())], players_ck["chars"][int(lp[1].argmax())])
+    visual = visual_span(idx, players_ck["chars"])
+    if hud_scores is not None:
+        segs = hc.resolve(hud_scores, ref_chars, visual)
+    else:
+        v1, v2 = visual(0, float("inf"))
+        segs = [dict(start_s=0.0, end_s=None, frames=0, P1=hc.visual_reading(v1), P2=hc.visual_reading(v2))]
+    pairs = {f"v{k}": (g["P1"]["char"], g["P2"]["char"]) for k, g in enumerate(segs)}
+    print("characters:", "; ".join(f"{g['start_s']:.0f}s {g['P1']['char']} ({g['P1']['source']}) vs {g['P2']['char']} ({g['P2']['source']})"
+                                   for g in segs), flush=True)
     net, ck = vm.load(OUT / "video_moves_final.pt")
     shifts = vm.TTA
     if light:
@@ -109,9 +157,10 @@ def run_chain(video: Path, out: Path, given: Path | None = None, light: bool = F
     if ck.get("scene"):
         (sdir / "done").unlink(missing_ok=True)
         vs.process((video.stem, str(video), str(cdir), str(sdir)))
-    items = [dict(stem="v", file=str(cdir / d["file"]), frame=d["frame"], side=d["side"], score=d["score"], row=None,
-                  scene=str(sdir / d["file"])) for d in idx["dets"]]
-    P = vm.predict(net, items, ck["voc"], {"v": chars}, shifts=shifts)
+    # the crops stay; each detection's moves are restricted to the characters of its stretch of the video
+    items = [dict(stem=f"v{hc.segment_index(segs, d['frame'] / 60.0)}", file=str(cdir / d["file"]), frame=d["frame"], side=d["side"],
+                  score=d["score"], row=None, scene=str(sdir / d["file"])) for d in idx["dets"]]
+    P = vm.predict(net, items, ck["voc"], pairs, shifts=shifts)
     voc = ck["voc"]
     hk = {(d["frame"], d["side"]): p for d, p in zip(dets, br.hit_kind(video, dets))}
     print(f"banners read ({time.time() - t0:.0f}s)", flush=True)
@@ -121,6 +170,7 @@ def run_chain(video: Path, out: Path, given: Path | None = None, light: bool = F
         if cat == "none":
             continue
         top = np.argsort(-P["move"][i])[:3]
+        chars = pairs[it["stem"]]
         res.append(dict(
             time_s=round(it["frame"] / 60.0, 3), video_frame=int(round(it["frame"] * fps / 60.0)),
             attacker=f"P{it['side']}", attacker_char=chars[it["side"] - 1], defender_char=chars[2 - it["side"]],
@@ -132,7 +182,8 @@ def run_chain(video: Path, out: Path, given: Path | None = None, light: bool = F
             hit_kind=br.CLASSES[int(hk[(it["frame"], it["side"])].argmax())],
             hit_kind_p=round(float(hk[(it["frame"], it["side"])].max()), 3),
         ))
-    doc = dict(video=str(video), fps=fps, size=[w, h], characters={"P1": chars[0], "P2": chars[1]},
+    doc = dict(video=str(video), fps=fps, size=[w, h], **hc.characters_fields(segs),
+               dropped_in_combo=[dict(time_s=round(d["frame"] / 60.0, 3), attacker=f"P{d['side']}", detector_score=d["score"]) for d in dropped],
                device=device(), light=light, seconds=round(time.time() - t0, 1), openers=res)
     (out / "openers.json").write_text(json.dumps(doc, indent=1))
     print(f"{len(res)} openers -> {out / 'openers.json'} ({time.time() - t0:.0f}s)", flush=True)

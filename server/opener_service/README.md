@@ -60,7 +60,7 @@ python3 -m venv .venv
 sudo apt install ffmpeg
 # the weights are not in the repo: copy them from the training PC
 mkdir -p /opt/replanal-models
-scp <pc>:G:/Projects/replanal-data/ggst_dataset/model/{video_openers_final.pt,video_players_final.pt,video_moves_final.pt,banner_reader_final.pkl} /opt/replanal-models/
+scp <pc>:G:/Projects/replanal-data/ggst_dataset/model/{video_openers_final.pt,video_players_final.pt,video_moves_final.pt,banner_reader_final.pkl,hud_chars_refs.npz} /opt/replanal-models/
 ```
 
 Only on a GPU server with `OPENERS_TRANSCRIPT=1`, the transcript's weights too (pip `transformers` for V-JEPA 2,

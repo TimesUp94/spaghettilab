@@ -412,6 +412,10 @@ def match_facts(openers_doc: dict, transcript: list[dict] | None = None, hud: Hu
                sources=dict(openers=openers_doc.get("source", "recognize.py"), transcript=transcript is not None,
                             hud=hud is not None),
                result=result, rounds=rounds, players=players, openers=facts_ops)
+    segs = openers_doc.get("character_segments") or []
+    if len(segs) > 1:      # a set whose players change characters between games
+        doc["character_segments"] = [dict(t=ix.time(g["start_s"], kind="characters", P1=g["P1"]["char"], P2=g["P2"]["char"]), P1=g["P1"]["char"],
+                                          P2=g["P2"]["char"]) for g in segs]
     if transcript is not None:
         doc["transcript"] = transcript_facts(transcript, facts_ops, chars, rounds, ix)
         caveats += ["transcript", "habits"]
@@ -569,14 +573,14 @@ CAVEATS = {
 # ---- markdown ----------------------------------------------------------------------------------------
 
 L = {
-    "en": dict(title="Match facts", n_openers="Combo openers", attacks="attacks", throws="throws", result="Result", winner="winner", rounds="Rounds", round="Round", ko="KO",
+    "en": dict(char_changes="Characters by part of the video", title="Match facts", n_openers="Combo openers", attacks="attacks", throws="throws", result="Result", winner="winner", rounds="Rounds", round="Round", ko="KO",
                uncertain="uncertain", openers="Combo openers (timeline)", players="Players", dmg="dmg",
                top="Top opening moves", biggest="Biggest combos", mix="Opener mix", hk="Counter / punish",
                tr="Transcript (every move)", outc="Attack outcomes", used="Most used attacks",
                chby="Counter-hit by", hab="Habits", aoc="After own combo (next move)",
                agc="After getting comboed (next move)", ab="After blocking (next move)", ps="Pressure strings (blocked)",
                cav="Caveats", none="none", hearts_no="hearts disagree", n="n", ex="e.g."),
-    "it": dict(title="Fatti della partita", n_openers="Aperture di combo", attacks="attacchi", throws="prese", result="Risultato", winner="vince", rounds="Round", round="Round", ko="KO",
+    "it": dict(char_changes="Personaggi per parte del video", title="Fatti della partita", n_openers="Aperture di combo", attacks="attacchi", throws="prese", result="Risultato", winner="vince", rounds="Round", round="Round", ko="KO",
                uncertain="incerto", openers="Aperture di combo (cronologia)", players="Giocatori", dmg="danno",
                top="Mosse di apertura principali", biggest="Combo più dannose", mix="Tipi di apertura",
                hk="Counter / punish", tr="Trascrizione (tutte le mosse)", outc="Esito degli attacchi",
@@ -597,6 +601,8 @@ def render_md(doc: dict, lang: str = "en") -> str:
     t = L[lang]
     ch = doc["characters"]
     out = [f"# {t['title']}: P1 {ch['P1']} vs P2 {ch['P2']}" + (f" ({doc['match_id']})" if doc.get("match_id") else "")]
+    if doc.get("character_segments"):
+        out.append(f"\n**{t['char_changes']}:** " + "; ".join(f"[{g['t']}] P1 {g['P1']} vs P2 {g['P2']}" for g in doc["character_segments"]))
     if doc.get("result"):
         r = doc["result"]
         w = f"{r['winner']} ({ch[r['winner']]})" if r["winner"] else "?"
@@ -839,7 +845,7 @@ def check_answer(answer: str, doc: dict, tol: float = TOL_S) -> dict:
     ix = doc["index"]
     times = ix["times"]
     t_all = [x["t_s"] for x in times]
-    chars = set(doc["characters"].values())
+    chars = set(doc["characters"].values()) | {g[s] for g in doc.get("character_segments", []) for s in ("P1", "P2")}
     moves = {c: set(v) for c, v in ix["moves"].items()}
     all_moves = set().union(*moves.values()) if moves else set()
     errors, warnings = [], []

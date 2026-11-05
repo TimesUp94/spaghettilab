@@ -189,8 +189,9 @@ def assemble(video: str, duration_s: float, fps: float, openers_doc: dict, preds
     prompts = {lang: prompt_text(ls.build_prompt(facts, lang)) for lang in LANGS}
     timings = dict(timings or {})
     timings.setdefault("facts", round(time.time() - t0, 2))
+    extra = {k: openers_doc[k] for k in ("characters_source", "characters_confidence", "character_segments", "dropped_in_combo") if k in openers_doc}
     return dict(schema=SCHEMA, video=Path(str(video)).name, duration_s=round(float(duration_s), 2), fps=round(float(fps), 3),
-                characters=dict(openers_doc["characters"]),
+                characters=dict(openers_doc["characters"]), **extra,
                 capabilities=dict(openers=True, transcript=preds is not None, facts=True),
                 openers=openers_doc["openers"],
                 transcript=dict(events=map_transcript(preds, openers_doc["openers"])) if preds is not None else None,
@@ -339,15 +340,27 @@ def transcript_features(video: Path, parquet: Path, work: Path, stem: str, worke
         raise RuntimeError("transcript grid features failed")
 
 
-def transcript_predict(feats: Path, grid: Path, stem: str, dev: str) -> list[dict]:
+def transcript_segments(segs: list[dict] | None) -> list[tuple] | None:
+    """The chain's character_segments -> [(first 60 fps frame, end frame or None, (P1, P2))], for the transcript's masks."""
+    if not segs:
+        return None
+    return [(int(g["start_s"] * FPS60), None if g.get("end_s") is None else int(g["end_s"] * FPS60), (g["P1"]["char"], g["P2"]["char"])) for g in segs]
+
+
+def transcript_predict(feats: Path, grid: Path, stem: str, dev: str, segments: list[tuple] | None = None) -> list[dict]:
     """ens5grid predictions (video_transcript rows, with p_out) of one replay whose features are under
-    feats / grid (<stem>.npz each). Reads only."""
+    feats / grid (<stem>.npz each). segments (transcript_segments): the characters the chain read, in place of
+    the transcript's own visual vote. Reads only."""
     import video_transcript as vt
     vt.DEV, vt.FEATS, vt.GRIDF = dev, feats, grid
     net, ck = vt.load_net(TRANSCRIPT_NAME)
     norm = tuple(np.array(x, np.float32) for x in ck["norm"])
     st = vt.Store([stem], {}, {m: i for i, m in enumerate(ck["vocab"])}, ck["chars"], norm, grid=bool(vt.ck_grid(ck)))
-    preds = vt.decode(vt.candidates(net, st, ck["vocab"], ck["chars"], vt.thr_min(ck["thr"])), ck["thr"], ck["merge"])
+    if segments:
+        cands = vt.candidates_by_segment(net, st, ck["vocab"], ck["chars"], vt.thr_min(ck["thr"]), segments)
+    else:
+        cands = vt.candidates(net, st, ck["vocab"], ck["chars"], vt.thr_min(ck["thr"]))
+    preds = vt.decode(cands, ck["thr"], ck["merge"])
     return sorted(preds, key=lambda p: (p["start_frame"], p["side"]))
 
 
@@ -381,11 +394,12 @@ def state_probs(feats: Path, grid: Path, stem: str, dev: str, bs: int = 1024):
     return np.concatenate(out).transpose(1, 0, 2)
 
 
-def run_transcript(video: Path, parquet: Path, work: Path, dev: str, workers: int = 1, limit: int = 0) -> tuple[list[dict], dict]:
+def run_transcript(video: Path, parquet: Path, work: Path, dev: str, workers: int = 1, limit: int = 0,
+                   segments: list[tuple] | None = None) -> tuple[list[dict], dict]:
     stem = "match"
     work.mkdir(parents=True, exist_ok=True)
     transcript_features(video, parquet, work, stem, workers, limit)
-    preds = transcript_predict(work / "feats", work / "feats_grid", stem, dev)
+    preds = transcript_predict(work / "feats", work / "feats_grid", stem, dev, segments)
     states = smooth_states(state_probs(work / "feats", work / "feats_grid", stem, dev))
     return preds, states
 
@@ -466,7 +480,8 @@ def main():
         if device() != "cuda":
             print("warning: the transcript on the CPU is very slow (V-JEPA 2 ViT-L)", flush=True)
         try:
-            preds, states = run_transcript(a.video, pq_path, out / "transcript", device(), a.workers)
+            preds, states = run_transcript(a.video, pq_path, out / "transcript", device(), a.workers,
+                                           segments=transcript_segments(openers_doc.get("character_segments")))
             print(f"{len(preds)} transcript events", flush=True)
         except Exception as e:          # openers and facts still come out
             print(f"transcript failed: {type(e).__name__}: {e}", flush=True)

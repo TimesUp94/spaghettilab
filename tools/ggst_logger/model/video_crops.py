@@ -88,10 +88,12 @@ def cut(img, x0, y0):
 
 
 _net = None
+_net_chars: list[str] = []
 
 
-def players(smalls, netfile):
-    """Positions [N, 2, 2] (px of 1920x1080) and character log-probs [N, 2, C] for 256x144 BGR frames."""
+def players(smalls, netfile, known=None):
+    """Positions [N, 2, 2] (px of 1920x1080) and character log-probs [N, 2, C] for 256x144 BGR frames.
+    known: both characters' names when something better than the network's look at the window knows them (the HUD)."""
     global _net
     import cv2
     import torch
@@ -100,6 +102,7 @@ def players(smalls, netfile):
         ck = torch.load(netfile, map_location=device())
         _net = vp.make_net(len(ck["chars"])).to(device()).eval()
         _net.load_state_dict(ck["state"])
+        _net_chars[:] = ck["chars"]
     mean = np.array([0.485, 0.456, 0.406], np.float32)
     std = np.array([0.229, 0.224, 0.225], np.float32)
     x = np.stack([(cv2.resize(s[:, :, ::-1], (vp.IN_W, vp.IN_H)).astype(np.float32) / 255 - mean) / std
@@ -109,6 +112,8 @@ def players(smalls, netfile):
             out = _net(torch.from_numpy(np.ascontiguousarray(x)).to(device()))
         gl = torch.log_softmax(out["gchar"].float(), -1)
         chars = gl.sum(0).argmax(-1)[None].expand(len(smalls), 2)     # the window's characters, by vote
+        if known is not None and all(c in _net_chars for c in known):
+            chars = torch.as_tensor([_net_chars.index(c) for c in known], device=chars.device)[None].expand(len(smalls), 2)
         pos, gl = vp.decode(out, chars, window=True)
     return pos.cpu().numpy() * [FW, FH], gl.cpu().numpy()
 
@@ -119,7 +124,9 @@ def smooth(x, k=2):
 
 
 def process(args):
-    stem, video, dets, odir, netfile = args
+    # known_at(frame) -> (P1, P2) names or None: both characters where the HUD knows them, for telling the players apart
+    stem, video, dets, odir, netfile, *rest = args
+    known_at = rest[0] if rest else None
     import cv2
     try:
         import ctypes
@@ -145,11 +152,14 @@ def process(args):
             fs = [max(0, d["frame"] + o) for o in WIN]
             if any(x not in full for x in fs):
                 continue
-            pos, chlp = players([cv2.resize(full[x], FULL, interpolation=cv2.INTER_AREA) for x in fs], netfile)
+            pos, chlp = players([cv2.resize(full[x], FULL, interpolation=cv2.INTER_AREA) for x in fs], netfile,
+                                known_at(d["frame"]) if known_at else None)
+            own = None                                 # this detection's share of the vote (none if a same-frame one had them all)
             for j, x in enumerate(fs):                 # character vote: every frame once
                 if x not in done:
                     done.add(x)
                     chsum = chlp[j] if chsum is None else chsum + chlp[j]
+                    own = chlp[j] if own is None else own + chlp[j]
             p = smooth(pos)                            # [21, 2, 2]
             a = d["side"] - 1
             tiles = []
@@ -160,7 +170,8 @@ def process(args):
                 tiles.append(t[:, ::-1] if xd < xa else t)
             name = f"{d['frame']}_P{d['side']}.jpg"
             cv2.imwrite(str(odir / name), np.hstack(tiles), [cv2.IMWRITE_JPEG_QUALITY, 90])
-            index["dets"].append(dict(d, file=name, pos=np.round(p, 1).tolist()))
+            index["dets"].append(dict(d, file=name, pos=np.round(p, 1).tolist(),
+                                      chlp=np.round(own, 2).tolist() if known_at is not None and own is not None else None))
         lo = max(0, dets[nxt]["frame"] + WIN[0]) if nxt < len(dets) else f + 1
         for x in [x for x in full if x < lo]:
             del full[x]

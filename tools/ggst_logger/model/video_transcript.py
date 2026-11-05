@@ -365,6 +365,21 @@ def candidates(net, store, voc, chars, min_p=0.05):
     return out
 
 
+def candidates_by_segment(net, store, voc, chars, min_p, segments):
+    """candidates() with each stretch of the one replay in store under its own characters. segments: [(first 60 fps frame, end frame or None,
+    (P1 name, P2 name))]; a name the net doesn't know keeps the replay's vote."""
+    base = store.vote.copy()
+    out = []
+    for a, b, names in segments:
+        store.vote = base.copy()
+        for s in (0, 1):
+            if names[s] in chars:
+                store.vote[0, s] = chars.index(names[s])
+        out += [c for c in candidates(net, store, voc, chars, min_p) if c["start_frame"] >= a and (b is None or c["start_frame"] < b)]
+    store.vote = base
+    return out
+
+
 def thr_min(thr):
     return min(thr.values()) if isinstance(thr, dict) else thr
 

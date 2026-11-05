@@ -23,7 +23,11 @@ unknown fields. A breaking change becomes `spaghetti-lab-result/2`.
 | `video` | str | the **file name** (no directory) of the video lab_analyze was given. On the service it is the upload's temporary name (`video.mp4`): show the user's own file name instead |
 | `duration_s` | float | video length in seconds |
 | `fps` | float | the video's frame rate (30 or 60 usually). All times below are seconds of the video; `frame` fields are always on a **60 fps** timeline (`frame / 60 = t`), whatever the video's fps |
-| `characters` | `{"P1": str, "P2": str}` | the opener chain's character vote (names as in `tools/ggst_logger/dataset/moves.json`, e.g. `"Sol"`, `"Asuka"`, `"Elphelt"`) |
+| `characters` | `{"P1": str, "P2": str}` | each side's character (names as in `tools/ggst_logger/dataset/moves.json`, e.g. `"Sol"`, `"Asuka"`, `"Elphelt"`). When a side changes character during the video (a tournament set), the one seen most: see `character_segments` |
+| `characters_source` | `{"P1": str, "P2": str}` | optional (absent in older results). Where the name comes from: `hud_portrait` (the game's portrait in the top corner), `hud_name` (the name on the health bar), or `visual` (the look of the fighters, colour-dependent: the last fallback) |
+| `characters_confidence` | `{"P1": float, "P2": float}` | optional. Share (0..1) of the readable HUD frames that agree; 0.0 for `visual` |
+| `character_segments` | list | optional. The timeline, in order, one entry per stretch of the video with the same two characters: `start_s`, `end_s` (null = to the end), `frames` (HUD frames read), `P1`, `P2`. Each side: `char`, `source`, `confidence`, what each source said (`portrait`, `portrait_share`, `portrait_frames`, `name`, `name_share`, `name_frames`, `visual`) and `conflict` (the portrait and the name are both sure and differ). An opener's `attacker_char` / `defender_char` and the transcript's `char` follow the entry at their time |
+| `dropped_in_combo` | list | optional. Detections left out because the attacker's combo counter went on rising through them (they continue a combo): `time_s`, `attacker`, `detector_score` |
 | `capabilities` | `{"openers": true, "transcript": bool, "facts": true}` | what **this run** produced. `transcript` false means `transcript` and `states` are `null` |
 | `openers` | list | the opener chain's combo openers, exactly as `recognize.py` writes them in `openers.json` (below) |
 | `transcript` | `null` or `{"events": [event...]}` | every move start of both players, sorted by `frame` (below) |
@@ -52,7 +56,7 @@ nothing, the reader missed it, or the HUD parquet was written before the counter
 | `t` | float | seconds into the video of the move's start (= `frame / 60`, 3 decimals) |
 | `frame` | int | start frame on the 60 fps timeline |
 | `side` | `"P1"` / `"P2"` | who does the move |
-| `char` | str | that side's character (the transcript's own character vote; it agreed with the truth on 439 of 440 test sides) |
+| `char` | str | that side's character at that time (`character_segments`, the chain's reading; the transcript's own visual vote only in results without one) |
 | `category` | str | `normal` / `special` / `super` / `throw` / `other` (burst, Roman Cancel, misc). There is no `projectile` here, unlike openers |
 | `move` | str | notation (`"5H"`, `"236S"`, `"Burst"`, `"RC"`, ...). `"(rare)"`: a move the model does not name |
 | `move_p` | float | probability of `move` (< 0.5: show as uncertain) |

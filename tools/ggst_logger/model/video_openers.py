@@ -241,6 +241,39 @@ def peaks(p, thr=0.5, nms=4):
     return sorted(out)
 
 
+# A hit that raises the attacker's own combo counter continues that combo: a new combo's first hit shows no number, its second
+# "two". Read off the pipeline's counter, at 30 readings a second. MID_BACK: how recent the shown number must be; MID_FWD: how soon
+# it must go up (a lingering "two" can be followed by a new combo's "two", "three": so a much shorter wait for it); MID_JUMP: a
+# multi-hit move may add several, more is a misread.
+MID_BACK, MID_FWD, MID_FWD_TWO, MID_JUMP = 12, 15, 6, 3
+
+
+def counter_readings(combo_side, combo_count, side: int) -> np.ndarray:
+    """The counter shown on one side per step, 0 = none, without one-step misreads (a value needs its like within 2 steps)."""
+    n = np.array([c if s == side and c else 0 for s, c in zip(combo_side, combo_count)], dtype=int)
+    out = np.zeros(len(n), dtype=int)
+    for i in np.nonzero(n >= 2)[0]:
+        lo, hi = max(0, i - 2), min(len(n), i + 3)
+        if (n[lo:hi] == n[i]).sum() >= 2:
+            out[i] = n[i]
+    return out
+
+
+def continues_combo(n: np.ndarray, i: int) -> bool:
+    """n: counter_readings of the attacker's side; i: the step of a detected combo start. True when the counter already showed a
+    number just before it and the next different number is that one plus a little: the same combo, not a start."""
+    prev = n[max(0, i - MID_BACK):i]
+    prev = prev[prev >= 2]
+    if not len(prev):
+        return False
+    last = int(prev[-1])
+    fwd = MID_FWD if last >= 3 else MID_FWD_TWO
+    for v in n[i:i + fwd + 1]:
+        if v >= 2 and v != last:
+            return last < v <= last + MID_JUMP
+    return False
+
+
 def labels_for(X, tru):
     y = np.zeros(len(X), np.int64)
     w = np.ones(len(X), np.float32)

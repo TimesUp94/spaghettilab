@@ -7,6 +7,9 @@ video_moves_test.pt runs end to end on them, as in video_moves.py train.
     .venv/Scripts/python.exe tools/ggst_logger/model/chain_eval.py --rebuild --base vcrops_v1   # the chain's own vcrops_test /
         vscene_test for every replay at detections.json (new crossfit detections), reusing vcrops_v1's tiles
 
+    .venv/Scripts/python.exe tools/ggst_logger/model/chain_eval.py --mid-combo   # the chain's cached test probabilities, with and without the rule
+        that drops detections inside a combo (video_openers.continues_combo) and with the HUD's characters -> model/results_mid_combo.json
+
 -> <data>/ggst_dataset/vcrops_exp_<name>/ (or degraded/vcrops_exp_<name>/), model/results_exp_chain_<name>[_degraded].json
 """
 from __future__ import annotations
@@ -104,8 +107,135 @@ def build(args):
     return stem, len(new)
 
 
+DEDUP_FRAMES = 20
+
+
+def rule_flags(stem, frames_sides, root=DATA, fps=60):
+    """For a replay's (60 fps frame, side) detections: does video_openers.continues_combo drop them? Uses its pipeline parquet under root,
+    whose frame numbers are the video's own (fps)."""
+    import pyarrow.parquet as pq
+    import video_openers as vo
+    t = pq.read_table(root / "runs" / stem / "frames" / f"{stem}_frames.parquet", columns=["frame_number", "combo_side", "combo_count"]).to_pydict()
+    fr = np.asarray(t["frame_number"])
+    shown = {s: vo.counter_readings(t["combo_side"], t["combo_count"], s) for s in (1, 2)}
+    return [vo.continues_combo(shown[s], min(int(np.searchsorted(fr, f * fps // 60)), len(fr) - 1)) for f, s in frames_sides]
+
+
+def mid_combo_eval():
+    """The whole chain on the test fold from cached probabilities: no retraining and no crops recut. Baseline; with the rule; with the HUD's characters too
+    (the replays whose visual vote was wrong are predicted again). Also the rule alone on the training folds' crossfit detections and the 720p30 copies."""
+    import pyarrow.parquet as pq
+    import torch
+    import hud_chars as hc
+    import video_moves as vm
+    from common import test_subsets
+    rows = pq.read_table(DATA / "openers.parquet").to_pylist()
+    fold = replay_fold_map()
+    subs = test_subsets(fold)
+    by_key = {f"{r['replay']}/{r['log_row']}_{r['attacker']}": r for r in rows}
+    root = DATA / "vcrops_test"
+    items = vm.items_for(root, by_key, subs["all"])
+    net, ck = vm.load(OUT / "video_moves_test.pt")
+    voc = ck["voc"]
+    z = np.load(OUT / "exp_bb_v2_P_video_moves_test.npz")
+    pos = {str(f): i for i, f in enumerate(z["files"])}
+    order = np.array([pos[it["file"]] if it["file"] in pos else pos[Path(it["file"]).parent.name + "/" + Path(it["file"]).name] for it in items])
+    P = {h: z[h][order] for h in ("category", "normal", "hit_kind", "move")}
+    chars_list = torch.load(OUT / "video_players_test.pt", map_location="cpu")["chars"]
+    vch = vm.video_chars(root, subs["all"], chars_list)
+    # the HUD's characters on the same replays
+    refs = hc.Refs(hc.refs_path(True))
+    hch = dict(vch)
+    for s in subs["all"]:
+        f = DATA / "hud_chars" / "eval" / "1080" / f"{s}.npz"
+        if f.exists():
+            segs = hc.resolve(dict(np.load(f)), refs.chars, lambda a, b, s=s: vch[s])
+            g = max(segs, key=lambda g: g["frames"])
+            hch[s] = (g["P1"]["char"], g["P2"]["char"])
+    changed = sorted(s for s in hch if hch[s] != vch.get(s))
+    print("replays whose characters change:", [(s, vch[s], hch[s]) for s in changed])
+    Phud = {h: v.copy() for h, v in P.items()}
+    if changed:
+        idx = [i for i, it in enumerate(items) if it["stem"] in set(changed)]
+        Pn = vm.predict(net, [items[i] for i in idx], voc, hch)
+        for h in Phud:
+            Phud[h][idx] = Pn[h]
+    # the rule
+    drop = np.zeros(len(items), bool)
+    per = {}
+    for i, it in enumerate(items):
+        per.setdefault(it["stem"], []).append(i)
+    for s, ix in per.items():
+        drop[ix] = rule_flags(s, [(items[i]["frame"], items[i]["side"]) for i in ix])
+    is_false = np.array([it["row"] is None for it in items])
+    zspin = np.array([it["row"] is not None and it["row"]["defender_act"] == "CmnActZSpin" for it in items])
+    cat_none = voc["category"].index("none")
+    kept_head = P["category"].argmax(1) != cat_none
+    res = dict(test_drop=dict(dropped=int(drop.sum()), false_detections=int((drop & is_false).sum()), logged_openers=int((drop & ~is_false).sum()),
+                              of_which_zspin_label=int((drop & zspin).sum()), false_kept_by_none_head_before=int((is_false & kept_head).sum()),
+                              false_kept_removed=int((drop & is_false & kept_head).sum())))
+    res["test_dropped_logged"] = [[items[i]["stem"], items[i]["frame"], items[i]["side"], items[i]["row"]["log_row"], items[i]["row"]["defender_act"], items[i]["row"]["move"]]
+                                  for i in np.nonzero(drop & ~is_false)[0]]
+    keep = np.nonzero(~drop)[0]
+    # a further candidate: of two detections of one side under DEDUP_FRAMES apart, only the stronger
+    dedup = np.zeros(len(items), bool)
+    for s, ix in per.items():
+        for side in (1, 2):
+            mine = sorted((i for i in ix if items[i]["side"] == side), key=lambda i: items[i]["frame"])
+            for a_, b_ in zip(mine, mine[1:]):
+                if items[b_]["frame"] - items[a_]["frame"] <= DEDUP_FRAMES:
+                    dedup[a_ if items[a_]["score"] < items[b_]["score"] else b_] = True
+    res["test_dedup"] = dict(dropped=int(dedup.sum()), false_detections=int((dedup & is_false).sum()), logged_openers=int((dedup & ~is_false).sum()),
+                             false_kept_removed=int((dedup & is_false & kept_head).sum()))
+    keep2 = np.nonzero(~drop & ~dedup)[0]
+    rows_all = {}
+    for name, PP, ch, ii in (("baseline", P, vch, np.arange(len(items))), ("rule", P, vch, keep), ("hud_chars", Phud, hch, np.arange(len(items))),
+                             ("rule+hud_chars", Phud, hch, keep), ("rule+dedup+hud_chars", Phud, hch, keep2)):
+        rows_all[name] = {}
+        for sub, stems in subs.items():
+            st = set(stems)
+            jj = [i for i in ii if items[i]["stem"] in st]
+            r = vm.end_to_end([items[i] for i in jj], {h: v[jj] for h, v in PP.items()}, voc, ch, rows, st)
+            rows_all[name][sub] = {k: r[k] for k in ("openers", "detected", "detected_and_kept", "false_detections", "false_detections_kept", "precision_after_none",
+                                                     "video_char_right", "move_acc", "chain_move_right_of_all_openers")}
+            # the same with the log's mid-combo labels out of the truth: a hit on a spinning defender (CmnActZSpin, not in
+            # build.py's damage states) is logged as an opener, though the game's counter goes on (see README)
+            tr = [x for x in rows if x["defender_act"] != "CmnActZSpin"]
+            it2 = [dict(items[i], row=None) if items[i]["row"] is not None and items[i]["row"]["defender_act"] == "CmnActZSpin" else items[i] for i in jj]
+            r2 = vm.end_to_end(it2, {h: v[jj] for h, v in PP.items()}, voc, ch, tr, st)
+            rows_all[name][sub]["clean_truth"] = {k: r2[k] for k in ("openers", "false_detections_kept", "precision_after_none", "chain_move_right_of_all_openers")}
+    res["chain"] = rows_all
+    # the training folds: the crossfit detections
+    dets = json.loads((OUT / "detections.json").read_text())
+    tally = collections.Counter()
+    for s, dd in dets.items():
+        if s not in fold or fold[s] == TEST_FOLD or not (DATA / "runs" / s / "frames" / f"{s}_frames.parquet").exists():
+            continue
+        fl = rule_flags(s, [(d["frame"], d["side"]) for d in dd])
+        for d, x in zip(dd, fl):
+            r = by_key.get(f"{s}/{d['row']}") if d["row"] else None
+            c = "false" if r is None else ("zspin" if r["defender_act"] == "CmnActZSpin" else "opener")
+            tally[c] += 1
+            tally[c + "_dropped"] += bool(x)
+    res["train_folds"] = dict(tally)
+    # the 720p30 copies (their own parquets, their own detections)
+    ddet = json.loads((DATA / "degraded" / "detections.json").read_text())
+    tally = collections.Counter()
+    for s, dd in ddet.items():
+        fl = rule_flags(s, [(d["frame"], d["side"]) for d in dd], DATA / "degraded", fps=30)
+        for d, x in zip(dd, fl):
+            r = by_key.get(f"{s}/{d['row']}") if d["row"] else None
+            c = "false" if r is None else ("zspin" if r["defender_act"] == "CmnActZSpin" else "opener")
+            tally[c] += 1
+            tally[c + "_dropped"] += bool(x)
+    res["degraded_old"] = dict(tally)
+    save_json(res, OUT / "results_mid_combo.json")
+    print(json.dumps(res, indent=1, default=float))
+
+
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--mid-combo", action="store_true")
     ap.add_argument("--name", help="detector experiment (video_openers_exp_<name>.pt / detections_exp_<name>.json)")
     ap.add_argument("--rebuild", action="store_true",
                     help="cut the chain's vcrops_test / vscene_test for every replay at detections.json (from --base's tiles where the same)")
@@ -116,6 +246,8 @@ def main():
     ap.add_argument("--jobs", type=int, default=3, help="processes cutting new crops (each loads the player net)")
     a = ap.parse_args()
     low_priority()
+    if a.mid_combo:
+        return mid_combo_eval()
     import pyarrow.parquet as pq
     import torch
     import video_moves as vm
