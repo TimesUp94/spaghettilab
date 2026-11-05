@@ -36,6 +36,7 @@ MATCH_OVER_S = 60
 # Longest real replay: 26090 frames (7.3 min, 4 rounds with time-outs) of 596 recorded
 # (median 8314, p99 14188). Nothing ranked runs past 10 min.
 MAX_RECORD_S = 600
+RECORD = True      # False: play and log only, no video (drive/box_batch.py)
 
 
 def to_saved_list():
@@ -109,13 +110,13 @@ def record_one(index, list_ref="saved_list", menu_ref="replay_menu", menu_box=VI
         time.sleep(0.2)
     csv = newest_csv()
     video = os.path.join(REC, os.path.basename(csv)[:-4] + ".mp4")
-    ff = subprocess.Popen(
+    ff = None if not RECORD else subprocess.Popen(
         [ggst.FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-filter_complex",
          "gfxcapture=window_exe=GGST-Win64-Shipping:capture_cursor=0:max_framerate=60,"
          "hwdownload,format=bgra,scale=1920:1080,fps=60,format=nv12",
          "-t", str(MAX_RECORD_S + 60), "-c:v", "h264_mf", "-hw_encoding", "1", "-b:v", "30M", video],
         stdin=subprocess.PIPE)
-    print(f"[{index}] recording {os.path.basename(video)}")
+    print(f"[{index}] {'recording' if RECORD else 'playing'} {os.path.basename(video)}", flush=True)
 
     # The game frame keeps counting under the end-of-replay menu, so the log never
     # stops by itself: watch the screen for that menu instead, and give up on it a
@@ -134,9 +135,10 @@ def record_one(index, list_ref="saved_list", menu_ref="replay_menu", menu_box=VI
             print(f"[{index}]   screen capture failing")
             said = True
         if s >= 255 and not ggst.find_window():          # the game closed: drop this one
-            ff.kill()
+            if ff:
+                ff.kill()
             log.f.close()
-            for p in (video, csv):
+            for p in (video, csv) if RECORD else (csv,):
                 try:
                     os.remove(p)
                 except OSError:
@@ -151,14 +153,15 @@ def record_one(index, list_ref="saved_list", menu_ref="replay_menu", menu_box=VI
             stop = "max duration"
             break
         time.sleep(2)
-    ff.communicate(b"q", timeout=30)
+    if ff:
+        ff.communicate(b"q", timeout=30)
     log.f.close()
     if stop != "menu":
         print(f"[{index}] stopped: {stop}, end menu not seen (last diff {s:.1f})")
     rows = sum(1 for _ in open(csv)) - 1
     print(f"[{index}] done: {rows} frames")
     with open(MANIFEST, "a") as f:
-        f.write(json.dumps({"index": index, "csv": csv, "video": video, "frames": rows, "stop": stop,
+        f.write(json.dumps({"index": index, "csv": csv, "video": video if RECORD else None, "frames": rows, "stop": stop,
                             "recorded_at": time.strftime("%Y-%m-%d %H:%M:%S"), **(extra or {})}) + "\n")
 
 

@@ -9,6 +9,14 @@
 // +0x2C0 = the owner, a player or another object, +0x2C8 = the opponent).
 // +0xD00 of a player = the object that last hit (or was blocked by) it: the attacking
 // player for a direct hit, the pool object for projectiles, summons, spells.
+//
+// Box logging (off unless GGST_LOG_BOXES=1): how to read and transform the boxes is ported from
+// AltimorTASDK/strivehitboxes (MIT, Copyright (c) 2021 Altimor); see BoxRecord below. Its offsets
+// were for a 2021 build, so the 5.03 ones were re-checked against the running game.
+// Entity (players and pool objects): +0x78 box array (type int, x, y, w, h floats), +0x114 19 box
+// counts by type (hurt, hit, ..., [18] = follow-up), +0x1CC frames in the action, +0x288 hitstop,
+// +0x320 attached entity, +0x3BC angle, +0x3CC/+0x3D0 scale, +0x398/+0x39C/+0x3A0 state flags,
+// +0x7A8 throw range. Object manager: +0x910 active entity count, +0xC80 active entity list.
 using System.Globalization;
 using Stopwatch = System.Diagnostics.Stopwatch;
 using System.Runtime.CompilerServices;
@@ -43,8 +51,30 @@ public struct RedGameStateBattle
 public static class Main
 {
     private const int ModeReplay = 0x17, ModeTraining = 0x8;
-    private static readonly string LogDir = Environment.GetEnvironmentVariable("GGST_INPUT_LOG_DIR")
-                                            ?? @"G:\Projects\replanal-data\ggst_logs";
+    private static readonly string LogDir = Setting("GGST_INPUT_LOG_DIR") ?? @"G:\Projects\replanal-data\ggst_logs";
+
+    // Environment variables first. A game started through Steam inherits Steam's environment,
+    // not the caller's, so %LOCALAPPDATA%\ggst_logger.env (NAME=value lines) can set them too.
+    private static Dictionary<string, string>? _envFile;
+    private static string? Setting(string name)
+    {
+        var v = Environment.GetEnvironmentVariable(name);
+        if (v is not null) return v;
+        if (_envFile is null)
+        {
+            _envFile = new Dictionary<string, string>();
+            try
+            {
+                var f = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ggst_logger.env");
+                if (File.Exists(f))
+                    foreach (var line in File.ReadAllLines(f))
+                        if (line.IndexOf('=') is > 0 and var eq)
+                            _envFile[line[..eq].Trim()] = line[(eq + 1)..].Trim();
+            }
+            catch (Exception) { }
+        }
+        return _envFile.TryGetValue(name, out var w) ? w : null;
+    }
 
     unsafe delegate void UpdateBattleFunc(RedGameStateBattle* @this, float dt);
     unsafe delegate void UpdateBattleInputFunc(byte* analyzer, ushort recFlag);
@@ -86,11 +116,12 @@ public static class Main
         _out = new StreamWriter(path) { AutoFlush = true };
         _out.WriteLine("qpc,qpc_freq,call,dt,round,game_frame,p1_rec,p2_rec,"
                        + "p1_act,p1_face,p1_x,p1_y,p1_hp,p2_act,p2_face,p2_x,p2_y,p2_hp,p1_sprite,p2_sprite,"
-                       + "objs,p1_hitby,p2_hitby" + (LogRefs ? ",p1_refs,p2_refs" : ""));
+                       + "objs,p1_hitby,p2_hitby" + (LogRefs ? ",p1_refs,p2_refs" : "") + (BoxesOn ? ",p1_boxes,p2_boxes,obj_boxes" : ""));
         _trace = new StreamWriter(Path.Combine(LogDir, $"calls_{DateTime.Now:yyyyMMdd_HHmmss}.csv")) { AutoFlush = true };
         _trace.WriteLine("game_frame,call,analyzer_off,rec_flag,ret");
         _traceRows = 0;
         _rows = 0;
+        _lastBoxes.Clear();
         Debug.Log(LogLevel.Default, $"[InputLogger] logging to {path}");
     }
 
@@ -116,7 +147,7 @@ public static class Main
     private const int Pool = 100, ObjSize = 0x6300, PlayerScan = 0x20000, HitByOff = 0xD00;
     // GGST_LOG_REFS=1 (set before starting the game) adds the research columns: every
     // field of the players and pool objects that points at one of the 102 objects.
-    private static readonly bool LogRefs = Environment.GetEnvironmentVariable("GGST_LOG_REFS") == "1";
+    private static readonly bool LogRefs = Setting("GGST_LOG_REFS") == "1";
     private static readonly Dictionary<long, string> _refName = new();
     private static long _refLo, _refHi;
 
@@ -197,6 +228,137 @@ public static class Main
                 $"{i}/{Root(o)}/{act}/{*(int*)(o + 0x3B0)}/{*(int*)(o + 0x3B4)}/{parent}"));
             if (LogRefs) sb.Append('/').Append(Refs(o, ObjSize));
         }
+        return sb.ToString();
+    }
+
+    // ---- Boxes (GGST_LOG_BOXES=1) ----
+    private static readonly bool LogBoxes = Setting("GGST_LOG_BOXES") == "1";
+    private static bool BoxesOn => LogBoxes && _boxFuncsFound;
+    private static bool _boxFuncsFound;
+    private static unsafe delegate* unmanaged<byte*, byte, int> _isActive;       // hits can connect now
+    private static unsafe delegate* unmanaged<byte*, byte> _pushboxActive;
+    private static unsafe delegate* unmanaged<byte*, int*, int*, int*, int*, void> _getPushbox;  // world units
+    private const int MaxBoxes = 128, BoxBytes = 20, BoxTypes = 19, MaxAttached = 4;
+    private static readonly Dictionary<string, string> _lastBoxes = new();
+
+    // The array holds every box of the current sprite, also while the hit is not active:
+    // flag 1 says whether it can connect. Local box units x scale = game units; sprites are
+    // authored facing left with y down, so forward = -x * scale and up = -y * scale.
+    private static unsafe string BoxList(byte* e, double sx, double sy, int angle)
+    {
+        long arr = *(long*)(e + 0x78);
+        int total = 0;
+        for (int i = 0; i < BoxTypes; i++)
+        {
+            int c = *(int*)(e + 0x114 + i * 4);
+            if (c < 0 || c > MaxBoxes) return "";
+            total += c;
+        }
+        if (total == 0 || total > MaxBoxes || !Readable((IntPtr)arr, total * BoxBytes)) return "";
+        double rad = angle * Math.PI / 180000.0, cos = Math.Cos(rad), sin = Math.Sin(rad);
+        var sb = new System.Text.StringBuilder();
+        for (int i = 0; i < total; i++)
+        {
+            var b = (byte*)arr + i * BoxBytes;
+            int type = *(int*)b;
+            double x = *(float*)(b + 4), y = *(float*)(b + 8), w = *(float*)(b + 12), h = *(float*)(b + 16);
+            double f0 = double.MaxValue, f1 = double.MinValue, u0 = double.MaxValue, u1 = double.MinValue;
+            for (int k = 0; k < 4; k++)
+            {
+                double px = -(x + (k == 1 || k == 2 ? w : 0)) * sx, py = -(y + (k >= 2 ? h : 0)) * sy;
+                double rx = angle == 0 ? px : px * cos - py * sin, ry = angle == 0 ? py : px * sin + py * cos;
+                f0 = Math.Min(f0, rx); f1 = Math.Max(f1, rx);
+                u0 = Math.Min(u0, ry); u1 = Math.Max(u1, ry);
+            }
+            if (sb.Length > 0) sb.Append('+');
+            sb.Append(CultureInfo.InvariantCulture, $"{type}:{(long)f0}:{(long)u0}:{(long)f1}:{(long)u1}");
+        }
+        return sb.ToString();
+    }
+
+    // One entity: x:y:face:action_frames:hitstop:flags:scale_x:scale_y:angle:throw_range:
+    // push_back:push_bottom:push_front:push_top;boxes. Boxes are type:back:bottom:front:top in game
+    // units, relative to the entity's origin and facing (front > 0 = ahead of it), joined by '+',
+    // or '=' when equal to this key's previous record. Type 0 = hurt, 1 = hit, others as the game
+    // has them. Flags (hex): 1 hit active, 2 pushbox active, 4 counter-hit state, 8 strike invulnerable,
+    // 10 throw invulnerable, 20 wake-up, 40 cinematic, 80 airborne, 100 landed a hit.
+    // withPush = false for attached entities, which the overlay this is ported from never asks for one.
+    private static unsafe string? BoxRecord(byte* e, string key, bool withPush, bool keepEmpty, bool? activeOf = null)
+    {
+        if (e == null || !Readable((IntPtr)e, ObjSize)) return keepEmpty ? "" : null;
+        int x = *(int*)(e + 0x3B0), y = *(int*)(e + 0x3B4), face = *(int*)(e + 0x3AC);
+        int sx = *(int*)(e + 0x3CC), sy = *(int*)(e + 0x3D0), angle = *(int*)(e + 0x3BC);
+        var boxes = BoxList(e, sx, sy, angle);
+        _lastBoxes.TryGetValue(key, out var last);
+        if (boxes.Length == 0 && !keepEmpty)
+        {
+            _lastBoxes[key] = "";
+            return null;
+        }
+        _lastBoxes[key] = boxes;
+        uint st0 = *(uint*)(e + 0x398), st1 = *(uint*)(e + 0x39C), st2 = *(uint*)(e + 0x3A0), st3 = *(uint*)(e + 0x1B0);
+        bool cine = (st3 & 0x4000000) != 0, isPlayer = *(byte*)(e + 0x20) != 0;
+        bool active = activeOf ?? (cine || _isActive(e, (byte)(isPlayer ? 0 : 1)) != 0);
+        int flags = (active ? 1 : 0) | (withPush && _pushboxActive(e) != 0 ? 2 : 0) | ((st0 & 0x100) != 0 ? 4 : 0)
+                    | ((st1 & 0x10) != 0 || (st1 & 0x40) != 0 || *(int*)(e + 0x1220) > 0 ? 8 : 0)
+                    | ((st1 & 0x20) != 0 || (st1 & 0x40) != 0 || *(int*)(e + 0x1218) > 0 ? 0x10 : 0)
+                    | ((st1 & 0x40) != 0 ? 0x20 : 0) | (cine ? 0x40 : 0) | ((st0 & 1) != 0 ? 0x80 : 0) | ((st2 & 0x20) != 0 ? 0x100 : 0);
+        int pb = 0, pt = 0, pf = 0, pu = 0;
+        if (withPush)
+        {
+            int l = 0, t = 0, r = 0, b = 0;
+            _getPushbox(e, &l, &t, &r, &b);
+            pb = face == 0 ? l - x : x - r;
+            pf = face == 0 ? r - x : x - l;
+            pt = Math.Min(t, b) - y;
+            pu = Math.Max(t, b) - y;
+        }
+        return string.Create(CultureInfo.InvariantCulture,
+            $"{x}:{y}:{face}:{*(int*)(e + 0x1CC)}:{*(int*)(e + 0x288)}:{flags:x}:{sx}:{sy}:{angle}:{*(int*)(e + 0x7A8)}:{pb}:{pt}:{pf}:{pu};{(boxes.Length > 0 && boxes == last ? "=" : boxes)}");
+    }
+
+    // A player's or object's entities attached to it are drawn with the parent's hit-active state.
+    private static unsafe void Attached(byte* e, string key, System.Text.StringBuilder sb)
+    {
+        if (!Readable((IntPtr)e, ObjSize)) return;
+        bool active = (*(uint*)(e + 0x1B0) & 0x4000000) != 0 || _isActive(e, (byte)(*(byte*)(e + 0x20) != 0 ? 0 : 1)) != 0;
+        var a = *(byte**)(e + 0x320);
+        for (int k = 0; k < MaxAttached && a != null; k++)
+        {
+            var name = $"{key}a{k}";
+            var rec = BoxRecord(a, name, false, false, active);
+            if (rec is not null)
+            {
+                if (sb.Length > 0) sb.Append('|');
+                sb.Append(name).Append('~').Append(rec);
+            }
+            if (!Readable((IntPtr)a, ObjSize)) break;
+            a = *(byte**)(a + 0x320);
+        }
+    }
+
+    // Active non-player entities as key~record joined by '|', key = pool name (o5), or attachedNN.
+    private static unsafe string ObjectBoxes(BattleObjectManager* om)
+    {
+        var sb = new System.Text.StringBuilder();
+        var ents = (long*)((byte*)om + 0xC80);
+        int n = *(int*)((byte*)om + 0x910);
+        if (n < 0 || n > 107) n = 0;
+        for (int i = 0; i < n; i++)
+        {
+            long q = ents[i];
+            if (q == 0 || q == (long)om->PlayerP1 || q == (long)om->PlayerP2) continue;
+            if (!_refName.TryGetValue(q, out var key)) key = $"x{i}";
+            var rec = BoxRecord((byte*)q, key, true, false);
+            if (rec is not null)
+            {
+                if (sb.Length > 0) sb.Append('|');
+                sb.Append(key).Append('~').Append(rec);
+            }
+            Attached((byte*)q, key, sb);
+        }
+        if (om->PlayerP1 != null) Attached(om->PlayerP1, "P1", sb);
+        if (om->PlayerP2 != null) Attached(om->PlayerP2, "P2", sb);
         return sb.ToString();
     }
 
@@ -304,6 +466,7 @@ public static class Main
             _lastRound = round;
             var line = string.Create(CultureInfo.InvariantCulture, $"{Stopwatch.GetTimestamp()},{Stopwatch.Frequency},{_calls},{dt:F5},{round},{frame},{_p1},{_p2},{Player(om->PlayerP1)},{Player(om->PlayerP2)},{Sprite(om->PlayerP1)},{Sprite(om->PlayerP2)},{Objects(om)},{HitBy(om->PlayerP1)},{HitBy(om->PlayerP2)}");
             if (LogRefs) line += $",{Refs(om->PlayerP1, PlayerScan)},{Refs(om->PlayerP2, PlayerScan)}";
+            if (BoxesOn) line += $",{BoxRecord(om->PlayerP1, "P1", true, true)},{BoxRecord(om->PlayerP2, "P2", true, true)},{ObjectBoxes(om)}";
             _out!.WriteLine(line);
             _rows++;
         }
@@ -396,6 +559,22 @@ public static class Main
         _getGameMode = Marshal.GetDelegateForFunctionPointer<GetGameModeFunc>(mode);
         unsafe
         {
+            if (LogBoxes)
+            {
+                // Read-only game functions, called from the battle hook on the game thread.
+                var active = Hooking.SigScan("40 53 48 83 EC 20 F6 81 70 07 00 00 01 48 8B D9 74 1D F7 81 B0 01");
+                var pushActive = Hooking.SigScan("40 53 48 83 EC 20 48 8B C1 48 8B D9 33 C9 38 48 20 48 0F 44 C1");
+                var getPush = Hooking.SigScan("99 48 8B CB 2B C2 D1 F8 44");   // inside the function, as in strivehitboxes
+                Debug.Log(LogLevel.Default, $"[InputLogger] boxes: IsActive={active:X} PushboxActive={pushActive:X} GetPushbox={getPush:X}");
+                if (active != 0 && pushActive != 0 && getPush != 0)
+                {
+                    _isActive = (delegate* unmanaged<byte*, byte, int>)active;
+                    _pushboxActive = (delegate* unmanaged<byte*, byte>)pushActive;
+                    _getPushbox = (delegate* unmanaged<byte*, int*, int*, int*, int*, void>)(getPush - 0x5B);
+                    _boxFuncsFound = true;
+                }
+                else Debug.Log(LogLevel.Warning, "[InputLogger] a box signature was not found; boxes not logged");
+            }
             // The delegates handed to native code must stay referenced for the
             // life of the hook, or the GC frees them and the game crashes.
             IntPtr orig = 0;
