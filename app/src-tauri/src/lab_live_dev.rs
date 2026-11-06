@@ -160,6 +160,7 @@ struct Watch {
     sources: Arc<Mutex<Vec<String>>>,
     positions: Arc<Mutex<Vec<i64>>>,
     upload_events: Arc<AtomicU64>,
+    encoding: Arc<std::sync::atomic::AtomicBool>,
     file_id: Arc<Mutex<Option<String>>>,
     job_id: Arc<Mutex<Option<String>>>,
 }
@@ -182,6 +183,9 @@ impl Watch {
             }
             if let Some(p) = payload["position"].as_i64() {
                 w.positions.lock().unwrap().push(p);
+            }
+            if stage == "transcode" && payload["line"].as_str() == Some("Encoding") {
+                w.encoding.store(true, Ordering::SeqCst);
             }
             if stage == "upload" {
                 w.upload_events.fetch_add(1, Ordering::SeqCst);
@@ -483,6 +487,8 @@ fn lab_dev_2_run() {
 
 /// One real video through the app's whole path, its 720p copy included. Each run pays for an AI summary, so
 /// a marker in the work folder refuses a second one: delete it by hand only with a new approval.
+/// With LAB_DEV_REQUIRE_COPY=1 the video must go up as a stream copy, keeping its frame rate: anything else
+/// stops before the charge.
 #[test]
 #[ignore]
 fn lab_dev_real_clip() {
@@ -491,15 +497,32 @@ fn lab_dev_real_clip() {
     std::fs::create_dir_all(work_dir()).unwrap();
     let marker = work_dir().join("real_clip_started");
     assert!(!marker.exists(), "this already ran: it spends real money, see {}", marker.display());
+    let require_copy = std::env::var("LAB_DEV_REQUIRE_COPY").as_deref() == Ok("1");
     let auth = lab_auth::auth().unwrap();
     run(async {
         let mut c = Checks::default();
+        if require_copy {
+            let info = probe(&crate::ffmpeg_bin().expect("ffmpeg"), Path::new(&video)).await.expect("probe");
+            let size = std::fs::metadata(&video).unwrap().len();
+            println!("  the app's probe: height={} seconds={} bytes={}", info.height, info.seconds, size);
+            assert!(!needs_encode(info, size), "the app would re-encode this video");
+        }
         sign_in(&auth).await;
         let before = quota_now(&auth).await;
         std::fs::write(&marker, "").unwrap();
         let w = Watch::default();
         let t0 = Instant::now();
-        let out = start_run(&w, REPLAY, video, false).await.unwrap();
+        let h = start_run(&w, REPLAY, video, false);
+        let mut stopped = false;
+        while !h.inner().is_finished() {
+            if require_copy && !stopped && w.encoding.load(Ordering::SeqCst) {
+                println!("  the app is re-encoding: cancelled before the charge");
+                let _ = cancel_lab_analysis_remote(REPLAY.to_string());
+                stopped = true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let out = h.await.unwrap();
         timings(&w, t0.elapsed().as_secs_f64());
         let job_id = w.job_id.lock().unwrap().clone();
         if let Some(j) = job_id {

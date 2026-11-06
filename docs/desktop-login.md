@@ -224,8 +224,8 @@ For the server agent (not desktop work). The first group is needed before produc
 - **Turn analysis on in production** after the fixes below, with `/status` answering 200.
 - **Fail a run that isn't a match.** No HUD or no openers should end `failed`, given back, with no AI summary (see "Open on the server side").
 - **Stop paying for withheld AI summaries.** Fix the fact check and prompt, or switch the summary off until then. The code is `lang_summary.check_answer`, in replanal.
-- **The fact check misreads Slayer's moves (2026-11-05, 10:12 set on dev, `8a51971`):** both languages were withheld after their repair call, and all 16 errors were `move_not_in_facts` for `214P`. `NOTATION_RE` in `lang_summary.py` stops at the `/` of the facts' own `214P/K~H`, so that notation can't pass even when quoted exactly.
-- **Timing on the same run:** 2,386 s on the service for 612 s of video (3.90x: hud 1,081 s, detect 76 s, moves 1,136 s, summary 85 s). A 15-minute match at that ratio takes about 3,510 s against `OPENERS_TIMEOUT_S` 3600.
+- **Real run on `55b7721` (2026-11-06, the 10:12 set at 59.94 fps, dev):** the summary passed the fact check in both languages (Italian after its repair call); on `8a51971` both were withheld over `214P/K~H`. All 87 openers of the earlier 30 fps run came back within 0.07 s with the same move. The job took 2,372 s for 612 s of video (3.87x; 3.90x on 2026-11-05), so a 15-minute match takes about 3,490 s against `OPENERS_TIMEOUT_S` 4500.
+- **Facts label a whole video with one pair of characters:** in that set `rounds`, `players` and the round lines say Unika vs Slayer for the May vs Happy Chaos rounds too, and the totals mix both. Only `character_segments` has it right; the AI summary noticed and said so.
 - **Check long matches against `OPENERS_TIMEOUT_S`.** Runs took about 3.7x the length of a 90 s clip, against about 1.2x for a 12.8-minute video. At 3.7x, a 15-minute match would hit the 30-minute limit.
 - **Confirm a 500 MB upload through production:** nginx `client_max_body_size` and read timeout, and `UPLOAD_MAX_SIZE_MB`.
 - **Set the dev test account to 0 free and 0 credits** (asked in project.fgc #36, not answered), so `lab_dev_7` can test `quota_exhausted`. Then reset it.
@@ -545,7 +545,7 @@ cd app/src-tauri
 LAB_LIVE_DEV=1 cargo test --lib lab_dev_0 -- --ignored --nocapture --test-threads=1   # one step at a time, 0 to 8
 ```
 
-`lab_dev_real_clip` (with `LAB_DEV_CLIP=<video>`) is one whole video through the app's path, signing in and out by itself. Each run pays for an AI summary, so a marker in the work folder refuses a second one.
+`lab_dev_real_clip` (with `LAB_DEV_CLIP=<video>`) is one whole video through the app's path, signing in and out by itself. Each run pays for an AI summary, so a marker in the work folder refuses a second one. `LAB_DEV_REQUIRE_COPY=1` stops before the charge if the app would re-encode the video, so its frame rate reaches the server.
 
 They run the shipped code (`run_remote` is `run_lab_analysis_remote` without its window), with the app's own environment
 variables pointed at dev, a data folder in the temp dir and the credential-store service `SpaghettiLabLiveDevTest`. Only the
