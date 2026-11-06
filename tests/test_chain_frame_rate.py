@@ -1,5 +1,6 @@
 """The chain's frame readers must return the frame the pipeline read, at any source rate and through dropped frames. Short synthetic
 clips whose frames carry their own number, with rates far enough from 60 that a few seconds show the drift a long 59.94 video would."""
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -55,7 +56,7 @@ CASES = [("60", None), ("59.94", None), ("59.6", None), ("30", None), ("29.97", 
 
 @pytest.mark.parametrize("rate,hole", CASES)
 def test_every_reader_returns_the_pipelines_frame(tmp_path, rate, hole):
-    if not Path(vc.FFMPEG).exists():
+    if not (Path(vc.FFMPEG).exists() or shutil.which(vc.FFMPEG)):
         pytest.skip("no ffmpeg")
     video = tmp_path / "clip.mp4"
     frames = 1000
@@ -74,7 +75,7 @@ def test_every_reader_returns_the_pipelines_frame(tmp_path, rate, hole):
 
 
 def test_repeated_source_frames_keep_the_count(tmp_path):
-    if not Path(vc.FFMPEG).exists():
+    if not (Path(vc.FFMPEG).exists() or shutil.which(vc.FFMPEG)):
         pytest.skip("no ffmpeg")
     video = tmp_path / "clip.mp4"
     _clip(video, 100, "30")
